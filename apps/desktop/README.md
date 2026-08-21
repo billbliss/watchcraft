@@ -1,8 +1,8 @@
 # Watchcraft desktop app
 
-The Electron shell will live here. It will host the shared web renderer and own
-local media selection, persistent media mappings, collection downloads, atomic
-updates, and the restricted media protocol.
+A future desktop shell will live here after the web reader proves the catalog
+boundary. Tauri and Electron remain under evaluation. The shell will host the
+shared web renderer and own local media selection, persistent media mappings,
+collection downloads, atomic updates, and the restricted media protocol.
 
-Only the preload bridge exposes platform capabilities to the renderer.
-
+Only a narrow platform adapter will expose desktop capabilities to the renderer.

@@ -19,10 +19,10 @@ The working Python application has been preserved in `authoring/prototype/` as
 the behavioral baseline. The next migration step is to extract its generated UI
 into React + TypeScript while keeping the Python authoring pipeline intact.
 
-The intended runtime is:
+The runtime is being introduced in stages:
 
 - a React/Vite web application for the portable reader;
-- an Electron desktop shell for local files, downloads, and durable local state;
+- a later desktop shell for local files, downloads, and durable local state;
 - Python command-line authoring tools;
 - JSON collection packages validated by `packages/catalog-schema`;
 - SQLite only for device-specific state such as media locations and download
@@ -44,3 +44,22 @@ python -m unittest -v
 The prototype commands are intentionally retained during the migration so the
 new reader can be compared with the existing behavior.
 
+## Web reader
+
+The first wrapper-free reader milestone lives in `apps/web`. Its default fixture
+contains catalog metadata but no copyrighted media:
+
+```sh
+npm install --prefer-offline --no-audit --no-fund
+npm run dev
+```
+
+To use a live catalog, keep the Python catalog server running and pass its
+manifest URL to the web reader:
+
+```text
+http://127.0.0.1:5173/?catalog=http://127.0.0.1:8765/Video%20Catalog/collection.json
+```
+
+The query parameter is an adapter setting, not catalog content. The React reader
+only uses the shared `CatalogRepository` contract.

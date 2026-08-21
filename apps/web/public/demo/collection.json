@@ -1,0 +1,89 @@
+{
+  "schema_version": 2,
+  "collection_id": "watchcraft-demo",
+  "title": "Example Collection",
+  "description": "A small catalog fixture for developing the Watchcraft reader.",
+  "topic_scope": "collection",
+  "root": {
+    "type": "group",
+    "group_id": "root",
+    "title": "Example Collection",
+    "children": [
+      {
+        "type": "group",
+        "group_id": "group-foundations",
+        "title": "Foundations",
+        "children": [
+          { "type": "video", "item_id": "video-demo-light" },
+          { "type": "video", "item_id": "video-demo-layers" }
+        ]
+      }
+    ]
+  },
+  "topics": {
+    "topic-shaping-light": {
+      "topic_id": "topic-shaping-light",
+      "canonical_key": "shaping light",
+      "label": "Shaping light",
+      "aliases": [],
+      "video_count": 1,
+      "family_ids": ["family-tonal-work"],
+      "related_topic_ids": ["topic-layer-masks"]
+    },
+    "topic-layer-masks": {
+      "topic_id": "topic-layer-masks",
+      "canonical_key": "layer masks",
+      "label": "Layer masks",
+      "aliases": [],
+      "video_count": 2,
+      "family_ids": ["family-tonal-work"],
+      "related_topic_ids": ["topic-shaping-light"]
+    }
+  },
+  "topic_families": {
+    "family-tonal-work": {
+      "family_id": "family-tonal-work",
+      "canonical_key": "tonal work",
+      "label": "Tonal work",
+      "description": "Techniques for controlling light and tone.",
+      "topic_ids": ["topic-shaping-light", "topic-layer-masks"],
+      "video_count": 2
+    }
+  },
+  "items": {
+    "video-demo-light": {
+      "item_id": "video-demo-light",
+      "title": "Shaping light with local adjustments",
+      "media": [{ "type": "local-file", "relative_path": "demo/media/light.mp4" }],
+      "transcript": {},
+      "analysis": { "path": "analysis/light.analysis.json", "schema_version": 2, "model": "fixture" },
+      "summary": "A demonstration of building depth by separating broad tonal moves from precise local adjustments.",
+      "date": { "display": "2024 (example)" },
+      "locations": [{ "name": "Studio demonstration" }],
+      "topic_ids": ["topic-shaping-light", "topic-layer-masks"],
+      "family_ids": ["family-tonal-work"],
+      "topic_sections": {
+        "topic-shaping-light": [0, 2],
+        "topic-layer-masks": [1]
+      },
+      "chapter_count": 3
+    },
+    "video-demo-layers": {
+      "item_id": "video-demo-layers",
+      "title": "Layer-mask fundamentals",
+      "media": [{ "type": "local-file", "relative_path": "demo/media/layers.mp4" }],
+      "transcript": {},
+      "analysis": { "path": "analysis/layers.analysis.json", "schema_version": 2, "model": "fixture" },
+      "summary": "A compact introduction to constructing and refining masks without leaving visible transitions.",
+      "date": { "display": "2024 (example)" },
+      "locations": [],
+      "topic_ids": ["topic-layer-masks"],
+      "family_ids": ["family-tonal-work"],
+      "topic_sections": { "topic-layer-masks": [0, 1] },
+      "chapter_count": 2
+    }
+  },
+  "stats": { "video_count": 2, "topic_count": 2, "topic_family_count": 1 },
+  "revision": 1,
+  "content_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+}

@@ -1,0 +1,30 @@
+{
+  "schema_version": 2,
+  "video": "demo/media/light.mp4",
+  "title": "Shaping light with local adjustments",
+  "summary": "A demonstration of building depth by separating broad tonal moves from precise local adjustments.",
+  "topics": ["Shaping light", "Layer masks"],
+  "sections": [
+    {
+      "start": "00:00:00.000",
+      "end": "00:04:31.000",
+      "title": "Reading the existing light",
+      "concepts": ["Shaping light"],
+      "description": "Identify the direction and hierarchy of the light before making local changes."
+    },
+    {
+      "start": "00:04:31.000",
+      "end": "00:11:08.000",
+      "title": "Building reusable masks",
+      "concepts": ["Layer masks"],
+      "description": "Separate the adjustment from its mask so the tonal decision remains editable."
+    },
+    {
+      "start": "00:11:08.000",
+      "end": "00:17:40.000",
+      "title": "Refining depth and emphasis",
+      "concepts": ["Shaping light"],
+      "description": "Use restrained local contrast to lead attention without making the treatment obvious."
+    }
+  ]
+}

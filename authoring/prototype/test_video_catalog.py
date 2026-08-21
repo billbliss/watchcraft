@@ -438,11 +438,18 @@ class FormattingTests(unittest.TestCase):
             try:
                 request = urllib.request.Request(
                     f"http://127.0.0.1:{server.server_port}/Lesson.mp4",
-                    headers={"Range": "bytes=2-5"},
+                    headers={
+                        "Range": "bytes=2-5",
+                        "Origin": "http://127.0.0.1:5173",
+                    },
                 )
                 with urllib.request.urlopen(request) as response:
                     self.assertEqual(response.status, 206)
                     self.assertEqual(response.headers["Content-Range"], "bytes 2-5/10")
+                    self.assertEqual(
+                        response.headers["Access-Control-Allow-Origin"],
+                        "http://127.0.0.1:5173",
+                    )
                     self.assertEqual(response.read(), b"2345")
                 with urllib.request.urlopen(
                     f"http://127.0.0.1:{server.server_port}/favicon.ico"

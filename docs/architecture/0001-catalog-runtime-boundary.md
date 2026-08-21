@@ -24,8 +24,8 @@ The React renderer talks to a small `CatalogRepository` interface rather than to
 the filesystem, SQLite, or HTTP directly. Runtime adapters provide the data:
 
 - the web adapter fetches published collection packages over HTTP;
-- the Electron adapter installs packages, records local media mappings, and
-  exposes media through a restricted application protocol;
+- the future desktop adapter installs packages, records local media mappings,
+  and exposes media through a restricted application protocol;
 - a future mobile adapter can implement the same repository contract.
 
 Portable collection packages contain stable IDs, relative resource paths, and no
@@ -45,9 +45,9 @@ package metadata. Updates download to a temporary location, validate against the
 schema and hash, and replace the installed revision atomically. Existing data
 remains usable while an update is in progress or fails.
 
-Electron owns privileged operations in its main process. The renderer uses
-context isolation and a narrow preload API; it receives neither raw Node.js access
-nor arbitrary filesystem access.
+The selected desktop shell will own privileged operations and expose only a
+narrow adapter API. The renderer receives neither raw system access nor arbitrary
+filesystem access.
 
 ## Consequences
 
@@ -56,4 +56,3 @@ removed after feature parity. Authoring and reader releases may proceed
 independently as long as they honor supported schema versions. Web deployments
 cannot discover arbitrary local files; desktop and future mobile shells supply
 that platform capability without changing the React UI's data model.
-

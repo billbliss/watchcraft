@@ -1,0 +1,17 @@
+{
+  "name": "watchcraft",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace @watchcraft/web",
+    "dev": "npm run dev --workspace @watchcraft/web",
+    "typecheck": "npm run typecheck --workspace @watchcraft/web"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

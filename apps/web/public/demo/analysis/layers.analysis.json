@@ -1,0 +1,23 @@
+{
+  "schema_version": 2,
+  "video": "demo/media/layers.mp4",
+  "title": "Layer-mask fundamentals",
+  "summary": "A compact introduction to constructing and refining masks without leaving visible transitions.",
+  "topics": ["Layer masks"],
+  "sections": [
+    {
+      "start": "00:00:00.000",
+      "end": "00:06:12.000",
+      "title": "Mask structure",
+      "concepts": ["Layer masks"],
+      "description": "Establish the relationship between an adjustment, its mask, and the underlying image."
+    },
+    {
+      "start": "00:06:12.000",
+      "end": "00:13:22.000",
+      "title": "Invisible transitions",
+      "concepts": ["Layer masks"],
+      "description": "Refine mask edges and density until the transition disappears into the scene."
+    }
+  ]
+}

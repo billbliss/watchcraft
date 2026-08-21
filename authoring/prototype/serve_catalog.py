@@ -22,6 +22,29 @@ RANGE_PATTERN = re.compile(r"bytes=(\d*)-(\d*)$")
 class CatalogHandler(BaseHTTPRequestHandler):
     root: Path
 
+    def allowed_origin(self) -> str | None:
+        origin = self.headers.get("Origin")
+        if not origin:
+            return None
+        parsed = urlsplit(origin)
+        if parsed.scheme == "http" and parsed.hostname in {
+            "127.0.0.1",
+            "localhost",
+            "::1",
+        }:
+            return origin
+        return None
+
+    def end_headers(self) -> None:
+        origin = self.allowed_origin()
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Range")
+            self.send_header("Access-Control-Expose-Headers", "Accept-Ranges, Content-Range")
+            self.send_header("Vary", "Origin")
+        super().end_headers()
+
     def log_message(self, format: str, *args: object) -> None:
         if args and str(args[1]) not in {"200", "204", "206"}:
             super().log_message(format, *args)
@@ -117,6 +140,13 @@ class CatalogHandler(BaseHTTPRequestHandler):
 
     def do_HEAD(self) -> None:
         self.serve_file(head_only=True)
+
+    def do_OPTIONS(self) -> None:
+        if not self.allowed_origin():
+            self.send_error(HTTPStatus.FORBIDDEN)
+            return
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self.end_headers()
 
     def do_GET(self) -> None:
         if urlsplit(self.path).path == "/favicon.ico":
