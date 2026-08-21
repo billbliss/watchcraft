@@ -1,0 +1,176 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://watchcraft.dev/schema/collection-v2.json",
+  "title": "Watchcraft Collection",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "collection_id",
+    "title",
+    "topic_scope",
+    "root",
+    "topics",
+    "topic_families",
+    "items",
+    "stats",
+    "revision",
+    "content_hash"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "collection_id": { "$ref": "#/$defs/id" },
+    "title": { "type": "string", "minLength": 1 },
+    "description": { "type": "string" },
+    "publisher": {},
+    "metadata_url": { "type": "string" },
+    "license": {},
+    "source": {},
+    "topic_scope": { "const": "collection" },
+    "topic_normalization": { "type": ["object", "null"] },
+    "root": { "$ref": "#/$defs/group" },
+    "topics": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/topic" }
+    },
+    "topic_families": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/topicFamily" }
+    },
+    "items": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/item" }
+    },
+    "stats": {
+      "type": "object",
+      "required": ["video_count", "topic_count", "topic_family_count"],
+      "properties": {
+        "video_count": { "type": "integer", "minimum": 0 },
+        "topic_count": { "type": "integer", "minimum": 0 },
+        "topic_family_count": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "revision": { "type": "integer", "minimum": 1 },
+    "content_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "id": { "type": "string", "minLength": 1 },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "not": { "pattern": "^(?:/|[A-Za-z]:[\\\\/])" }
+    },
+    "group": {
+      "type": "object",
+      "required": ["type", "group_id", "title", "children"],
+      "properties": {
+        "type": { "const": "group" },
+        "group_id": { "$ref": "#/$defs/id" },
+        "title": { "type": "string" },
+        "children": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "$ref": "#/$defs/group" },
+              { "$ref": "#/$defs/videoRef" }
+            ]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "videoRef": {
+      "type": "object",
+      "required": ["type", "item_id"],
+      "properties": {
+        "type": { "const": "video" },
+        "item_id": { "$ref": "#/$defs/id" }
+      },
+      "additionalProperties": false
+    },
+    "topic": {
+      "type": "object",
+      "required": ["topic_id", "canonical_key", "label", "aliases", "video_count", "family_ids", "related_topic_ids"],
+      "properties": {
+        "topic_id": { "$ref": "#/$defs/id" },
+        "canonical_key": { "type": "string" },
+        "label": { "type": "string", "minLength": 1 },
+        "aliases": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "video_count": { "type": "integer", "minimum": 0 },
+        "family_ids": { "type": "array", "items": { "$ref": "#/$defs/id" }, "uniqueItems": true },
+        "related_topic_ids": { "type": "array", "items": { "$ref": "#/$defs/id" }, "uniqueItems": true }
+      },
+      "additionalProperties": false
+    },
+    "topicFamily": {
+      "type": "object",
+      "required": ["family_id", "canonical_key", "label", "description", "topic_ids", "video_count"],
+      "properties": {
+        "family_id": { "$ref": "#/$defs/id" },
+        "canonical_key": { "type": "string" },
+        "label": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "topic_ids": { "type": "array", "items": { "$ref": "#/$defs/id" }, "uniqueItems": true },
+        "video_count": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "item": {
+      "type": "object",
+      "required": ["item_id", "title", "media", "transcript", "analysis", "summary", "locations", "topic_ids", "family_ids", "topic_sections", "chapter_count"],
+      "properties": {
+        "item_id": { "$ref": "#/$defs/id" },
+        "title": { "type": "string", "minLength": 1 },
+        "media": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["type", "relative_path"],
+            "properties": {
+              "type": { "enum": ["local-file", "url"] },
+              "relative_path": { "$ref": "#/$defs/path" }
+            },
+            "additionalProperties": true
+          }
+        },
+        "transcript": {
+          "type": "object",
+          "properties": {
+            "subtitles": { "$ref": "#/$defs/path" },
+            "text": { "$ref": "#/$defs/path" },
+            "segments": { "$ref": "#/$defs/path" }
+          },
+          "additionalProperties": false
+        },
+        "analysis": {
+          "type": "object",
+          "required": ["path"],
+          "properties": {
+            "path": { "$ref": "#/$defs/path" },
+            "schema_version": { "type": ["integer", "null"] },
+            "model": { "type": ["string", "null"] }
+          },
+          "additionalProperties": false
+        },
+        "summary": { "type": "string" },
+        "date": { "type": ["object", "string", "null"] },
+        "locations": { "type": "array" },
+        "topic_ids": { "type": "array", "items": { "$ref": "#/$defs/id" }, "uniqueItems": true },
+        "family_ids": { "type": "array", "items": { "$ref": "#/$defs/id" }, "uniqueItems": true },
+        "topic_sections": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "type": "integer", "minimum": 0 },
+            "uniqueItems": true
+          }
+        },
+        "chapter_count": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    }
+  }
+}
+

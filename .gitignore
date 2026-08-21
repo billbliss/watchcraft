@@ -1,0 +1,37 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# JavaScript / desktop builds
+node_modules/
+dist/
+out/
+coverage/
+*.log
+
+# Watchcraft-generated and local-only state
+Video Catalog/
+models/
+tmp/
+*.sqlite
+*.sqlite3
+
+# Course media is never source-controlled
+*.mp4
+*.m4v
+*.mov
+*.mkv
+*.avi
+*.webm
+*.mp3
+*.m4a
+*.wav
+
