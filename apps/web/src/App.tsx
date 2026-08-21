@@ -15,6 +15,25 @@ interface AppProps {
   repository: CatalogRepository;
 }
 
+const MIN_SIDEBAR_WIDTH = 270;
+const MAX_SIDEBAR_RATIO = 0.58;
+
+function boundedSidebarWidth(width: number): number {
+  const maximum = Math.max(MIN_SIDEBAR_WIDTH, window.innerWidth * MAX_SIDEBAR_RATIO);
+  return Math.round(Math.min(Math.max(width, MIN_SIDEBAR_WIDTH), maximum));
+}
+
+function defaultSidebarWidth(): number {
+  return boundedSidebarWidth(window.innerWidth / 3);
+}
+
+function initialSidebarWidth(): number {
+  const saved = Number(localStorage.getItem("watchcraftSidebarWidth"));
+  return Number.isFinite(saved) && saved > 0
+    ? boundedSidebarWidth(saved)
+    : defaultSidebarWidth();
+}
+
 function routeVideoId(): string | null {
   const match = window.location.pathname.match(/^\/video\/([^/]+)\/?$/);
   return match ? decodeURIComponent(match[1]) : null;
@@ -100,6 +119,9 @@ export function App({ repository }: AppProps): ReactElement {
   const [topicThreshold, setTopicThreshold] = useState(
     () => Number(localStorage.getItem("watchcraftTopicThreshold")) || 40,
   );
+  const [sidebarWidth, setSidebarWidth] = useState(initialSidebarWidth);
+  const [resizingSidebar, setResizingSidebar] = useState(false);
+  const resizingSidebarRef = useRef(false);
   const [analysis, setAnalysis] = useState<VideoAnalysis | null>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [highlightedTopic, setHighlightedTopic] = useState<string | null>(null);
@@ -229,6 +251,12 @@ export function App({ repository }: AppProps): ReactElement {
     void playerRef.current.play();
   }
 
+  function saveSidebarWidth(width: number): void {
+    const bounded = boundedSidebarWidth(width);
+    setSidebarWidth(bounded);
+    localStorage.setItem("watchcraftSidebarWidth", String(bounded));
+  }
+
   if (loadError) {
     return (
       <main className="status-screen">
@@ -244,7 +272,10 @@ export function App({ repository }: AppProps): ReactElement {
   if (!manifest) return <LoadingScreen />;
 
   return (
-    <main className="app-shell">
+    <main
+      className={`app-shell ${resizingSidebar ? "resizing-sidebar" : ""}`}
+      style={{ gridTemplateColumns: `${sidebarWidth}px 8px minmax(0, 1fr)` }}
+    >
       <aside className="sidebar">
         <header className="sidebar-header">
           <div className="brand-row">
@@ -339,6 +370,50 @@ export function App({ repository }: AppProps): ReactElement {
           )}
         </nav>
       </aside>
+
+      <div
+        aria-label="Resize catalog and video panels"
+        aria-orientation="vertical"
+        aria-valuemax={Math.round(window.innerWidth * MAX_SIDEBAR_RATIO)}
+        aria-valuemin={MIN_SIDEBAR_WIDTH}
+        aria-valuenow={sidebarWidth}
+        aria-valuetext={`${Math.round((sidebarWidth / window.innerWidth) * 100)}% of window width`}
+        className="sidebar-splitter"
+        onDoubleClick={() => saveSidebarWidth(defaultSidebarWidth())}
+        onKeyDown={(event) => {
+          if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+          event.preventDefault();
+          saveSidebarWidth(sidebarWidth + (event.key === "ArrowLeft" ? -24 : 24));
+        }}
+        onPointerCancel={(event) => {
+          resizingSidebarRef.current = false;
+          setResizingSidebar(false);
+          if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+            event.currentTarget.releasePointerCapture(event.pointerId);
+          }
+        }}
+        onPointerDown={(event) => {
+          event.preventDefault();
+          event.currentTarget.setPointerCapture(event.pointerId);
+          resizingSidebarRef.current = true;
+          setResizingSidebar(true);
+        }}
+        onPointerMove={(event) => {
+          if (resizingSidebarRef.current) {
+            setSidebarWidth(boundedSidebarWidth(event.clientX));
+          }
+        }}
+        onPointerUp={(event) => {
+          if (!resizingSidebarRef.current) return;
+          saveSidebarWidth(event.clientX);
+          resizingSidebarRef.current = false;
+          setResizingSidebar(false);
+          event.currentTarget.releasePointerCapture(event.pointerId);
+        }}
+        role="separator"
+        tabIndex={0}
+        title="Drag to resize; double-click to reset"
+      />
 
       <section className="detail">
         {selectedItem ? (
