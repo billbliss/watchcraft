@@ -17,6 +17,9 @@ interface AppProps {
 
 const MIN_SIDEBAR_WIDTH = 270;
 const MAX_SIDEBAR_RATIO = 0.58;
+const MIN_PLAYER_HEIGHT = 190;
+const MIN_DETAILS_HEIGHT = 190;
+const SPLITTER_SIZE = 8;
 
 function boundedSidebarWidth(width: number): number {
   const maximum = Math.max(MIN_SIDEBAR_WIDTH, window.innerWidth * MAX_SIDEBAR_RATIO);
@@ -32,6 +35,25 @@ function initialSidebarWidth(): number {
   return Number.isFinite(saved) && saved > 0
     ? boundedSidebarWidth(saved)
     : defaultSidebarWidth();
+}
+
+function boundedPlayerHeight(height: number): number {
+  const maximum = Math.max(
+    MIN_PLAYER_HEIGHT,
+    window.innerHeight - MIN_DETAILS_HEIGHT - SPLITTER_SIZE,
+  );
+  return Math.round(Math.min(Math.max(height, MIN_PLAYER_HEIGHT), maximum));
+}
+
+function defaultPlayerHeight(): number {
+  return boundedPlayerHeight(window.innerHeight * 0.52);
+}
+
+function initialPlayerHeight(): number {
+  const saved = Number(localStorage.getItem("watchcraftPlayerHeight"));
+  return Number.isFinite(saved) && saved > 0
+    ? boundedPlayerHeight(saved)
+    : defaultPlayerHeight();
 }
 
 function routeVideoId(): string | null {
@@ -122,6 +144,9 @@ export function App({ repository }: AppProps): ReactElement {
   const [sidebarWidth, setSidebarWidth] = useState(initialSidebarWidth);
   const [resizingSidebar, setResizingSidebar] = useState(false);
   const resizingSidebarRef = useRef(false);
+  const [playerHeight, setPlayerHeight] = useState(initialPlayerHeight);
+  const [resizingPlayer, setResizingPlayer] = useState(false);
+  const resizingPlayerRef = useRef(false);
   const [analysis, setAnalysis] = useState<VideoAnalysis | null>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [highlightedTopic, setHighlightedTopic] = useState<string | null>(null);
@@ -255,6 +280,12 @@ export function App({ repository }: AppProps): ReactElement {
     const bounded = boundedSidebarWidth(width);
     setSidebarWidth(bounded);
     localStorage.setItem("watchcraftSidebarWidth", String(bounded));
+  }
+
+  function savePlayerHeight(height: number): void {
+    const bounded = boundedPlayerHeight(height);
+    setPlayerHeight(bounded);
+    localStorage.setItem("watchcraftPlayerHeight", String(bounded));
   }
 
   if (loadError) {
@@ -415,7 +446,10 @@ export function App({ repository }: AppProps): ReactElement {
         title="Drag to resize; double-click to reset"
       />
 
-      <section className="detail">
+      <section
+        className={`detail ${resizingPlayer ? "resizing-player" : ""}`}
+        style={{ gridTemplateRows: `${playerHeight}px 8px minmax(190px, 1fr)` }}
+      >
         {selectedItem ? (
           <>
             <div className="player-pane">
@@ -434,6 +468,52 @@ export function App({ repository }: AppProps): ReactElement {
                 )}
               </div>
             </div>
+            <div
+              aria-label="Resize video and details panels"
+              aria-orientation="horizontal"
+              aria-valuemax={Math.max(
+                MIN_PLAYER_HEIGHT,
+                window.innerHeight - MIN_DETAILS_HEIGHT - SPLITTER_SIZE,
+              )}
+              aria-valuemin={MIN_PLAYER_HEIGHT}
+              aria-valuenow={playerHeight}
+              aria-valuetext={`${Math.round((playerHeight / window.innerHeight) * 100)}% of window height`}
+              className="player-splitter"
+              onDoubleClick={() => savePlayerHeight(defaultPlayerHeight())}
+              onKeyDown={(event) => {
+                if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+                event.preventDefault();
+                savePlayerHeight(playerHeight + (event.key === "ArrowUp" ? -24 : 24));
+              }}
+              onPointerCancel={(event) => {
+                resizingPlayerRef.current = false;
+                setResizingPlayer(false);
+                if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                  event.currentTarget.releasePointerCapture(event.pointerId);
+                }
+              }}
+              onPointerDown={(event) => {
+                event.preventDefault();
+                event.currentTarget.setPointerCapture(event.pointerId);
+                resizingPlayerRef.current = true;
+                setResizingPlayer(true);
+              }}
+              onPointerMove={(event) => {
+                if (resizingPlayerRef.current) {
+                  setPlayerHeight(boundedPlayerHeight(event.clientY));
+                }
+              }}
+              onPointerUp={(event) => {
+                if (!resizingPlayerRef.current) return;
+                savePlayerHeight(event.clientY);
+                resizingPlayerRef.current = false;
+                setResizingPlayer(false);
+                event.currentTarget.releasePointerCapture(event.pointerId);
+              }}
+              role="separator"
+              tabIndex={0}
+              title="Drag to resize; double-click to reset"
+            />
             <div className="detail-scroll">
               <div className="detail-inner">
                 <div className="detail-columns">
