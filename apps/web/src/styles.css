@@ -240,12 +240,16 @@ h3 { margin: 27px 0 11px; font-size: 1rem; }
 .related-box > strong { display: block; margin-bottom: 8px; color: var(--muted); font-size: .7rem; letter-spacing: .05em; text-transform: uppercase; }
 .related-box p { margin: 0; color: var(--muted); font-size: .8rem; line-height: 1.45; }
 .chapters-column h3 { margin-top: 0; }
-.timeline { display: grid; gap: 8px; }
+.timeline {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px 11px;
+}
 .chapter {
   display: grid;
+  grid-column: 1 / -1;
   width: 100%;
-  grid-template-columns: 72px minmax(0, 1fr);
-  gap: 11px;
+  grid-template-columns: subgrid;
   padding: 13px 14px;
   border: 1px solid var(--line);
   border-radius: 10px;
