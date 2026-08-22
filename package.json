@@ -9,6 +9,7 @@
   "scripts": {
     "build": "npm run build --workspace @watchcraft/web",
     "dev": "npm run dev --workspace @watchcraft/web",
+    "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspace @watchcraft/web"
   },
   "engines": {

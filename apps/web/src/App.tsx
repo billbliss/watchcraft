@@ -1,6 +1,7 @@
 import {
   clockSeconds,
   displayClock,
+  inferTimelineClockMode,
   orderedItems,
   type CatalogItem,
   type CatalogRepository,
@@ -149,6 +150,7 @@ export function App({ repository }: AppProps): ReactElement {
   const resizingPlayerRef = useRef(false);
   const [analysis, setAnalysis] = useState<VideoAnalysis | null>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [mediaDuration, setMediaDuration] = useState<number | null>(null);
   const [highlightedTopic, setHighlightedTopic] = useState<string | null>(null);
   const playerRef = useRef<HTMLVideoElement>(null);
 
@@ -218,6 +220,7 @@ export function App({ repository }: AppProps): ReactElement {
     let current = true;
     setAnalysis(null);
     setAnalysisError(null);
+    setMediaDuration(null);
     setHighlightedTopic(null);
     repository
       .loadAnalysis(selectedItem)
@@ -259,6 +262,10 @@ export function App({ repository }: AppProps): ReactElement {
         .filter((topic): topic is Topic => Boolean(topic))
     : [];
   const mediaUrl = selectedItem ? repository.mediaUrl(selectedItem) : null;
+  const timelineClockMode = useMemo(
+    () => inferTimelineClockMode(analysis?.sections ?? [], mediaDuration),
+    [analysis, mediaDuration],
+  );
   const hasFilters = Boolean(query.trim() || selectedTopics.size);
 
   function toggleTopic(topicId: string): void {
@@ -271,9 +278,14 @@ export function App({ repository }: AppProps): ReactElement {
   }
 
   function seek(start: string): void {
-    if (!playerRef.current) return;
-    playerRef.current.currentTime = clockSeconds(start);
-    void playerRef.current.play();
+    const player = playerRef.current;
+    if (!player) return;
+    const applySeek = () => {
+      player.currentTime = clockSeconds(start, timelineClockMode);
+      void player.play();
+    };
+    if (player.readyState >= HTMLMediaElement.HAVE_METADATA) applySeek();
+    else player.addEventListener("loadedmetadata", applySeek, { once: true });
   }
 
   function saveSidebarWidth(width: number): void {
@@ -458,6 +470,10 @@ export function App({ repository }: AppProps): ReactElement {
                   <video
                     controls
                     key={mediaUrl}
+                    onLoadedMetadata={(event) => {
+                      const duration = event.currentTarget.duration;
+                      setMediaDuration(Number.isFinite(duration) ? duration : null);
+                    }}
                     playsInline
                     preload="metadata"
                     ref={playerRef}
@@ -593,7 +609,7 @@ export function App({ repository }: AppProps): ReactElement {
                             onClick={() => seek(section.start)}
                             type="button"
                           >
-                            <time>{displayClock(section.start)}</time>
+                            <time>{displayClock(section.start, timelineClockMode)}</time>
                             <span>
                               <strong>{section.title}</strong>
                               <small>{section.description}</small>

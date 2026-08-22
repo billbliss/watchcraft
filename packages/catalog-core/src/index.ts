@@ -132,16 +132,56 @@ export function orderedItems(manifest: CollectionManifest): OrderedCatalogItem[]
   return result;
 }
 
-export function clockSeconds(value: string): number {
-  const parts = value.split(":").map(Number);
-  if (parts.length !== 3 || parts.some(Number.isNaN)) return 0;
+export type TimelineClockMode = "hours-minutes-seconds" | "minutes-seconds-fraction";
+
+export function clockSeconds(
+  value: string,
+  mode: TimelineClockMode = "hours-minutes-seconds",
+): number {
+  const rawParts = value.split(":");
+  const parts = rawParts.map(Number);
+  if ((parts.length !== 2 && parts.length !== 3) || parts.some(Number.isNaN)) {
+    return 0;
+  }
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  if (mode === "minutes-seconds-fraction") {
+    const fractionDigits = rawParts[2].replace(/\D/g, "");
+    const fraction = fractionDigits ? Number(`0.${fractionDigits}`) : 0;
+    return parts[0] * 60 + parts[1] + fraction;
+  }
   return parts[0] * 3600 + parts[1] * 60 + parts[2];
 }
 
-export function displayClock(value: string): string {
-  const seconds = Math.max(0, Math.floor(clockSeconds(value)));
+export function inferTimelineClockMode(
+  sections: AnalysisSection[],
+  durationSeconds: number | null,
+): TimelineClockMode {
+  if (!Number.isFinite(durationSeconds) || !durationSeconds || sections.length === 0) {
+    return "hours-minutes-seconds";
+  }
+  const finalClock = [...sections].reverse().find((section) => section.end)?.end;
+  if (!finalClock || finalClock.split(":").length !== 3) {
+    return "hours-minutes-seconds";
+  }
+  const standardEnd = clockSeconds(finalClock, "hours-minutes-seconds");
+  const shiftedEnd = clockSeconds(finalClock, "minutes-seconds-fraction");
+  const standardDistance = Math.abs(durationSeconds - standardEnd);
+  const shiftedDistance = Math.abs(durationSeconds - shiftedEnd);
+  const meaningfulDifference = Math.max(2, durationSeconds * 0.01);
+  return shiftedDistance + meaningfulDifference < standardDistance
+    ? "minutes-seconds-fraction"
+    : "hours-minutes-seconds";
+}
+
+export function displayClock(
+  value: string,
+  mode: TimelineClockMode = "hours-minutes-seconds",
+): string {
+  const seconds = Math.max(0, Math.floor(clockSeconds(value, mode)));
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
   const remainder = seconds % 60;
-  return `${hours}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
+  return hours
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`
+    : `${minutes}:${String(remainder).padStart(2, "0")}`;
 }
