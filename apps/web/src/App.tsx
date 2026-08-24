@@ -542,13 +542,15 @@ export function App({ repository }: AppProps): ReactElement {
                         <span key={location}>{location}</span>
                       ))}
                     </div>
-                    <button
-                      className="primary-action"
-                      onClick={() => void repository.openInDefaultPlayer(selectedItem)}
-                      type="button"
-                    >
-                      Open in default player
-                    </button>
+                    {repository.canOpenInDefaultPlayer !== false && (
+                      <button
+                        className="primary-action"
+                        onClick={() => void repository.openInDefaultPlayer(selectedItem)}
+                        type="button"
+                      >
+                        Open in default player
+                      </button>
+                    )}
                     <p className="summary">{selectedItem.summary}</p>
                     <h3>Topics</h3>
                     <div className="topic-pills">

@@ -1,0 +1,50 @@
+.desktop-root {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.desktop-welcome {
+  display: grid;
+  min-height: 100%;
+  padding: 36px;
+  place-items: center;
+  background: var(--bg);
+}
+
+.desktop-welcome-card {
+  width: min(560px, 100%);
+  padding: 34px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--panel);
+}
+
+.desktop-welcome-card h1 {
+  margin: 8px 0 12px;
+}
+
+.desktop-welcome-card p {
+  margin: 0 0 22px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.desktop-change-library {
+  position: fixed;
+  z-index: 20;
+  right: 16px;
+  bottom: 14px;
+  padding: 7px 10px;
+  border: 1px solid #3c5745;
+  border-radius: 8px;
+  color: #cce5d2;
+  background: #18271de8;
+  cursor: pointer;
+  font-size: .72rem;
+}
+
+.desktop-change-library:hover {
+  border-color: #70aa81;
+  background: #213a29;
+}

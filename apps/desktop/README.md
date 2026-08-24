@@ -1,8 +1,23 @@
-# Watchcraft desktop app
+# Watchcraft desktop experiment
 
-A future desktop shell will live here after the web reader proves the catalog
-boundary. Tauri and Electron remain under evaluation. The shell will host the
-shared web renderer and own local media selection, persistent media mappings,
-collection downloads, atomic updates, and the restricted media protocol.
+This workspace is a deliberately narrow Tauri 2 shell around the shared
+Watchcraft React reader. It is isolated on the `experiment/tauri` branch.
 
-Only a narrow platform adapter will expose desktop capabilities to the renderer.
+The desktop boundary exposes only:
+
+- a native directory picker;
+- read-only asset-protocol access to a directory the user selected;
+- persisted restoration of that user-approved scope.
+
+It does not expose arbitrary filesystem commands, writing, shell execution,
+downloads, SQLite, authoring, or custom Rust commands.
+
+## Run
+
+```sh
+npm run desktop:dev
+```
+
+Choose the root of a local video library. The adapter recognizes both a
+portable `collection.json` at that root and the current
+`Video Catalog/collection.json` layout.

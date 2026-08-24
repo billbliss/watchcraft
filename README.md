@@ -22,7 +22,8 @@ into React + TypeScript while keeping the Python authoring pipeline intact.
 The runtime is being introduced in stages:
 
 - a React/Vite web application for the portable reader;
-- a later desktop shell for local files, downloads, and durable local state;
+- an experimental Tauri 2 shell for narrowly scoped local-library access;
+- later desktop work for collection downloads and durable local state;
 - Python command-line authoring tools;
 - JSON collection packages validated by `packages/catalog-schema`;
 - SQLite only for device-specific state such as media locations and download
@@ -63,3 +64,22 @@ http://127.0.0.1:5173/?catalog=http://127.0.0.1:8765/Video%20Catalog/collection.
 
 The query parameter is an adapter setting, not catalog content. The React reader
 only uses the shared `CatalogRepository` contract.
+
+## Tauri desktop experiment
+
+The `experiment/tauri` branch contains a deliberately small native shell in
+`apps/desktop`. It reuses the React reader and adds only a native folder picker,
+read-only asset-protocol access to the chosen library, and restoration of that
+user-approved scope. The renderer has no arbitrary filesystem, shell, write,
+download, SQLite, or authoring capability.
+
+After installing the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/):
+
+```sh
+npm install --prefer-offline --no-audit --no-fund
+npm run desktop:dev
+```
+
+The first launch asks for the root folder of a local video library. The adapter
+recognizes both `collection.json` at that root and the current
+`Video Catalog/collection.json` layout.

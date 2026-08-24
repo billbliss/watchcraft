@@ -103,6 +103,7 @@ export interface VideoAnalysis {
 
 export interface CatalogRepository {
   readonly manifestLocation: string;
+  readonly canOpenInDefaultPlayer?: boolean;
   loadCollection(): Promise<CollectionManifest>;
   loadAnalysis(item: CatalogItem): Promise<VideoAnalysis>;
   mediaUrl(item: CatalogItem): string | null;
