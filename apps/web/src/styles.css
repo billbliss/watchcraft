@@ -1,8 +1,15 @@
+@import "@fontsource-variable/inter/wght.css";
+
 :root {
   color: #edf3ee;
   background: #0c100e;
-  font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: "Inter Variable", Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-kerning: normal;
+  font-optical-sizing: auto;
   font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
   --bg: #0c100e;
   --panel: #141a16;
   --panel-2: #1a221d;
@@ -17,6 +24,7 @@ html, body, #root { height: 100%; }
 body { margin: 0; overflow: hidden; }
 button, input { font: inherit; }
 button { color: inherit; }
+button, input[type="search"] { -webkit-appearance: none; appearance: none; }
 
 .app-shell {
   display: grid;
