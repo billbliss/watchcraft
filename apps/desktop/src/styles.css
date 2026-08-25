@@ -30,6 +30,11 @@
   line-height: 1.6;
 }
 
+.desktop-welcome-card .desktop-library-error {
+  color: #ffb4a8;
+  font-size: 0.9rem;
+}
+
 .desktop-change-library {
   position: fixed;
   z-index: 20;

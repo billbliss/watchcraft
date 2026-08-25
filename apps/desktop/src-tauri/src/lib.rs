@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::RwLock;
 use tauri::{Manager, Runtime};
+use tauri_plugin_dialog::DialogExt;
 
 const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "webm", "mkv"];
 const MAX_STREAM_CHUNK: u64 = 2 * 1024 * 1024;
@@ -91,6 +92,27 @@ fn ensure_library_scope_inner<R: Runtime>(
         .write()
         .map_err(|_| "The selected library state is unavailable.")? = Some(canonical_root);
     Ok(true)
+}
+
+fn approve_selected_library_root<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    root: &Path,
+) -> Result<PathBuf, String> {
+    if !root.is_dir() {
+        return Err("The selected library folder is unavailable.".into());
+    }
+    app.asset_protocol_scope()
+        .allow_directory(root, true)
+        .map_err(|error| format!("Could not allow library access: {error}"))?;
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve the selected library: {error}"))?;
+    let approved_root = app.state::<ApprovedLibraryRoot>();
+    *approved_root
+        .0
+        .write()
+        .map_err(|_| "The selected library state is unavailable.")? = Some(canonical_root.clone());
+    Ok(canonical_root)
 }
 
 #[cfg(target_os = "macos")]
@@ -336,6 +358,34 @@ fn ensure_library_scope(app: tauri::AppHandle, path: String) -> Result<bool, Str
 }
 
 #[tauri::command]
+async fn choose_library_folder(
+    app: tauri::AppHandle,
+    default_path: Option<String>,
+    needs_parent: bool,
+) -> Result<Option<String>, String> {
+    let title = if needs_parent {
+        "Choose the folder containing Video Catalog"
+    } else {
+        "Choose a Watchcraft library folder"
+    };
+    let mut picker = app.dialog().file().set_title(title);
+    if let Some(default_path) = default_path {
+        let path = PathBuf::from(default_path);
+        if path.is_dir() {
+            picker = picker.set_directory(path);
+        }
+    }
+    let Some(selected) = picker.blocking_pick_folder() else {
+        return Ok(None);
+    };
+    let selected = selected
+        .into_path()
+        .map_err(|error| format!("Could not read the selected folder: {error}"))?;
+    approve_selected_library_root(&app, &selected)?;
+    Ok(Some(selected.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
 fn playback_smoke_library_root(app: tauri::AppHandle) -> Result<Option<String>, String> {
     let root = match std::env::var("WATCHCRAFT_PLAYBACK_SMOKE_LIBRARY") {
         Ok(root) => PathBuf::from(root),
@@ -344,7 +394,9 @@ fn playback_smoke_library_root(app: tauri::AppHandle) -> Result<Option<String>, 
     let root_string = root
         .to_str()
         .ok_or("Playback smoke library has no valid root directory")?;
-    if !ensure_library_scope_inner(&app, root_string)? {
+    if std::env::var("WATCHCRAFT_PLAYBACK_SMOKE_PRIME").as_deref() == Ok("1") {
+        approve_selected_library_root(&app, &root)?;
+    } else if !ensure_library_scope_inner(&app, root_string)? {
         return Err("Playback smoke library access was not restored.".into());
     }
     Ok(Some(root_string.to_owned()))
@@ -376,14 +428,6 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_persisted_scope::init())
         .plugin(tauri_plugin_dialog::init())
-        .setup(|app| {
-            if std::env::var("WATCHCRAFT_PLAYBACK_SMOKE_PRIME").as_deref() == Ok("1") {
-                let root = std::env::var("WATCHCRAFT_PLAYBACK_SMOKE_LIBRARY")
-                    .map_err(|_| "Playback smoke library is missing")?;
-                app.asset_protocol_scope().allow_directory(root, true)?;
-            }
-            Ok(())
-        })
         .register_asynchronous_uri_scheme_protocol("stream", |context, request, responder| {
             let response =
                 video_stream_response(context.app_handle(), request).unwrap_or_else(|error| {
@@ -399,6 +443,7 @@ pub fn run() {
             open_video,
             default_video_player,
             ensure_library_scope,
+            choose_library_folder,
             playback_smoke_library_root,
             finish_playback_smoke
         ])

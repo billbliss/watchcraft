@@ -1,4 +1,3 @@
-import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useState, type ReactElement } from "react";
 import { App } from "../../web/src/App";
@@ -25,6 +24,7 @@ export function DesktopApp({ initialLibraryRoot }: DesktopAppProps = {}): ReactE
       ? isCatalogMetadataFolder(libraryRoot) ? "needs-parent" : "checking"
       : "needs-access",
   );
+  const [libraryError, setLibraryError] = useState<string | null>(null);
   const repository = useMemo(
     () => libraryRoot && scopeStatus === "ready"
       ? new DesktopCatalogRepository(libraryRoot)
@@ -45,10 +45,14 @@ export function DesktopApp({ initialLibraryRoot }: DesktopAppProps = {}): ReactE
     setScopeStatus("checking");
     void invoke<boolean>("ensure_library_scope", { path: libraryRoot })
       .then((allowed) => {
-        if (current) setScopeStatus(allowed ? "ready" : "needs-access");
+        if (!current) return;
+        setScopeStatus(allowed ? "ready" : "needs-access");
+        setLibraryError(allowed ? null : "Watchcraft could not restore access to that folder.");
       })
-      .catch(() => {
-        if (current) setScopeStatus("needs-access");
+      .catch((error: unknown) => {
+        if (!current) return;
+        setScopeStatus("needs-access");
+        setLibraryError(error instanceof Error ? error.message : String(error));
       });
     return () => {
       current = false;
@@ -57,25 +61,22 @@ export function DesktopApp({ initialLibraryRoot }: DesktopAppProps = {}): ReactE
 
   async function chooseLibrary(): Promise<void> {
     const needsParent = Boolean(libraryRoot && isCatalogMetadataFolder(libraryRoot));
-    const selected = await open({
-      directory: true,
-      multiple: false,
-      title: needsParent
-        ? "Choose the folder containing Video Catalog"
-        : "Choose a Watchcraft library folder",
-      ...(libraryRoot ? {
-        defaultPath: needsParent ? parentLocalPath(libraryRoot) : libraryRoot,
-      } : {}),
-    });
-    if (typeof selected !== "string") return;
-    localStorage.setItem(LIBRARY_ROOT_KEY, selected);
-    setLibraryRoot(selected);
-    if (isCatalogMetadataFolder(selected)) {
-      setScopeStatus("needs-parent");
-      return;
+    setLibraryError(null);
+    try {
+      const selected = await invoke<string | null>("choose_library_folder", {
+        defaultPath: libraryRoot
+          ? needsParent ? parentLocalPath(libraryRoot) : libraryRoot
+          : null,
+        needsParent,
+      });
+      if (!selected) return;
+      localStorage.setItem(LIBRARY_ROOT_KEY, selected);
+      setLibraryRoot(selected);
+      setScopeStatus(isCatalogMetadataFolder(selected) ? "needs-parent" : "ready");
+    } catch (error: unknown) {
+      setScopeStatus("needs-access");
+      setLibraryError(error instanceof Error ? error.message : String(error));
     }
-    const allowed = await invoke<boolean>("ensure_library_scope", { path: selected });
-    setScopeStatus(allowed ? "ready" : "needs-access");
   }
 
   if (!repository) {
@@ -87,6 +88,7 @@ export function DesktopApp({ initialLibraryRoot }: DesktopAppProps = {}): ReactE
         <section className="desktop-welcome-card">
           <span className="eyebrow">Watchcraft</span>
           <h1>Learn a craft by watching</h1>
+          {libraryError ? <p className="desktop-library-error" role="alert">{libraryError}</p> : null}
           {scopeStatus === "checking" ? (
             <p>Restoring read-only access to your library…</p>
           ) : scopeStatus === "needs-parent" ? (
