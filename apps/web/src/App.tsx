@@ -641,48 +641,52 @@ export function App({ repository }: AppProps): ReactElement {
         {selectedItem ? (
           <>
             <div className="player-pane">
-              <div className="player-shell">
-                {mediaUrl ? (
-                  <>
-                    <video
-                      controls
-                      key={mediaUrl}
-                      onCanPlay={() => {
-                        autoRetriedMediaRef.current.delete(mediaUrl);
-                        setMediaErrorUrl(null);
-                      }}
-                      onError={(event) => handleMediaError(mediaUrl, event.currentTarget)}
-                      onLoadedMetadata={(event) => {
-                        const duration = event.currentTarget.duration;
-                        setMediaDuration(Number.isFinite(duration) ? duration : null);
-                      }}
-                      playsInline
-                      preload="metadata"
-                      ref={playerRef}
-                      src={mediaUrl}
-                    />
-                    {mediaErrorUrl === mediaUrl && (
-                      <div className="media-error" role="status">
-                        <span>Embedded playback failed.</span>
-                        <button onClick={retryMedia} type="button">Retry</button>
-                      </div>
-                    )}
-                    {repository.canOpenInDefaultPlayer !== false && (
-                      <button
-                        className="action primary player-action"
-                        disabled={openStatus === "opening"}
-                        onClick={() => void openInDefaultPlayer()}
-                        type="button"
-                      >
-                        {openStatus === "opening" && "Opening…"}
-                        {openStatus === "opened" && "Opened in default player"}
-                        {openStatus === "error" && "Could not open video"}
-                        {openStatus === "idle" && "Open in default player"}
-                      </button>
-                    )}
-                  </>
-                ) : (
-                  <div className="no-media">No playable media source is available.</div>
+              <div className="player-stack">
+                <div className="player-shell">
+                  {mediaUrl ? (
+                    <>
+                      <video
+                        controls
+                        key={mediaUrl}
+                        onCanPlay={() => {
+                          autoRetriedMediaRef.current.delete(mediaUrl);
+                          setMediaErrorUrl(null);
+                        }}
+                        onError={(event) => handleMediaError(mediaUrl, event.currentTarget)}
+                        onLoadedMetadata={(event) => {
+                          const duration = event.currentTarget.duration;
+                          setMediaDuration(Number.isFinite(duration) ? duration : null);
+                        }}
+                        playsInline
+                        preload="metadata"
+                        ref={playerRef}
+                        src={mediaUrl}
+                      />
+                      {mediaErrorUrl === mediaUrl && (
+                        <div className="media-error" role="status">
+                          <span>Embedded playback failed.</span>
+                          <button onClick={retryMedia} type="button">Retry</button>
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="no-media">No playable media source is available.</div>
+                  )}
+                </div>
+                {repository.canOpenInDefaultPlayer !== false && (
+                  <div className="player-footer">
+                    <button
+                      className="action primary player-action"
+                      disabled={openStatus === "opening"}
+                      onClick={() => void openInDefaultPlayer()}
+                      type="button"
+                    >
+                      {openStatus === "opening" && "Opening…"}
+                      {openStatus === "opened" && "Opened in default player"}
+                      {openStatus === "error" && "Could not open video"}
+                      {openStatus === "idle" && "Open in default player"}
+                    </button>
+                  </div>
                 )}
               </div>
             </div>
