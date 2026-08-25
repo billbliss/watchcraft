@@ -8,10 +8,14 @@ use std::error::Error;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::RwLock;
 use tauri::{Manager, Runtime};
 
 const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "webm", "mkv"];
 const MAX_STREAM_CHUNK: u64 = 2 * 1024 * 1024;
+
+#[derive(Default)]
+struct ApprovedLibraryRoot(RwLock<Option<PathBuf>>);
 
 fn is_video_path(path: &Path) -> bool {
     path.extension()
@@ -34,6 +38,10 @@ fn video_content_type(path: &Path) -> &'static str {
     }
 }
 
+fn is_within_approved_root(root: &Path, path: &Path) -> bool {
+    path.starts_with(root)
+}
+
 fn validated_video_path<R: Runtime>(
     app: &tauri::AppHandle<R>,
     requested_path: &str,
@@ -42,10 +50,21 @@ fn validated_video_path<R: Runtime>(
     if !path.is_file() || !is_video_path(&path) {
         return Err("The requested path is not a supported video file.".into());
     }
-    if !app.asset_protocol_scope().is_allowed(&path) {
+    let canonical_path = path
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve the requested video: {error}"))?;
+    let approved_root = app.state::<ApprovedLibraryRoot>();
+    let approved_root = approved_root
+        .0
+        .read()
+        .map_err(|_| "The selected library state is unavailable.")?;
+    let Some(root) = approved_root.as_ref() else {
+        return Err("No library folder has been approved for this session.".into());
+    };
+    if !is_within_approved_root(root, &canonical_path) {
         return Err("The requested video is outside the selected library.".into());
     }
-    Ok(path)
+    Ok(canonical_path)
 }
 
 fn ensure_library_scope_inner<R: Runtime>(
@@ -63,6 +82,14 @@ fn ensure_library_scope_inner<R: Runtime>(
     scope
         .allow_directory(&root, true)
         .map_err(|error| format!("Could not restore library access: {error}"))?;
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve the selected library: {error}"))?;
+    let approved_root = app.state::<ApprovedLibraryRoot>();
+    *approved_root
+        .0
+        .write()
+        .map_err(|_| "The selected library state is unavailable.")? = Some(canonical_root);
     Ok(true)
 }
 
@@ -198,18 +225,18 @@ fn video_stream_response<R: Runtime>(
 ) -> Result<Response<Vec<u8>>, Box<dyn Error>> {
     let decoded_path =
         percent_decode_str(request.uri().path().trim_start_matches('/')).decode_utf8()?;
-    let path = PathBuf::from(decoded_path.as_ref());
-
-    if !path.is_file() || !is_video_path(&path) {
-        return Ok(Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(Vec::new())?);
-    }
-    if !app.asset_protocol_scope().is_allowed(&path) {
-        return Ok(Response::builder()
-            .status(StatusCode::FORBIDDEN)
-            .body(Vec::new())?);
-    }
+    let path = match validated_video_path(app, decoded_path.as_ref()) {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!(
+                "Watchcraft stream rejected {}: {error}",
+                decoded_path.as_ref()
+            );
+            return Ok(Response::builder()
+                .status(StatusCode::FORBIDDEN)
+                .body(Vec::new())?);
+        }
+    };
     if request.method() != Method::GET && request.method() != Method::HEAD {
         return Ok(Response::builder()
             .status(StatusCode::METHOD_NOT_ALLOWED)
@@ -345,6 +372,7 @@ fn finish_playback_smoke(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(ApprovedLibraryRoot::default())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_persisted_scope::init())
         .plugin(tauri_plugin_dialog::init())
@@ -358,7 +386,8 @@ pub fn run() {
         })
         .register_asynchronous_uri_scheme_protocol("stream", |context, request, responder| {
             let response =
-                video_stream_response(context.app_handle(), request).unwrap_or_else(|_| {
+                video_stream_response(context.app_handle(), request).unwrap_or_else(|error| {
+                    eprintln!("Watchcraft stream failed: {error}");
                     Response::builder()
                         .status(StatusCode::INTERNAL_SERVER_ERROR)
                         .body(Vec::new())
@@ -379,7 +408,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_video_path, video_content_type};
+    use super::{is_video_path, is_within_approved_root, video_content_type};
     use std::path::Path;
 
     #[cfg(target_os = "macos")]
@@ -395,6 +424,23 @@ mod tests {
     fn rejects_non_video_paths() {
         assert!(!is_video_path(Path::new("lesson.txt")));
         assert!(!is_video_path(Path::new("lesson")));
+    }
+
+    #[test]
+    fn confines_video_paths_to_the_approved_library() {
+        let root = Path::new("/library/courses");
+        assert!(is_within_approved_root(
+            root,
+            Path::new("/library/courses/lesson/video.mp4")
+        ));
+        assert!(!is_within_approved_root(
+            root,
+            Path::new("/library/courses-private/video.mp4")
+        ));
+        assert!(!is_within_approved_root(
+            root,
+            Path::new("/library/other/video.mp4")
+        ));
     }
 
     #[test]
