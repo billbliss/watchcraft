@@ -681,7 +681,7 @@ export function App({ repository }: AppProps): ReactElement {
                           setMediaDuration(Number.isFinite(duration) ? duration : null);
                         }}
                         playsInline
-                        preload="metadata"
+                        preload="auto"
                         ref={playerRef}
                         src={mediaUrl}
                       />

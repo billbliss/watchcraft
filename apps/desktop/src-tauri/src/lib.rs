@@ -43,6 +43,22 @@ fn is_within_approved_root(root: &Path, path: &Path) -> bool {
     path.starts_with(root)
 }
 
+fn is_catalog_metadata_root(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.eq_ignore_ascii_case("Video Catalog"))
+        .unwrap_or(false)
+        && path.join("collection.json").is_file()
+}
+
+fn effective_library_root(path: &Path) -> PathBuf {
+    if is_catalog_metadata_root(path) {
+        path.parent().unwrap_or(path).to_path_buf()
+    } else {
+        path.to_path_buf()
+    }
+}
+
 fn validated_video_path<R: Runtime>(
     app: &tauri::AppHandle<R>,
     requested_path: &str,
@@ -80,17 +96,7 @@ fn ensure_library_scope_inner<R: Runtime>(
     if !scope.is_allowed(&root) {
         return Ok(false);
     }
-    scope
-        .allow_directory(&root, true)
-        .map_err(|error| format!("Could not restore library access: {error}"))?;
-    let canonical_root = root
-        .canonicalize()
-        .map_err(|error| format!("Could not resolve the selected library: {error}"))?;
-    let approved_root = app.state::<ApprovedLibraryRoot>();
-    *approved_root
-        .0
-        .write()
-        .map_err(|_| "The selected library state is unavailable.")? = Some(canonical_root);
+    approve_selected_library_root(app, &root)?;
     Ok(true)
 }
 
@@ -101,10 +107,11 @@ fn approve_selected_library_root<R: Runtime>(
     if !root.is_dir() {
         return Err("The selected library folder is unavailable.".into());
     }
+    let effective_root = effective_library_root(root);
     app.asset_protocol_scope()
-        .allow_directory(root, true)
+        .allow_directory(&effective_root, true)
         .map_err(|error| format!("Could not allow library access: {error}"))?;
-    let canonical_root = root
+    let canonical_root = effective_root
         .canonicalize()
         .map_err(|error| format!("Could not resolve the selected library: {error}"))?;
     let approved_root = app.state::<ApprovedLibraryRoot>();
@@ -361,14 +368,11 @@ fn ensure_library_scope(app: tauri::AppHandle, path: String) -> Result<bool, Str
 async fn choose_library_folder(
     app: tauri::AppHandle,
     default_path: Option<String>,
-    needs_parent: bool,
 ) -> Result<Option<String>, String> {
-    let title = if needs_parent {
-        "Choose the folder containing Video Catalog"
-    } else {
-        "Choose a Watchcraft library folder"
-    };
-    let mut picker = app.dialog().file().set_title(title);
+    let mut picker = app
+        .dialog()
+        .file()
+        .set_title("Choose a Watchcraft collection folder or its parent");
     if let Some(default_path) = default_path {
         let path = PathBuf::from(default_path);
         if path.is_dir() {
@@ -453,7 +457,8 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_video_path, is_within_approved_root, video_content_type};
+    use super::{effective_library_root, is_video_path, is_within_approved_root, video_content_type};
+    use std::fs;
     use std::path::Path;
 
     #[cfg(target_os = "macos")]
@@ -486,6 +491,19 @@ mod tests {
             root,
             Path::new("/library/other/video.mp4")
         ));
+    }
+
+    #[test]
+    fn treats_a_video_catalog_selection_as_its_media_parent() {
+        let root = std::env::temp_dir().join(format!(
+            "watchcraft-catalog-root-test-{}",
+            std::process::id()
+        ));
+        let catalog = root.join("Video Catalog");
+        fs::create_dir_all(&catalog).unwrap();
+        fs::write(catalog.join("collection.json"), "{}").unwrap();
+        assert_eq!(effective_library_root(&catalog), root);
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

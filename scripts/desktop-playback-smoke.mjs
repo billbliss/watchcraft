@@ -162,12 +162,12 @@ try {
 
   const metadataFolder = join(libraryRoot, "Video Catalog");
   const metadataGuard = runDesktopPhase(
-    "reject metadata folder as the media library root",
+    "play when the metadata folder is selected",
     true,
     metadataFolder,
   );
   if (metadataGuard.status !== 0 || !metadataGuard.passed) {
-    throw new Error("Metadata-folder selection did not request its parent folder");
+    throw new Error("Native playback failed when the metadata folder was selected");
   }
 
   process.stdout.write("\nWatchcraft playback smoke passed.\n");

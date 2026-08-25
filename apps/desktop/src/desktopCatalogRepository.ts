@@ -37,6 +37,10 @@ export function isCatalogMetadataFolder(path: string): boolean {
   return localPathName(path).toLocaleLowerCase() === "video catalog";
 }
 
+export function mediaRootForLibrary(path: string): string {
+  return isCatalogMetadataFolder(path) ? parentLocalPath(path) : path;
+}
+
 async function fetchLocalJson<T>(path: string): Promise<T> {
   const response = await fetch(convertFileSrc(path), { cache: "no-store" });
   if (!response.ok) {
@@ -48,10 +52,12 @@ async function fetchLocalJson<T>(path: string): Promise<T> {
 export class DesktopCatalogRepository implements CatalogRepository {
   readonly canOpenInDefaultPlayer = true;
   readonly libraryRoot: string;
+  readonly mediaRoot: string;
   private catalogRoot: string | null = null;
 
   constructor(libraryRoot: string) {
     this.libraryRoot = libraryRoot;
+    this.mediaRoot = mediaRootForLibrary(libraryRoot);
   }
 
   get manifestLocation(): string {
@@ -93,7 +99,7 @@ export class DesktopCatalogRepository implements CatalogRepository {
     const media = item.media[0];
     if (!media) return null;
     if (media.type === "url" && media.url) return media.url;
-    return convertFileSrc(joinLocalPath(this.libraryRoot, media.relative_path), "stream");
+    return convertFileSrc(joinLocalPath(this.mediaRoot, media.relative_path), "stream");
   }
 
   async defaultPlayerName(item: CatalogItem): Promise<string | null> {
@@ -101,7 +107,7 @@ export class DesktopCatalogRepository implements CatalogRepository {
     if (!media) return null;
     try {
       return await invoke<string | null>("default_video_player", {
-        path: joinLocalPath(this.libraryRoot, media.relative_path),
+        path: joinLocalPath(this.mediaRoot, media.relative_path),
       });
     } catch {
       return null;
@@ -113,7 +119,7 @@ export class DesktopCatalogRepository implements CatalogRepository {
     if (!media) return false;
     try {
       return await invoke<boolean>("open_video", {
-        path: joinLocalPath(this.libraryRoot, media.relative_path),
+        path: joinLocalPath(this.mediaRoot, media.relative_path),
       });
     } catch {
       return false;

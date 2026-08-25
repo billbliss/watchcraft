@@ -4,6 +4,7 @@ import {
   isCatalogMetadataFolder,
   joinLocalPath,
   localPathName,
+  mediaRootForLibrary,
   parentLocalPath,
 } from "./desktopCatalogRepository.ts";
 
@@ -38,4 +39,10 @@ test("recognizes a selected catalog metadata folder on both path styles", () => 
   assert.equal(isCatalogMetadataFolder("/Courses/Video Catalog"), true);
   assert.equal(isCatalogMetadataFolder("C:\\Courses\\video catalog\\"), true);
   assert.equal(isCatalogMetadataFolder("/Courses"), false);
+});
+
+test("uses the collection parent as the media root when Video Catalog is selected", () => {
+  assert.equal(mediaRootForLibrary("/Courses/Video Catalog"), "/Courses");
+  assert.equal(mediaRootForLibrary("C:\\Courses\\Video Catalog"), "C:\\Courses");
+  assert.equal(mediaRootForLibrary("/Courses"), "/Courses");
 });
