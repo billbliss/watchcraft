@@ -3956,6 +3956,9 @@ dependencies = [
 name = "watchcraft"
 version = "0.1.0"
 dependencies = [
+ "http",
+ "http-range",
+ "percent-encoding",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

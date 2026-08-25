@@ -16,6 +16,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
+http = "1"
+http-range = "0.1"
+percent-encoding = "2"
 tauri = { version = "2.11.3", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
