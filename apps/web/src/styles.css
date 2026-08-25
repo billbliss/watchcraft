@@ -325,8 +325,8 @@ button { color: inherit; }
   background: #101512eb;
 }
 .media-error button { padding: 3px 7px; border: 1px solid #4d6556; border-radius: 6px; color: inherit; background: #24352a; cursor: pointer; }
-.player-footer { display: flex; min-height: 38px; padding: 3px 7px; align-items: center; justify-content: flex-end; border-top: 1px solid #26332b; background: #0d120f; }
-.player-action { min-height: 30px; margin: 0; padding: 5px 9px; border-radius: 7px; font-size: .76rem; }
+.player-footer { display: flex; min-height: 32px; padding: 2px 6px; align-items: center; justify-content: flex-end; border-top: 1px solid #26332b; background: #0d120f; }
+.player-action { min-height: 26px; margin: 0; padding: 3px 8px; border-radius: 6px; font-size: .72rem; }
 .no-media { color: var(--muted); }
 .player-splitter {
   position: relative;

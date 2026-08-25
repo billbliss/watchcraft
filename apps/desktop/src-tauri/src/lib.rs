@@ -34,6 +34,146 @@ fn video_content_type(path: &Path) -> &'static str {
     }
 }
 
+fn validated_video_path<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    requested_path: &str,
+) -> Result<PathBuf, String> {
+    let path = PathBuf::from(requested_path);
+    if !path.is_file() || !is_video_path(&path) {
+        return Err("The requested path is not a supported video file.".into());
+    }
+    if !app.asset_protocol_scope().is_allowed(&path) {
+        return Err("The requested video is outside the selected library.".into());
+    }
+    Ok(path)
+}
+
+#[cfg(target_os = "macos")]
+fn default_player_name(path: &Path) -> Option<String> {
+    let content_type = match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("mov") => "com.apple.quicktime-movie",
+        Some("webm") => "org.webmproject.webm",
+        Some("mkv") => "org.matroska.mkv",
+        _ => "public.mpeg-4",
+    };
+    let output = Command::new("/usr/bin/defaults")
+        .args([
+            "read",
+            "com.apple.LaunchServices/com.apple.launchservices.secure",
+            "LSHandlers",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let preferences = String::from_utf8(output.stdout).ok()?;
+    let bundle_identifier = macos_handler_for_content_type(&preferences, content_type)?;
+    Some(macos_application_name(bundle_identifier))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_handler_for_content_type<'a>(preferences: &'a str, content_type: &str) -> Option<&'a str> {
+    let marker = format!("LSHandlerContentType = \"{content_type}\";");
+    preferences.split("},").find_map(|entry| {
+        if !entry.contains(&marker) {
+            return None;
+        }
+        entry.lines().rev().find_map(|line| {
+            let line = line.trim();
+            line.strip_prefix("LSHandlerRoleAll = ")
+                .or_else(|| line.strip_prefix("LSHandlerRoleViewer = "))
+                .and_then(|value| value.strip_suffix(';'))
+                .map(|value| value.trim_matches('"'))
+        })
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn macos_application_name(bundle_identifier: &str) -> String {
+    match bundle_identifier.to_ascii_lowercase().as_str() {
+        "com.colliderli.iina" => "IINA".into(),
+        "org.videolan.vlc" => "VLC".into(),
+        "com.apple.quicktimeplayerx" => "QuickTime Player".into(),
+        _ => bundle_identifier
+            .rsplit('.')
+            .next()
+            .unwrap_or(bundle_identifier)
+            .replace(['-', '_'], " "),
+    }
+}
+
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+))]
+fn default_player_name(path: &Path) -> Option<String> {
+    let output = Command::new("xdg-mime")
+        .args(["query", "default", video_content_type(path)])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let desktop_id = String::from_utf8(output.stdout).ok()?;
+    let desktop_id = desktop_id.trim().strip_suffix(".desktop")?;
+    desktop_id
+        .rsplit('.')
+        .next()
+        .filter(|name| !name.is_empty())
+        .map(|name| name.replace(['-', '_'], " "))
+}
+
+#[cfg(target_os = "windows")]
+fn default_player_name(path: &Path) -> Option<String> {
+    use std::iter;
+    use std::ptr::{null, null_mut};
+    use windows_sys::Win32::UI::Shell::{AssocQueryStringW, ASSOCF_NONE, ASSOCSTR_FRIENDLYAPPNAME};
+
+    let extension = format!(".{}", path.extension()?.to_str()?);
+    let association: Vec<u16> = extension.encode_utf16().chain(iter::once(0)).collect();
+    let mut length = 0;
+    unsafe {
+        AssocQueryStringW(
+            ASSOCF_NONE,
+            ASSOCSTR_FRIENDLYAPPNAME,
+            association.as_ptr(),
+            null(),
+            null_mut(),
+            &mut length,
+        );
+    }
+    if length <= 1 {
+        return None;
+    }
+
+    let mut buffer = vec![0_u16; length as usize];
+    let result = unsafe {
+        AssocQueryStringW(
+            ASSOCF_NONE,
+            ASSOCSTR_FRIENDLYAPPNAME,
+            association.as_ptr(),
+            null(),
+            buffer.as_mut_ptr(),
+            &mut length,
+        )
+    };
+    if result < 0 || length <= 1 {
+        return None;
+    }
+    String::from_utf16(&buffer[..length as usize - 1]).ok()
+}
+
+#[cfg(any(target_os = "ios", target_os = "android"))]
+fn default_player_name(_path: &Path) -> Option<String> {
+    None
+}
+
 fn video_stream_response<R: Runtime>(
     app: &tauri::AppHandle<R>,
     request: Request<Vec<u8>>,
@@ -115,13 +255,7 @@ fn video_stream_response<R: Runtime>(
 
 #[tauri::command]
 fn open_video(app: tauri::AppHandle, path: String) -> Result<bool, String> {
-    let path = PathBuf::from(path);
-    if !path.is_file() || !is_video_path(&path) {
-        return Err("The requested path is not a supported video file.".into());
-    }
-    if !app.asset_protocol_scope().is_allowed(&path) {
-        return Err("The requested video is outside the selected library.".into());
-    }
+    let path = validated_video_path(&app, &path)?;
 
     #[cfg(target_os = "macos")]
     let mut command = Command::new("open");
@@ -145,6 +279,12 @@ fn open_video(app: tauri::AppHandle, path: String) -> Result<bool, String> {
     }
 }
 
+#[tauri::command]
+fn default_video_player(app: tauri::AppHandle, path: String) -> Result<Option<String>, String> {
+    let path = validated_video_path(&app, &path)?;
+    Ok(default_player_name(&path))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -161,7 +301,7 @@ pub fn run() {
                 });
             responder.respond(response);
         })
-        .invoke_handler(tauri::generate_handler![open_video])
+        .invoke_handler(tauri::generate_handler![open_video, default_video_player])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -170,6 +310,9 @@ pub fn run() {
 mod tests {
     use super::{is_video_path, video_content_type};
     use std::path::Path;
+
+    #[cfg(target_os = "macos")]
+    use super::{macos_application_name, macos_handler_for_content_type};
 
     #[test]
     fn accepts_supported_video_extensions_case_insensitively() {
@@ -191,5 +334,22 @@ mod tests {
             "video/quicktime"
         );
         assert_eq!(video_content_type(Path::new("lesson.webm")), "video/webm");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn reads_the_default_player_from_macos_preferences() {
+        let preferences = r#"(
+            {
+                LSHandlerContentType = "public.mpeg-4";
+                LSHandlerPreferredVersions = {
+                    LSHandlerRoleAll = "-";
+                };
+                LSHandlerRoleAll = "com.colliderli.iina";
+            },
+        )"#;
+        let handler = macos_handler_for_content_type(preferences, "public.mpeg-4");
+        assert_eq!(handler, Some("com.colliderli.iina"));
+        assert_eq!(macos_application_name(handler.unwrap()), "IINA");
     }
 }

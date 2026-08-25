@@ -23,3 +23,6 @@ tauri = { version = "2.11.3", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-persisted-scope = { version = "2", features = ["protocol-asset"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_UI_Shell"] }

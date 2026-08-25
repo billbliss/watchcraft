@@ -191,6 +191,7 @@ export function App({ repository }: AppProps): ReactElement {
   const [mediaDuration, setMediaDuration] = useState<number | null>(null);
   const [highlightedTopic, setHighlightedTopic] = useState<string | null>(null);
   const [openStatus, setOpenStatus] = useState<"idle" | "opening" | "opened" | "error">("idle");
+  const [defaultPlayerName, setDefaultPlayerName] = useState<string | null>(null);
   const [mediaErrorUrl, setMediaErrorUrl] = useState<string | null>(null);
   const autoRetriedMediaRef = useRef(new Set<string>());
   const playerRef = useRef<HTMLVideoElement>(null);
@@ -283,6 +284,18 @@ export function App({ repository }: AppProps): ReactElement {
           setAnalysisError(error instanceof Error ? error.message : String(error));
         }
       });
+    return () => {
+      current = false;
+    };
+  }, [repository, selectedItem]);
+
+  useEffect(() => {
+    let current = true;
+    setDefaultPlayerName(null);
+    if (!selectedItem || !repository.defaultPlayerName) return;
+    repository.defaultPlayerName(selectedItem).then((name) => {
+      if (current) setDefaultPlayerName(name);
+    });
     return () => {
       current = false;
     };
@@ -682,9 +695,13 @@ export function App({ repository }: AppProps): ReactElement {
                       type="button"
                     >
                       {openStatus === "opening" && "Opening…"}
-                      {openStatus === "opened" && "Opened in default player"}
+                      {openStatus === "opened" && (defaultPlayerName
+                        ? `Opened in ${defaultPlayerName}`
+                        : "Opened in default player")}
                       {openStatus === "error" && "Could not open video"}
-                      {openStatus === "idle" && "Open in default player"}
+                      {openStatus === "idle" && (defaultPlayerName
+                        ? `Open in ${defaultPlayerName}`
+                        : "Open in default player")}
                     </button>
                   </div>
                 )}
