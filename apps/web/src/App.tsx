@@ -191,9 +191,9 @@ export function App({ repository }: AppProps): ReactElement {
   const [mediaDuration, setMediaDuration] = useState<number | null>(null);
   const [highlightedTopic, setHighlightedTopic] = useState<string | null>(null);
   const [openStatus, setOpenStatus] = useState<"idle" | "opening" | "opened" | "error">("idle");
-  const [defaultPlayerName, setDefaultPlayerName] = useState<string | null>(null);
+  const [defaultPlayerName, setDefaultPlayerName] = useState<string | null | undefined>(undefined);
   const [mediaErrorUrl, setMediaErrorUrl] = useState<string | null>(null);
-  const autoRetriedMediaRef = useRef(new Set<string>());
+  const mediaRetryCountsRef = useRef(new Map<string, number>());
   const playerRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
@@ -291,11 +291,19 @@ export function App({ repository }: AppProps): ReactElement {
 
   useEffect(() => {
     let current = true;
-    setDefaultPlayerName(null);
-    if (!selectedItem || !repository.defaultPlayerName) return;
-    repository.defaultPlayerName(selectedItem).then((name) => {
+    setDefaultPlayerName(undefined);
+    if (!selectedItem || !repository.defaultPlayerName) {
+      setDefaultPlayerName(null);
+      return;
+    }
+    void (async () => {
+      let name = await repository.defaultPlayerName?.(selectedItem) ?? null;
+      if (!name) {
+        await new Promise((resolve) => window.setTimeout(resolve, 750));
+        name = await repository.defaultPlayerName?.(selectedItem) ?? null;
+      }
       if (current) setDefaultPlayerName(name);
-    });
+    })();
     return () => {
       current = false;
     };
@@ -410,13 +418,15 @@ export function App({ repository }: AppProps): ReactElement {
 
   function handleMediaError(sourceUrl: string, player: HTMLVideoElement): void {
     if (player.error?.code === MediaError.MEDIA_ERR_ABORTED) return;
-    if (!autoRetriedMediaRef.current.has(sourceUrl)) {
-      autoRetriedMediaRef.current.add(sourceUrl);
+    const retryCount = mediaRetryCountsRef.current.get(sourceUrl) ?? 0;
+    const retryDelays = [500, 1_200, 2_500];
+    if (retryCount < retryDelays.length) {
+      mediaRetryCountsRef.current.set(sourceUrl, retryCount + 1);
       window.setTimeout(() => {
         if (playerRef.current !== player) return;
         setMediaErrorUrl(null);
         player.load();
-      }, 700);
+      }, retryDelays[retryCount]);
       return;
     }
     setMediaErrorUrl(sourceUrl);
@@ -662,7 +672,7 @@ export function App({ repository }: AppProps): ReactElement {
                         controls
                         key={mediaUrl}
                         onCanPlay={() => {
-                          autoRetriedMediaRef.current.delete(mediaUrl);
+                          mediaRetryCountsRef.current.delete(mediaUrl);
                           setMediaErrorUrl(null);
                         }}
                         onError={(event) => handleMediaError(mediaUrl, event.currentTarget)}
@@ -701,7 +711,9 @@ export function App({ repository }: AppProps): ReactElement {
                       {openStatus === "error" && "Could not open video"}
                       {openStatus === "idle" && (defaultPlayerName
                         ? `Open in ${defaultPlayerName}`
-                        : "Open in default player")}
+                        : defaultPlayerName === undefined
+                          ? "Open video"
+                          : "Open in default player")}
                     </button>
                   </div>
                 )}
