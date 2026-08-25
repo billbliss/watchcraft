@@ -8,9 +8,17 @@ import {
   type CollectionManifest,
   type OrderedCatalogItem,
   type Topic,
+  type TopicFamily,
   type VideoAnalysis,
 } from "@watchcraft/catalog-core";
-import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactElement,
+} from "react";
 
 interface AppProps {
   repository: CatalogRepository;
@@ -66,6 +74,10 @@ function initialTopics(): Set<string> {
   return new Set(new URLSearchParams(window.location.search).getAll("topic"));
 }
 
+function initialFamilies(): Set<string> {
+  return new Set(new URLSearchParams(window.location.search).getAll("family"));
+}
+
 function dateLabel(item: CatalogItem): string {
   if (typeof item.date === "string") return item.date;
   return item.date?.display ?? "";
@@ -83,6 +95,21 @@ function normalized(value: string): string {
   return value.toLocaleLowerCase().replace(/\s+/g, " ").trim();
 }
 
+function searchGroups(value: string): string[] {
+  const groups: string[] = [];
+  const pattern = /"([^"]+)"|(\S+)/g;
+  for (const match of normalized(value).matchAll(pattern)) {
+    const quoted = match[1];
+    const token = quoted || match[2];
+    if (!token) continue;
+    if (quoted) groups.push(normalized(token));
+    else if (/^\d+(?:\.\d+)?$/.test(token) && groups.length) {
+      groups[groups.length - 1] += ` ${token}`;
+    } else groups.push(token);
+  }
+  return groups;
+}
+
 function itemHaystack(
   ordered: OrderedCatalogItem,
   manifest: CollectionManifest,
@@ -90,6 +117,9 @@ function itemHaystack(
   const { item, path } = ordered;
   const topics = item.topic_ids
     .map((topicId) => manifest.topics[topicId]?.label ?? "")
+    .join(" ");
+  const families = item.family_ids
+    .map((familyId) => manifest.topic_families[familyId]?.label ?? "")
     .join(" ");
   return normalized(
     [
@@ -99,6 +129,7 @@ function itemHaystack(
       dateLabel(item),
       locationLabels(item).join(" "),
       topics,
+      families,
     ].join(" "),
   );
 }
@@ -107,13 +138,18 @@ function writeRoute(
   itemId: string | null,
   query: string,
   selectedTopics: Set<string>,
+  selectedFamilies: Set<string>,
 ): void {
   const params = new URLSearchParams(window.location.search);
   params.delete("q");
   params.delete("topic");
+  params.delete("family");
   if (query.trim()) params.set("q", query.trim());
   for (const topicId of [...selectedTopics].sort()) {
     params.append("topic", topicId);
+  }
+  for (const familyId of [...selectedFamilies].sort()) {
+    params.append("family", familyId);
   }
   const path = itemId ? `/video/${encodeURIComponent(itemId)}` : "/";
   const search = params.toString();
@@ -138,7 +174,9 @@ export function App({ repository }: AppProps): ReactElement {
   const [query, setQuery] = useState(
     () => new URLSearchParams(window.location.search).get("q") ?? "",
   );
+  const [topicFilterQuery, setTopicFilterQuery] = useState("");
   const [selectedTopics, setSelectedTopics] = useState<Set<string>>(initialTopics);
+  const [selectedFamilies, setSelectedFamilies] = useState<Set<string>>(initialFamilies);
   const [topicThreshold, setTopicThreshold] = useState(
     () => Number(localStorage.getItem("watchcraftTopicThreshold")) || 40,
   );
@@ -152,6 +190,8 @@ export function App({ repository }: AppProps): ReactElement {
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [mediaDuration, setMediaDuration] = useState<number | null>(null);
   const [highlightedTopic, setHighlightedTopic] = useState<string | null>(null);
+  const [openStatus, setOpenStatus] = useState<"idle" | "opening" | "opened" | "error">("idle");
+  const [mediaError, setMediaError] = useState(false);
   const playerRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
@@ -180,7 +220,7 @@ export function App({ repository }: AppProps): ReactElement {
 
   const filteredItems = useMemo(() => {
     if (!manifest) return [];
-    const terms = normalized(query).split(" ").filter(Boolean);
+    const terms = searchGroups(query);
     return items.filter((ordered) => {
       if (
         selectedTopics.size > 0 &&
@@ -190,10 +230,18 @@ export function App({ repository }: AppProps): ReactElement {
       ) {
         return false;
       }
+      if (
+        selectedFamilies.size > 0 &&
+        ![...selectedFamilies].every((familyId) =>
+          ordered.item.family_ids.includes(familyId),
+        )
+      ) {
+        return false;
+      }
       const haystack = itemHaystack(ordered, manifest);
       return terms.every((term) => haystack.includes(term));
     });
-  }, [items, manifest, query, selectedTopics]);
+  }, [items, manifest, query, selectedFamilies, selectedTopics]);
 
   useEffect(() => {
     if (!manifest || items.length === 0) return;
@@ -209,8 +257,8 @@ export function App({ repository }: AppProps): ReactElement {
   const selectedOrdered = items.find(({ item }) => item.item_id === selectedId);
 
   useEffect(() => {
-    writeRoute(selectedId, query, selectedTopics);
-  }, [query, selectedId, selectedTopics]);
+    writeRoute(selectedId, query, selectedTopics, selectedFamilies);
+  }, [query, selectedFamilies, selectedId, selectedTopics]);
 
   useEffect(() => {
     if (!selectedItem) {
@@ -221,7 +269,9 @@ export function App({ repository }: AppProps): ReactElement {
     setAnalysis(null);
     setAnalysisError(null);
     setMediaDuration(null);
+    setMediaError(false);
     setHighlightedTopic(null);
+    setOpenStatus("idle");
     repository
       .loadAnalysis(selectedItem)
       .then((loaded) => {
@@ -239,34 +289,76 @@ export function App({ repository }: AppProps): ReactElement {
 
   const displayedTopics = useMemo(() => {
     if (!manifest) return [];
+    const facetQuery = normalized(topicFilterQuery);
     return Object.values(manifest.topics)
       .filter((topic) => {
         const percentage = manifest.stats.video_count
           ? (topic.video_count * 100) / manifest.stats.video_count
           : 0;
-        return selectedTopics.has(topic.topic_id) || percentage <= topicThreshold;
+        if (selectedTopics.has(topic.topic_id)) return true;
+        if (facetQuery) return normalized(topic.canonical_key || topic.label).includes(facetQuery);
+        return topic.video_count > 1 && percentage <= topicThreshold;
       })
-      .sort((left, right) =>
-        left.label.localeCompare(right.label, undefined, { sensitivity: "base" }),
-      );
-  }, [manifest, selectedTopics, topicThreshold]);
+      .sort((left, right) => {
+        const selectedDifference = Number(selectedTopics.has(right.topic_id))
+          - Number(selectedTopics.has(left.topic_id));
+        return selectedDifference
+          || right.video_count - left.video_count
+          || left.label.localeCompare(right.label, undefined, { sensitivity: "base" });
+      });
+  }, [manifest, selectedTopics, topicFilterQuery, topicThreshold]);
+
+  const displayedFamilies = useMemo(() => {
+    if (!manifest) return [];
+    const facetQuery = normalized(topicFilterQuery);
+    return Object.values(manifest.topic_families)
+      .filter((family) =>
+        selectedFamilies.has(family.family_id)
+        || !facetQuery
+        || normalized(family.canonical_key || family.label).includes(facetQuery),
+      )
+      .sort((left, right) => {
+        const selectedDifference = Number(selectedFamilies.has(right.family_id))
+          - Number(selectedFamilies.has(left.family_id));
+        return selectedDifference
+          || right.video_count - left.video_count
+          || left.label.localeCompare(right.label, undefined, { sensitivity: "base" });
+      });
+  }, [manifest, selectedFamilies, topicFilterQuery]);
 
   const selectedItemTopics = selectedItem && manifest
     ? selectedItem.topic_ids
         .map((topicId) => manifest.topics[topicId])
-        .filter((topic): topic is Topic => Boolean(topic))
+        .filter((topic): topic is Topic => {
+          if (!topic) return false;
+          const percentage = manifest.stats.video_count
+            ? (topic.video_count * 100) / manifest.stats.video_count
+            : 0;
+          return selectedTopics.has(topic.topic_id)
+            || (topic.video_count > 1 && percentage <= topicThreshold);
+        })
     : [];
   const relatedTopics = highlightedTopic && manifest
     ? (manifest.topics[highlightedTopic]?.related_topic_ids ?? [])
         .map((topicId) => manifest.topics[topicId])
         .filter((topic): topic is Topic => Boolean(topic))
+        .sort((left, right) =>
+          right.video_count - left.video_count
+          || left.label.localeCompare(right.label, undefined, { sensitivity: "base" }),
+        )
+        .slice(0, 10)
     : [];
   const mediaUrl = selectedItem ? repository.mediaUrl(selectedItem) : null;
+  const transcriptUrl = selectedItem?.transcript.text
+    ? repository.catalogAssetUrl(selectedItem.transcript.text)
+    : null;
   const timelineClockMode = useMemo(
     () => inferTimelineClockMode(analysis?.sections ?? [], mediaDuration),
     [analysis, mediaDuration],
   );
-  const hasFilters = Boolean(query.trim() || selectedTopics.size);
+  const hasFilters = Boolean(
+    query.trim() || topicFilterQuery.trim() || selectedTopics.size || selectedFamilies.size,
+  );
 
   function toggleTopic(topicId: string): void {
     setSelectedTopics((previous) => {
@@ -275,6 +367,23 @@ export function App({ repository }: AppProps): ReactElement {
       else next.add(topicId);
       return next;
     });
+  }
+
+  function toggleFamily(familyId: string): void {
+    setSelectedFamilies((previous) => {
+      const next = new Set(previous);
+      if (next.has(familyId)) next.delete(familyId);
+      else next.add(familyId);
+      return next;
+    });
+  }
+
+  async function openInDefaultPlayer(): Promise<void> {
+    if (!selectedItem || openStatus === "opening") return;
+    setOpenStatus("opening");
+    const opened = await repository.openInDefaultPlayer(selectedItem);
+    setOpenStatus(opened ? "opened" : "error");
+    window.setTimeout(() => setOpenStatus("idle"), 1800);
   }
 
   function seek(start: string): void {
@@ -346,7 +455,9 @@ export function App({ repository }: AppProps): ReactElement {
                 className="clear-button"
                 onClick={() => {
                   setQuery("");
+                  setTopicFilterQuery("");
                   setSelectedTopics(new Set());
+                  setSelectedFamilies(new Set());
                   setHighlightedTopic(null);
                 }}
                 title="Clear text and topic filters"
@@ -361,7 +472,9 @@ export function App({ repository }: AppProps): ReactElement {
         <details className="filters">
           <summary>
             <span>Filter by topic</span>
-            {selectedTopics.size > 0 && <b>{selectedTopics.size}</b>}
+            {selectedTopics.size + selectedFamilies.size > 0 && (
+              <b>{selectedTopics.size + selectedFamilies.size} selected</b>
+            )}
           </summary>
           <div className="filter-body">
             <label className="threshold-label">
@@ -375,11 +488,40 @@ export function App({ repository }: AppProps): ReactElement {
                   setTopicThreshold(next);
                   localStorage.setItem("watchcraftTopicThreshold", String(next));
                 }}
+                style={{ "--range-progress": `${topicThreshold}%` } as CSSProperties}
                 type="range"
                 value={topicThreshold}
               />
             </label>
+            <input
+              aria-label="Find a topic or family"
+              className="topic-filter-search"
+              onChange={(event) => setTopicFilterQuery(event.target.value)}
+              placeholder="Find a topic…"
+              type="search"
+              value={topicFilterQuery}
+            />
+            <p className="filter-note">
+              Searching topics temporarily shows common and one-off topics.
+            </p>
             <div className="facet-list">
+              {displayedFamilies.length > 0 && (
+                <section className="facet-section">
+                  <h3 className="facet-heading">Families</h3>
+                  {displayedFamilies.map((family: TopicFamily) => (
+                    <label className="facet" key={family.family_id} title={family.description || family.label}>
+                      <input
+                        checked={selectedFamilies.has(family.family_id)}
+                        onChange={() => toggleFamily(family.family_id)}
+                        type="checkbox"
+                      />
+                      <span>{family.label}</span>
+                      <small>{family.video_count}</small>
+                    </label>
+                  ))}
+                </section>
+              )}
+              <h3 className="facet-heading">Topics</h3>
               {displayedTopics.map((topic) => (
                 <label className="facet" key={topic.topic_id}>
                   <input
@@ -388,15 +530,24 @@ export function App({ repository }: AppProps): ReactElement {
                     type="checkbox"
                   />
                   <span>{topic.label}</span>
-                  <small>{topic.video_count}</small>
+                  <small>
+                    {topic.video_count} · {manifest.stats.video_count
+                      ? Math.round((topic.video_count * 100) / manifest.stats.video_count)
+                      : 0}%
+                  </small>
                 </label>
               ))}
+            </div>
+            <div className="filter-footer">
+              {topicFilterQuery.trim()
+                ? `${displayedTopics.length} topics · ${displayedFamilies.length} families`
+                : `${displayedTopics.length} of ${Object.keys(manifest.topics).length} topics`}
             </div>
           </div>
         </details>
 
         <nav aria-label="Videos" className="video-list">
-          {filteredItems.map(({ item, path }) => (
+          {filteredItems.map(({ item }) => (
             <button
               className={`video-row ${item.item_id === selectedId ? "active" : ""}`}
               key={item.item_id}
@@ -404,8 +555,13 @@ export function App({ repository }: AppProps): ReactElement {
               type="button"
             >
               <strong>{item.title}</strong>
-              <span>{path.join(" / ")}</span>
-              <span>{[dateLabel(item), ...locationLabels(item)].filter(Boolean).join(" · ")}</span>
+              <span>
+                {[
+                  dateLabel(item) || "Date unknown",
+                  locationLabels(item)[0] || "Location unknown",
+                  `${item.chapter_count} ${item.chapter_count === 1 ? "chapter" : "chapters"}`,
+                ].join(" · ")}
+              </span>
             </button>
           ))}
           {filteredItems.length === 0 && (
@@ -467,18 +623,36 @@ export function App({ repository }: AppProps): ReactElement {
             <div className="player-pane">
               <div className="player-shell">
                 {mediaUrl ? (
-                  <video
-                    controls
-                    key={mediaUrl}
-                    onLoadedMetadata={(event) => {
-                      const duration = event.currentTarget.duration;
-                      setMediaDuration(Number.isFinite(duration) ? duration : null);
-                    }}
-                    playsInline
-                    preload="metadata"
-                    ref={playerRef}
-                    src={mediaUrl}
-                  />
+                  <>
+                    <video
+                      controls
+                      key={mediaUrl}
+                      onCanPlay={() => setMediaError(false)}
+                      onError={() => setMediaError(true)}
+                      onLoadedMetadata={(event) => {
+                        const duration = event.currentTarget.duration;
+                        setMediaDuration(Number.isFinite(duration) ? duration : null);
+                      }}
+                      playsInline
+                      preload="metadata"
+                      ref={playerRef}
+                      src={mediaUrl}
+                    />
+                    {mediaError && (
+                      <div className="media-error">
+                        <strong>This video cannot be played in the embedded player.</strong>
+                        {repository.canOpenInDefaultPlayer !== false && (
+                          <button
+                            className="action primary"
+                            onClick={() => void openInDefaultPlayer()}
+                            type="button"
+                          >
+                            Open in default player
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </>
                 ) : (
                   <div className="no-media">No playable media source is available.</div>
                 )}
@@ -532,27 +706,46 @@ export function App({ repository }: AppProps): ReactElement {
             />
             <div className="detail-scroll">
               <div className="detail-inner">
+                <p className="eyebrow">{selectedOrdered?.path.join(" / ")}</p>
+                <h2>{selectedItem.title}</h2>
+                <div className="facts">
+                  <span>{dateLabel(selectedItem) || "Date unknown"}</span>
+                  {(locationLabels(selectedItem).length
+                    ? locationLabels(selectedItem)
+                    : ["Location unknown"]
+                  ).map((location) => (
+                    <span key={location}>{location}</span>
+                  ))}
+                </div>
+                <div className="actions">
+                      {repository.canOpenInDefaultPlayer !== false && (
+                        <button
+                          className="action primary"
+                          disabled={openStatus === "opening"}
+                          onClick={() => void openInDefaultPlayer()}
+                          type="button"
+                        >
+                          {openStatus === "opening" && "Opening…"}
+                          {openStatus === "opened" && "Opened in default player"}
+                          {openStatus === "error" && "Could not open video"}
+                          {openStatus === "idle" && "Open in default player"}
+                        </button>
+                      )}
+                      {mediaUrl && (
+                        <a className="action" href={mediaUrl} rel="noreferrer" target="_blank">
+                          Open video file
+                        </a>
+                      )}
+                      {transcriptUrl && (
+                        <a className="action" href={transcriptUrl} rel="noreferrer" target="_blank">
+                          Read transcript
+                        </a>
+                      )}
+                </div>
                 <div className="detail-columns">
                   <section>
-                    <p className="eyebrow">{selectedOrdered?.path.join(" / ")}</p>
-                    <h2>{selectedItem.title}</h2>
-                    <div className="facts">
-                      {dateLabel(selectedItem) && <span>{dateLabel(selectedItem)}</span>}
-                      {locationLabels(selectedItem).map((location) => (
-                        <span key={location}>{location}</span>
-                      ))}
-                    </div>
-                    {repository.canOpenInDefaultPlayer !== false && (
-                      <button
-                        className="primary-action"
-                        onClick={() => void repository.openInDefaultPlayer(selectedItem)}
-                        type="button"
-                      >
-                        Open in default player
-                      </button>
-                    )}
                     <p className="summary">{selectedItem.summary}</p>
-                    <h3>Topics</h3>
+                    <h3>Concepts and techniques</h3>
                     <div className="topic-pills">
                       {selectedItemTopics.map((topic) => {
                         const navigable = Boolean(selectedItem.topic_sections[topic.topic_id]?.length);
@@ -578,25 +771,57 @@ export function App({ repository }: AppProps): ReactElement {
                           <div className="topic-pills">
                             {relatedTopics.map((topic) => (
                               <button
-                                className="topic-pill related"
+                                aria-pressed={selectedTopics.has(topic.topic_id)}
+                                className={`topic-pill related ${selectedTopics.has(topic.topic_id) ? "selected" : ""}`}
                                 key={topic.topic_id}
-                                onClick={() => {
-                                  setSelectedTopics((previous) => new Set(previous).add(topic.topic_id));
-                                  setHighlightedTopic(topic.topic_id);
-                                }}
+                                onClick={() => toggleTopic(topic.topic_id)}
                                 type="button"
                               >
-                                {topic.label}
+                                {topic.label} · {topic.video_count}
                               </button>
                             ))}
                           </div>
                         ) : <p>No related topics are recorded.</p>
                       ) : <p>Select a topic to highlight its chapters and see related topics.</p>}
                     </div>
+                    {(typeof selectedItem.date === "object" && selectedItem.date?.basis
+                      || selectedItem.locations.some((location) =>
+                        typeof location === "object" && Boolean(location.basis),
+                      )) && (
+                      <details className="evidence-details">
+                        <summary>Date and location evidence</summary>
+                        <ul>
+                          {typeof selectedItem.date === "object" && selectedItem.date?.basis && (
+                            <li>
+                              <strong>
+                                Date: {selectedItem.date.display || "Unknown"}
+                                {Number.isFinite(selectedItem.date.confidence)
+                                  ? ` (${Math.round((selectedItem.date.confidence ?? 0) * 100)}% confidence). `
+                                  : ". "}
+                              </strong>
+                              {selectedItem.date.basis}
+                            </li>
+                          )}
+                          {selectedItem.locations.map((location, index) =>
+                            typeof location === "object" && location.basis ? (
+                              <li key={`${location.name}-${index}`}>
+                                <strong>
+                                  Location: {location.name || "Unknown"}
+                                  {Number.isFinite(location.confidence)
+                                    ? ` (${Math.round((location.confidence ?? 0) * 100)}% confidence). `
+                                    : ". "}
+                                </strong>
+                                {location.basis}
+                              </li>
+                            ) : null,
+                          )}
+                        </ul>
+                      </details>
+                    )}
                   </section>
 
                   <section className="chapters-column">
-                    <h3>Chapters</h3>
+                    <h3>Technique timeline</h3>
                     {analysisError && <p className="inline-error">{analysisError}</p>}
                     {!analysis && !analysisError && <p className="muted">Loading chapters…</p>}
                     <div className="timeline">

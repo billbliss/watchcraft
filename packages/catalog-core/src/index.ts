@@ -56,8 +56,18 @@ export interface CatalogItem {
     model?: string | null;
   };
   summary: string;
-  date?: { display?: string } | string | null;
-  locations: Array<{ name?: string } | string>;
+  date?: {
+    display?: string;
+    iso?: string;
+    precision?: string;
+    confidence?: number;
+    basis?: string;
+  } | string | null;
+  locations: Array<{
+    name?: string;
+    confidence?: number;
+    basis?: string;
+  } | string>;
   topic_ids: string[];
   family_ids: string[];
   topic_sections: Record<string, number[]>;
@@ -107,6 +117,7 @@ export interface CatalogRepository {
   loadCollection(): Promise<CollectionManifest>;
   loadAnalysis(item: CatalogItem): Promise<VideoAnalysis>;
   mediaUrl(item: CatalogItem): string | null;
+  catalogAssetUrl(relativePath: string): string | null;
   openInDefaultPlayer(item: CatalogItem): Promise<boolean>;
 }
 

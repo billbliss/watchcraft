@@ -7,10 +7,13 @@ The desktop boundary exposes only:
 
 - a native directory picker;
 - read-only asset-protocol access to a directory the user selected;
-- persisted restoration of that user-approved scope.
+- persisted restoration of that user-approved scope;
+- opening a supported video inside that scope with the OS default player.
 
-It does not expose arbitrary filesystem commands, writing, shell execution,
-downloads, SQLite, authoring, or custom Rust commands.
+The default-player command validates both the selected-directory scope and the
+video extension before invoking a fixed platform opener. It does not expose
+arbitrary filesystem commands, writing, shell execution, downloads, SQLite, or
+authoring.
 
 ## Run
 

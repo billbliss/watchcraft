@@ -69,9 +69,11 @@ only uses the shared `CatalogRepository` contract.
 
 The `experiment/tauri` branch contains a deliberately small native shell in
 `apps/desktop`. It reuses the React reader and adds only a native folder picker,
-read-only asset-protocol access to the chosen library, and restoration of that
-user-approved scope. The renderer has no arbitrary filesystem, shell, write,
-download, SQLite, or authoring capability.
+read-only asset-protocol access to the chosen library, restoration of that
+user-approved scope, and a command that opens a supported video in the OS
+default player. That command accepts only existing video files already covered
+by the user-approved asset scope. The renderer has no arbitrary filesystem,
+shell, write, download, SQLite, or authoring capability.
 
 After installing the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/):
 

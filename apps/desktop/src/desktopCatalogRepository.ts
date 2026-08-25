@@ -1,4 +1,4 @@
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type {
   CatalogItem,
   CatalogRepository,
@@ -35,7 +35,7 @@ async function fetchLocalJson<T>(path: string): Promise<T> {
 }
 
 export class DesktopCatalogRepository implements CatalogRepository {
-  readonly canOpenInDefaultPlayer = false;
+  readonly canOpenInDefaultPlayer = true;
   readonly libraryRoot: string;
   private catalogRoot: string | null = null;
 
@@ -85,7 +85,20 @@ export class DesktopCatalogRepository implements CatalogRepository {
     return convertFileSrc(joinLocalPath(this.libraryRoot, media.relative_path));
   }
 
-  async openInDefaultPlayer(_item: CatalogItem): Promise<boolean> {
-    return false;
+  catalogAssetUrl(relativePath: string): string | null {
+    if (!this.catalogRoot) return null;
+    return convertFileSrc(joinLocalPath(this.catalogRoot, relativePath));
+  }
+
+  async openInDefaultPlayer(item: CatalogItem): Promise<boolean> {
+    const media = item.media.find((candidate) => candidate.type === "local-file");
+    if (!media) return false;
+    try {
+      return await invoke<boolean>("open_video", {
+        path: joinLocalPath(this.libraryRoot, media.relative_path),
+      });
+    } catch {
+      return false;
+    }
   }
 }
