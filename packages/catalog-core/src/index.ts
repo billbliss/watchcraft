@@ -117,7 +117,6 @@ export interface CatalogRepository {
   loadCollection(): Promise<CollectionManifest>;
   loadAnalysis(item: CatalogItem): Promise<VideoAnalysis>;
   mediaUrl(item: CatalogItem): string | null;
-  catalogAssetUrl(relativePath: string): string | null;
   openInDefaultPlayer(item: CatalogItem): Promise<boolean>;
 }
 

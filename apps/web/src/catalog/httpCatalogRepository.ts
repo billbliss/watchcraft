@@ -51,10 +51,6 @@ export class HttpCatalogRepository implements CatalogRepository {
     return new URL(media.relative_path, this.mediaRootUrl).href;
   }
 
-  catalogAssetUrl(relativePath: string): string {
-    return new URL(relativePath, this.manifestUrl).href;
-  }
-
   async openInDefaultPlayer(item: CatalogItem): Promise<boolean> {
     const media = item.media.find((candidate) => candidate.type === "local-file");
     if (!media) return false;

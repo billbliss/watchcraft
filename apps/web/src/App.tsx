@@ -349,9 +349,6 @@ export function App({ repository }: AppProps): ReactElement {
         .slice(0, 10)
     : [];
   const mediaUrl = selectedItem ? repository.mediaUrl(selectedItem) : null;
-  const transcriptUrl = selectedItem?.transcript.text
-    ? repository.catalogAssetUrl(selectedItem.transcript.text)
-    : null;
   const timelineClockMode = useMemo(
     () => inferTimelineClockMode(analysis?.sections ?? [], mediaDuration),
     [analysis, mediaDuration],
@@ -706,41 +703,30 @@ export function App({ repository }: AppProps): ReactElement {
             />
             <div className="detail-scroll">
               <div className="detail-inner">
-                <p className="eyebrow">{selectedOrdered?.path.join(" / ")}</p>
-                <h2>{selectedItem.title}</h2>
-                <div className="facts">
-                  <span>{dateLabel(selectedItem) || "Date unknown"}</span>
-                  {(locationLabels(selectedItem).length
-                    ? locationLabels(selectedItem)
-                    : ["Location unknown"]
-                  ).map((location) => (
-                    <span key={location}>{location}</span>
-                  ))}
+                <div className="detail-heading">
+                  <div>
+                    <p className="eyebrow">{selectedOrdered?.path.join(" / ")}</p>
+                    <h2>{selectedItem.title}</h2>
+                  </div>
+                  <div className="detail-meta">
+                    <span>{dateLabel(selectedItem) || "Date unknown"}</span>
+                    <span>{locationLabels(selectedItem)[0] || "Location unknown"}</span>
+                  </div>
                 </div>
                 <div className="actions">
-                      {repository.canOpenInDefaultPlayer !== false && (
-                        <button
-                          className="action primary"
-                          disabled={openStatus === "opening"}
-                          onClick={() => void openInDefaultPlayer()}
-                          type="button"
-                        >
-                          {openStatus === "opening" && "Opening…"}
-                          {openStatus === "opened" && "Opened in default player"}
-                          {openStatus === "error" && "Could not open video"}
-                          {openStatus === "idle" && "Open in default player"}
-                        </button>
-                      )}
-                      {mediaUrl && (
-                        <a className="action" href={mediaUrl} rel="noreferrer" target="_blank">
-                          Open video file
-                        </a>
-                      )}
-                      {transcriptUrl && (
-                        <a className="action" href={transcriptUrl} rel="noreferrer" target="_blank">
-                          Read transcript
-                        </a>
-                      )}
+                  {repository.canOpenInDefaultPlayer !== false && (
+                    <button
+                      className="action primary"
+                      disabled={openStatus === "opening"}
+                      onClick={() => void openInDefaultPlayer()}
+                      type="button"
+                    >
+                      {openStatus === "opening" && "Opening…"}
+                      {openStatus === "opened" && "Opened in default player"}
+                      {openStatus === "error" && "Could not open video"}
+                      {openStatus === "idle" && "Open in default player"}
+                    </button>
+                  )}
                 </div>
                 <div className="detail-columns">
                   <section>

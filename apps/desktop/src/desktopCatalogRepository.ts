@@ -85,11 +85,6 @@ export class DesktopCatalogRepository implements CatalogRepository {
     return convertFileSrc(joinLocalPath(this.libraryRoot, media.relative_path));
   }
 
-  catalogAssetUrl(relativePath: string): string | null {
-    if (!this.catalogRoot) return null;
-    return convertFileSrc(joinLocalPath(this.catalogRoot, relativePath));
-  }
-
   async openInDefaultPlayer(item: CatalogItem): Promise<boolean> {
     const media = item.media.find((candidate) => candidate.type === "local-file");
     if (!media) return false;
