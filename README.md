@@ -84,7 +84,9 @@ npm run desktop:dev
 
 The first launch asks for the root folder of a local video library. The adapter
 recognizes both `collection.json` at that root and the current
-`Video Catalog/collection.json` layout.
+`Video Catalog/collection.json` layout. Development runs as **Watchcraft Dev**
+with its own app identity, so an installed or previously bundled Watchcraft
+copy cannot be mistaken for the freshly launched development build.
 
 Before merging desktop playback changes, run the native smoke test:
 
@@ -92,7 +94,9 @@ Before merging desktop playback changes, run the native smoke test:
 npm run desktop:smoke
 ```
 
-It generates a small H.264/AAC fixture, launches an isolated Watchcraft profile,
-verifies that embedded playback advances, then restarts the profile and verifies
-playback again using restored read-only folder access. The command requires
-`ffmpeg` and does not read or modify the user's configured library.
+It generates a complete one-video catalog with a small H.264/AAC fixture,
+launches the normal catalog and player UI in an isolated Watchcraft profile,
+verifies that playback advances, then restarts the profile and verifies playback
+again using restored read-only folder access. The runner fails unless the app
+itself reports a playback pass. The command requires `ffmpeg` and does not read
+or modify the user's configured library.

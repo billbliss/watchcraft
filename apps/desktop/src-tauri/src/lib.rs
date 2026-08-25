@@ -309,19 +309,18 @@ fn ensure_library_scope(app: tauri::AppHandle, path: String) -> Result<bool, Str
 }
 
 #[tauri::command]
-fn playback_smoke_video(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    let video = match std::env::var("WATCHCRAFT_PLAYBACK_SMOKE_VIDEO") {
-        Ok(video) => PathBuf::from(video),
+fn playback_smoke_library_root(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let root = match std::env::var("WATCHCRAFT_PLAYBACK_SMOKE_LIBRARY") {
+        Ok(root) => PathBuf::from(root),
         Err(_) => return Ok(None),
     };
-    let parent = video
-        .parent()
-        .and_then(Path::to_str)
-        .ok_or("Playback smoke video has no valid parent directory")?;
-    if !ensure_library_scope_inner(&app, parent)? {
+    let root_string = root
+        .to_str()
+        .ok_or("Playback smoke library has no valid root directory")?;
+    if !ensure_library_scope_inner(&app, root_string)? {
         return Err("Playback smoke library access was not restored.".into());
     }
-    Ok(video.to_str().map(str::to_owned))
+    Ok(Some(root_string.to_owned()))
 }
 
 #[tauri::command]
@@ -330,7 +329,7 @@ fn finish_playback_smoke(
     passed: bool,
     detail: String,
 ) -> Result<(), String> {
-    if std::env::var_os("WATCHCRAFT_PLAYBACK_SMOKE_VIDEO").is_none() {
+    if std::env::var_os("WATCHCRAFT_PLAYBACK_SMOKE_LIBRARY").is_none() {
         return Err("Playback smoke mode is not enabled.".into());
     }
     if passed {
@@ -351,13 +350,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             if std::env::var("WATCHCRAFT_PLAYBACK_SMOKE_PRIME").as_deref() == Ok("1") {
-                let video = std::env::var("WATCHCRAFT_PLAYBACK_SMOKE_VIDEO")
-                    .map_err(|_| "Playback smoke video is missing")?;
-                let video = PathBuf::from(video);
-                let parent = video
-                    .parent()
-                    .ok_or("Playback smoke video has no parent directory")?;
-                app.asset_protocol_scope().allow_directory(parent, true)?;
+                let root = std::env::var("WATCHCRAFT_PLAYBACK_SMOKE_LIBRARY")
+                    .map_err(|_| "Playback smoke library is missing")?;
+                app.asset_protocol_scope().allow_directory(root, true)?;
             }
             Ok(())
         })
@@ -375,7 +370,7 @@ pub fn run() {
             open_video,
             default_video_player,
             ensure_library_scope,
-            playback_smoke_video,
+            playback_smoke_library_root,
             finish_playback_smoke
         ])
         .run(tauri::generate_context!())

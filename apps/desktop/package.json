@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "tauri dev",
+    "dev": "tauri dev --config src-tauri/tauri.dev.conf.json",
+    "dev:smoke": "tauri dev --config src-tauri/tauri.smoke.conf.json",
     "build": "tauri build",
     "test": "node --experimental-strip-types --test src/*.test.ts",
     "web:dev": "vite --host 127.0.0.1 --port 1420 --strictPort",

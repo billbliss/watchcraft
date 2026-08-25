@@ -23,4 +23,6 @@ npm run desktop:dev
 
 Choose the root of a local video library. The adapter recognizes both a
 portable `collection.json` at that root and the current
-`Video Catalog/collection.json` layout.
+`Video Catalog/collection.json` layout. The development build is titled
+**Watchcraft Dev** and uses a separate app identity from bundled builds, so it
+will ask for the library once even if Watchcraft was configured previously.

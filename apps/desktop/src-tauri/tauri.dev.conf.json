@@ -1,0 +1,13 @@
+{
+  "identifier": "app.watchcraft.reader.dev",
+  "app": {
+    "windows": [
+      {
+        "title": "Watchcraft Dev"
+      }
+    ]
+  },
+  "bundle": {
+    "active": false
+  }
+}
