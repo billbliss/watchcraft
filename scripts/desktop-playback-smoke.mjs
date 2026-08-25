@@ -45,7 +45,7 @@ function run(command, args, options = {}) {
   return result;
 }
 
-function runDesktopPhase(name, primeScope) {
+function runDesktopPhase(name, primeScope, selectedLibraryRoot = libraryRoot) {
   process.stdout.write(`\nWatchcraft playback smoke: ${name}\n`);
   const result = run(
     "npm",
@@ -59,7 +59,7 @@ function runDesktopPhase(name, primeScope) {
       env: {
         ...process.env,
         WATCHCRAFT_PLAYBACK_SMOKE_VIDEO: videoPath,
-        WATCHCRAFT_PLAYBACK_SMOKE_LIBRARY: libraryRoot,
+        WATCHCRAFT_PLAYBACK_SMOKE_LIBRARY: selectedLibraryRoot,
         WATCHCRAFT_PLAYBACK_SMOKE_PRIME: primeScope ? "1" : "0",
       },
     },
@@ -104,8 +104,9 @@ try {
     ]);
     if ((ffmpegResult.status ?? 1) !== 0) throw new Error("Could not generate the playback fixture");
 
-    mkdirSync(join(libraryRoot, "analysis"), { recursive: true });
-    writeFileSync(join(libraryRoot, "collection.json"), JSON.stringify({
+    const catalogRoot = join(libraryRoot, "Video Catalog");
+    mkdirSync(join(catalogRoot, "analysis"), { recursive: true });
+    writeFileSync(join(catalogRoot, "collection.json"), JSON.stringify({
       schema_version: 2,
       collection_id: "playback-smoke",
       title: "Playback Smoke Test",
@@ -137,7 +138,7 @@ try {
       revision: 1,
       content_hash: "0".repeat(64),
     }));
-    writeFileSync(join(libraryRoot, "analysis", "fixture.analysis.json"), JSON.stringify({
+    writeFileSync(join(catalogRoot, "analysis", "fixture.analysis.json"), JSON.stringify({
       schema_version: 2,
       video: "fixture.mp4",
       title: "Native playback fixture",
@@ -158,6 +159,16 @@ try {
 
   const restore = runDesktopPhase("verify playback after restart", false);
   if (restore.status !== 0 || !restore.passed) throw new Error("Native playback failed after restart");
+
+  const metadataFolder = join(libraryRoot, "Video Catalog");
+  const metadataGuard = runDesktopPhase(
+    "reject metadata folder as the media library root",
+    true,
+    metadataFolder,
+  );
+  if (metadataGuard.status !== 0 || !metadataGuard.passed) {
+    throw new Error("Metadata-folder selection did not request its parent folder");
+  }
 
   process.stdout.write("\nWatchcraft playback smoke passed.\n");
   exitCode = 0;

@@ -1,15 +1,17 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
-import { App } from "../../web/src/App";
-import { DesktopCatalogRepository } from "./desktopCatalogRepository";
+import { DesktopApp } from "./DesktopApp";
+import { isCatalogMetadataFolder } from "./desktopCatalogRepository";
 
 const SMOKE_TIMEOUT_MS = 20_000;
+const IDLE_PRELOAD_MS = 6_000;
 
 export function PlaybackSmokeTest(): ReactElement {
   const [libraryRoot, setLibraryRoot] = useState<string | null>(null);
   const finishedRef = useRef(false);
-  const repository = useMemo(
-    () => libraryRoot ? new DesktopCatalogRepository(libraryRoot) : null,
+  const playAttemptedRef = useRef(false);
+  const expectsParentPrompt = useMemo(
+    () => Boolean(libraryRoot && isCatalogMetadataFolder(libraryRoot)),
     [libraryRoot],
   );
 
@@ -29,11 +31,25 @@ export function PlaybackSmokeTest(): ReactElement {
   }, []);
 
   useEffect(() => {
-    if (!repository) return;
+    if (!libraryRoot) return;
+    const startedAt = performance.now();
     const deadline = window.setTimeout(() => {
       void finish(false, "Timed out before normal catalog playback advanced");
     }, SMOKE_TIMEOUT_MS);
     const poll = window.setInterval(() => {
+      const parentPrompt = document.querySelector<HTMLElement>(
+        '[data-watchcraft-library-parent-required="true"]',
+      );
+      if (expectsParentPrompt) {
+        if (parentPrompt) {
+          void finish(true, "Metadata-only folder selection requested its parent folder");
+        }
+        return;
+      }
+      if (parentPrompt) {
+        void finish(false, "A valid library root incorrectly requested its parent folder");
+        return;
+      }
       const errorBanner = document.querySelector<HTMLElement>(".media-error");
       const video = document.querySelector<HTMLVideoElement>(".player-shell video");
       if (errorBanner) {
@@ -45,21 +61,26 @@ export function PlaybackSmokeTest(): ReactElement {
         return;
       }
       if (!video) return;
-      video.muted = true;
       if (video.currentTime >= 0.25) {
         void finish(true, `Normal catalog playback advanced to ${video.currentTime.toFixed(2)}s`);
         return;
       }
-      if (video.paused) void video.play().catch(() => undefined);
+      if (!playAttemptedRef.current && performance.now() - startedAt >= IDLE_PRELOAD_MS) {
+        playAttemptedRef.current = true;
+        video.muted = true;
+        void video.play().catch((error: unknown) => {
+          void finish(false, `The single play attempt failed: ${String(error)}`);
+        });
+      }
     }, 100);
     return () => {
       window.clearInterval(poll);
       window.clearTimeout(deadline);
     };
-  }, [repository]);
+  }, [expectsParentPrompt, libraryRoot]);
 
-  if (!repository) {
+  if (!libraryRoot) {
     return <main className="playback-smoke">Preparing the normal Watchcraft catalog…</main>;
   }
-  return <App repository={repository} />;
+  return <DesktopApp initialLibraryRoot={libraryRoot} />;
 }

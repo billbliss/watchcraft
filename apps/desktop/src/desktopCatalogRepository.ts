@@ -26,6 +26,17 @@ export function parentLocalPath(path: string): string {
   return boundary > 0 ? cleanPath.slice(0, boundary) : cleanPath;
 }
 
+export function localPathName(path: string): string {
+  const separator = separatorFor(path);
+  const cleanPath = path.replace(/[\\/]+$/, "");
+  const boundary = cleanPath.lastIndexOf(separator);
+  return boundary >= 0 ? cleanPath.slice(boundary + 1) : cleanPath;
+}
+
+export function isCatalogMetadataFolder(path: string): boolean {
+  return localPathName(path).toLocaleLowerCase() === "video catalog";
+}
+
 async function fetchLocalJson<T>(path: string): Promise<T> {
   const response = await fetch(convertFileSrc(path), { cache: "no-store" });
   if (!response.ok) {
