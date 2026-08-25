@@ -191,7 +191,8 @@ export function App({ repository }: AppProps): ReactElement {
   const [mediaDuration, setMediaDuration] = useState<number | null>(null);
   const [highlightedTopic, setHighlightedTopic] = useState<string | null>(null);
   const [openStatus, setOpenStatus] = useState<"idle" | "opening" | "opened" | "error">("idle");
-  const [mediaError, setMediaError] = useState(false);
+  const [mediaErrorUrl, setMediaErrorUrl] = useState<string | null>(null);
+  const autoRetriedMediaRef = useRef(new Set<string>());
   const playerRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
@@ -269,7 +270,7 @@ export function App({ repository }: AppProps): ReactElement {
     setAnalysis(null);
     setAnalysisError(null);
     setMediaDuration(null);
-    setMediaError(false);
+    setMediaErrorUrl(null);
     setHighlightedTopic(null);
     setOpenStatus("idle");
     repository
@@ -392,6 +393,28 @@ export function App({ repository }: AppProps): ReactElement {
     };
     if (player.readyState >= HTMLMediaElement.HAVE_METADATA) applySeek();
     else player.addEventListener("loadedmetadata", applySeek, { once: true });
+  }
+
+  function handleMediaError(sourceUrl: string, player: HTMLVideoElement): void {
+    if (player.error?.code === MediaError.MEDIA_ERR_ABORTED) return;
+    if (!autoRetriedMediaRef.current.has(sourceUrl)) {
+      autoRetriedMediaRef.current.add(sourceUrl);
+      window.setTimeout(() => {
+        if (playerRef.current !== player) return;
+        setMediaErrorUrl(null);
+        player.load();
+      }, 700);
+      return;
+    }
+    setMediaErrorUrl(sourceUrl);
+  }
+
+  function retryMedia(): void {
+    const player = playerRef.current;
+    if (!player) return;
+    setMediaErrorUrl(null);
+    player.load();
+    void player.play().catch(() => undefined);
   }
 
   function saveSidebarWidth(width: number): void {
@@ -624,8 +647,11 @@ export function App({ repository }: AppProps): ReactElement {
                     <video
                       controls
                       key={mediaUrl}
-                      onCanPlay={() => setMediaError(false)}
-                      onError={() => setMediaError(true)}
+                      onCanPlay={() => {
+                        autoRetriedMediaRef.current.delete(mediaUrl);
+                        setMediaErrorUrl(null);
+                      }}
+                      onError={(event) => handleMediaError(mediaUrl, event.currentTarget)}
                       onLoadedMetadata={(event) => {
                         const duration = event.currentTarget.duration;
                         setMediaDuration(Number.isFinite(duration) ? duration : null);
@@ -635,19 +661,24 @@ export function App({ repository }: AppProps): ReactElement {
                       ref={playerRef}
                       src={mediaUrl}
                     />
-                    {mediaError && (
-                      <div className="media-error">
-                        <strong>This video cannot be played in the embedded player.</strong>
-                        {repository.canOpenInDefaultPlayer !== false && (
-                          <button
-                            className="action primary"
-                            onClick={() => void openInDefaultPlayer()}
-                            type="button"
-                          >
-                            Open in default player
-                          </button>
-                        )}
+                    {mediaErrorUrl === mediaUrl && (
+                      <div className="media-error" role="status">
+                        <span>Embedded playback failed.</span>
+                        <button onClick={retryMedia} type="button">Retry</button>
                       </div>
+                    )}
+                    {repository.canOpenInDefaultPlayer !== false && (
+                      <button
+                        className="action primary player-action"
+                        disabled={openStatus === "opening"}
+                        onClick={() => void openInDefaultPlayer()}
+                        type="button"
+                      >
+                        {openStatus === "opening" && "Opening…"}
+                        {openStatus === "opened" && "Opened in default player"}
+                        {openStatus === "error" && "Could not open video"}
+                        {openStatus === "idle" && "Open in default player"}
+                      </button>
                     )}
                   </>
                 ) : (
@@ -712,21 +743,6 @@ export function App({ repository }: AppProps): ReactElement {
                     <span>{dateLabel(selectedItem) || "Date unknown"}</span>
                     <span>{locationLabels(selectedItem)[0] || "Location unknown"}</span>
                   </div>
-                </div>
-                <div className="actions">
-                  {repository.canOpenInDefaultPlayer !== false && (
-                    <button
-                      className="action primary"
-                      disabled={openStatus === "opening"}
-                      onClick={() => void openInDefaultPlayer()}
-                      type="button"
-                    >
-                      {openStatus === "opening" && "Opening…"}
-                      {openStatus === "opened" && "Opened in default player"}
-                      {openStatus === "error" && "Could not open video"}
-                      {openStatus === "idle" && "Open in default player"}
-                    </button>
-                  )}
                 </div>
                 <div className="detail-columns">
                   <section>
