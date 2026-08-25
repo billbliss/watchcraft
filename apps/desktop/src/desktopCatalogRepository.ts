@@ -21,8 +21,13 @@ export function joinLocalPath(root: string, relativePath: string): string {
 
 export interface DesktopLibraryLocation {
   selectedRoot: string;
-  catalogRoot: string;
-  mediaRoot: string;
+  collectionId: string;
+  manifestPath: string;
+  metadataRoot: string;
+  mediaRoot: string | null;
+  mediaExpected: number;
+  mediaFound: number;
+  mediaExtra: number;
 }
 
 async function fetchLocalJson<T>(path: string): Promise<T> {
@@ -42,7 +47,7 @@ export class DesktopCatalogRepository implements CatalogRepository {
   }
 
   get manifestLocation(): string {
-    return joinLocalPath(this.location.catalogRoot, "collection.json");
+    return this.location.manifestPath;
   }
 
   async loadCollection(): Promise<CollectionManifest> {
@@ -51,20 +56,21 @@ export class DesktopCatalogRepository implements CatalogRepository {
 
   loadAnalysis(item: CatalogItem): Promise<VideoAnalysis> {
     return fetchLocalJson<VideoAnalysis>(
-      joinLocalPath(this.location.catalogRoot, item.analysis.path),
+      joinLocalPath(this.location.metadataRoot, item.analysis.path),
     );
   }
 
   mediaUrl(item: CatalogItem): string | null {
     const media = item.media[0];
     if (!media) return null;
-    if (media.type === "url" && media.url) return media.url;
+    if (media.type === "http-video") return media.url;
+    if (media.type === "youtube" || !this.location.mediaRoot) return null;
     return convertFileSrc(joinLocalPath(this.location.mediaRoot, media.relative_path), "stream");
   }
 
   async defaultPlayerName(item: CatalogItem): Promise<string | null> {
     const media = item.media.find((candidate) => candidate.type === "local-file");
-    if (!media) return null;
+    if (!media || !this.location.mediaRoot) return null;
     try {
       return await invoke<string | null>("default_video_player", {
         path: joinLocalPath(this.location.mediaRoot, media.relative_path),
@@ -76,7 +82,7 @@ export class DesktopCatalogRepository implements CatalogRepository {
 
   async openInDefaultPlayer(item: CatalogItem): Promise<boolean> {
     const media = item.media.find((candidate) => candidate.type === "local-file");
-    if (!media) return false;
+    if (!media || !this.location.mediaRoot) return false;
     try {
       return await invoke<boolean>("open_video", {
         path: joinLocalPath(this.location.mediaRoot, media.relative_path),

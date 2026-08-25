@@ -14,13 +14,22 @@ interface DesktopAppProps {
 
 type ScopeStatus = "checking" | "ready" | "needs-access";
 
+let restoreLibraryRequest: Promise<DesktopLibraryLocation | null> | null = null;
+
+function restoreLibrary(legacyRoot: string | null): Promise<DesktopLibraryLocation | null> {
+  restoreLibraryRequest ??= invoke<DesktopLibraryLocation | null>("load_current_collection")
+    .then((location) => {
+      if (location || !legacyRoot) return location;
+      return invoke<DesktopLibraryLocation | null>("ensure_library_scope", { path: legacyRoot });
+    });
+  return restoreLibraryRequest;
+}
+
 export function DesktopApp({ initialLibraryRoot }: DesktopAppProps = {}): ReactElement {
   const [libraryRoot, setLibraryRoot] = useState<string | null>(() =>
     initialLibraryRoot ?? localStorage.getItem(LIBRARY_ROOT_KEY),
   );
-  const [scopeStatus, setScopeStatus] = useState<ScopeStatus>(
-    libraryRoot ? "checking" : "needs-access",
-  );
+  const [scopeStatus, setScopeStatus] = useState<ScopeStatus>("checking");
   const [libraryLocation, setLibraryLocation] = useState<DesktopLibraryLocation | null>(null);
   const [libraryError, setLibraryError] = useState<string | null>(null);
   const repository = useMemo(
@@ -31,18 +40,18 @@ export function DesktopApp({ initialLibraryRoot }: DesktopAppProps = {}): ReactE
   );
 
   useEffect(() => {
-    if (!libraryRoot) {
-      setScopeStatus("needs-access");
-      return;
-    }
     let current = true;
     setScopeStatus("checking");
-    void invoke<DesktopLibraryLocation | null>("ensure_library_scope", { path: libraryRoot })
+    void restoreLibrary(libraryRoot)
       .then((location) => {
         if (!current) return;
         setLibraryLocation(location);
+        if (location) {
+          setLibraryRoot(location.selectedRoot);
+          localStorage.removeItem(LIBRARY_ROOT_KEY);
+        }
         setScopeStatus(location ? "ready" : "needs-access");
-        setLibraryError(location ? null : "Watchcraft could not restore access to that folder.");
+        setLibraryError(null);
       })
       .catch((error: unknown) => {
         if (!current) return;
@@ -61,7 +70,7 @@ export function DesktopApp({ initialLibraryRoot }: DesktopAppProps = {}): ReactE
         defaultPath: libraryRoot,
       });
       if (!location) return;
-      localStorage.setItem(LIBRARY_ROOT_KEY, location.selectedRoot);
+      localStorage.removeItem(LIBRARY_ROOT_KEY);
       setLibraryRoot(location.selectedRoot);
       setLibraryLocation(location);
       setScopeStatus("ready");
@@ -106,7 +115,7 @@ export function DesktopApp({ initialLibraryRoot }: DesktopAppProps = {}): ReactE
       >
         Change library
       </button>
-      <App key={libraryLocation?.catalogRoot} repository={repository} />
+      <App key={libraryLocation?.manifestPath} repository={repository} />
     </div>
   );
 }

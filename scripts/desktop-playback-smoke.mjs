@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -18,15 +18,33 @@ function findLibraryRoot(path) {
 }
 
 function findCatalogRoot(selectedRoot) {
-  if (existsSync(join(selectedRoot, "collection.json"))) return selectedRoot;
+  const roots = [selectedRoot];
   try {
-    const candidates = readdirSync(selectedRoot, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory() && existsSync(join(selectedRoot, entry.name, "collection.json")))
-      .map((entry) => join(selectedRoot, entry.name));
-    return candidates.length === 1 ? candidates[0] : null;
+    roots.push(...readdirSync(selectedRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => join(selectedRoot, entry.name)));
   } catch {
     return null;
   }
+  const candidates = roots.filter((root) => {
+    try {
+      return readdirSync(root, { withFileTypes: true })
+        .filter((entry) => entry.isFile())
+        .map((entry) => join(root, entry.name))
+        .some((path) => {
+          try {
+            if (statSync(path).size > 64 * 1024 * 1024) return false;
+            const value = JSON.parse(readFileSync(path, "utf8"));
+            return value?.kind === "watchcraft.collection" && value?.schema_version === 4;
+          } catch {
+            return false;
+          }
+        });
+    } catch {
+      return false;
+    }
+  });
+  return candidates.length === 1 ? candidates[0] : null;
 }
 
 const libraryRoot = providedVideo ? findLibraryRoot(videoPath) : temporaryRoot;
@@ -115,12 +133,13 @@ try {
 
     const catalogRoot = join(libraryRoot, "Course Metadata");
     mkdirSync(join(catalogRoot, "analysis"), { recursive: true });
-    writeFileSync(join(catalogRoot, "collection.json"), JSON.stringify({
-      schema_version: 3,
+    writeFileSync(join(catalogRoot, "playback-smoke.watchcraft"), JSON.stringify({
+      kind: "watchcraft.collection",
+      schema_version: 4,
       collection_id: "playback-smoke",
       title: "Playback Smoke Test",
       topic_scope: "collection",
-      media_root: "..",
+      media_root_hint: "..",
       root: {
         type: "group",
         group_id: "root",

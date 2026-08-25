@@ -1,0 +1,826 @@
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Component, Path, PathBuf};
+
+const COLLECTION_KIND: &str = "watchcraft.collection";
+const COLLECTION_SCHEMA_VERSION: u64 = 4;
+const LIBRARY_SCHEMA_VERSION: u64 = 1;
+const MANIFEST_SCAN_LIMIT: u64 = 64 * 1024 * 1024;
+const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "webm", "mkv"];
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LibraryLocation {
+    pub(crate) selected_root: PathBuf,
+    pub(crate) collection_id: String,
+    pub(crate) manifest_path: PathBuf,
+    pub(crate) metadata_root: PathBuf,
+    pub(crate) media_root: Option<PathBuf>,
+    pub(crate) media_expected: usize,
+    pub(crate) media_found: usize,
+    pub(crate) media_extra: usize,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+struct CollectionManifest {
+    kind: String,
+    schema_version: u64,
+    collection_id: String,
+    title: String,
+    revision: u64,
+    topic_scope: String,
+    root: serde_json::Value,
+    topics: serde_json::Value,
+    topic_families: serde_json::Value,
+    stats: serde_json::Value,
+    content_hash: String,
+    #[serde(default)]
+    media_root_hint: Option<PathBuf>,
+    items: BTreeMap<String, CollectionItem>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+struct CollectionItem {
+    item_id: String,
+    title: String,
+    #[serde(default)]
+    media: Vec<MediaReference>,
+    #[serde(default)]
+    transcript: TranscriptReference,
+    analysis: AnalysisReference,
+    summary: String,
+    locations: Vec<serde_json::Value>,
+    topic_ids: Vec<String>,
+    family_ids: Vec<String>,
+    topic_sections: BTreeMap<String, Vec<usize>>,
+    chapter_count: usize,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum MediaReference {
+    #[serde(rename = "local-file")]
+    LocalFile { relative_path: PathBuf },
+    #[serde(rename = "youtube")]
+    YouTube {
+        video_id: String,
+        #[serde(default)]
+        url: Option<String>,
+    },
+    #[serde(rename = "http-video")]
+    HttpVideo { url: String },
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TranscriptReference {
+    subtitles: Option<PathBuf>,
+    text: Option<PathBuf>,
+    segments: Option<PathBuf>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnalysisReference {
+    path: PathBuf,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LibraryRegistry {
+    schema_version: u64,
+    current_collection_id: Option<String>,
+    collections: BTreeMap<String, InstalledCollection>,
+}
+
+impl Default for LibraryRegistry {
+    fn default() -> Self {
+        Self {
+            schema_version: LIBRARY_SCHEMA_VERSION,
+            current_collection_id: None,
+            collections: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct InstalledCollection {
+    collection_id: String,
+    title: String,
+    revision: u64,
+    manifest_path: PathBuf,
+    metadata_root: PathBuf,
+    source: LocalSource,
+    media_binding: Option<DirectoryBinding>,
+    media_expected: usize,
+    media_found: usize,
+    media_extra: usize,
+    enabled: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LocalSource {
+    #[serde(rename = "type")]
+    source_type: String,
+    manifest_path: PathBuf,
+    selected_root: PathBuf,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DirectoryBinding {
+    #[serde(rename = "type")]
+    binding_type: String,
+    path: PathBuf,
+}
+
+pub(crate) fn install_from_folder(
+    app_data_root: &Path,
+    selected_root: &Path,
+) -> Result<LibraryLocation, String> {
+    let selected_root = selected_root
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve the selected folder: {error}"))?;
+    let manifest_path = discover_manifest(&selected_root)?;
+    let manifest = read_manifest(&manifest_path)?;
+    let metadata_source_root = manifest_path
+        .parent()
+        .ok_or("The collection manifest has no parent folder.")?
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve the collection folder: {error}"))?;
+    let local_paths = local_media_paths(&manifest)?;
+    let media_root = resolve_media_root(
+        &selected_root,
+        &metadata_source_root,
+        manifest.media_root_hint.as_deref(),
+        &local_paths,
+    )?;
+    let (media_expected, media_found, media_extra) =
+        media_stats(media_root.as_deref(), &local_paths);
+
+    let safe_id = safe_component(&manifest.collection_id)?;
+    let revision_root = app_data_root
+        .join("collections")
+        .join(safe_id)
+        .join("revisions")
+        .join(manifest.revision.to_string());
+    let private_manifest_path = revision_root.join("manifest.json");
+    if !private_manifest_path.is_file() {
+        install_metadata_revision(
+            &metadata_source_root,
+            &manifest_path,
+            &manifest,
+            &revision_root,
+        )?;
+    }
+
+    let mut registry = read_registry(app_data_root)?;
+    let relative_revision = revision_root
+        .strip_prefix(app_data_root)
+        .map_err(|_| "Private collection storage is outside the Watchcraft data folder.")?
+        .to_path_buf();
+    let relative_manifest = private_manifest_path
+        .strip_prefix(app_data_root)
+        .map_err(|_| "Private manifest storage is outside the Watchcraft data folder.")?
+        .to_path_buf();
+    let installed = InstalledCollection {
+        collection_id: manifest.collection_id.clone(),
+        title: manifest.title,
+        revision: manifest.revision,
+        manifest_path: relative_manifest,
+        metadata_root: relative_revision,
+        source: LocalSource {
+            source_type: "local-manifest".into(),
+            manifest_path,
+            selected_root: selected_root.clone(),
+        },
+        media_binding: media_root.clone().map(|path| DirectoryBinding {
+            binding_type: "directory".into(),
+            path,
+        }),
+        media_expected,
+        media_found,
+        media_extra,
+        enabled: true,
+    };
+    registry.current_collection_id = Some(manifest.collection_id.clone());
+    registry
+        .collections
+        .insert(manifest.collection_id, installed);
+    write_registry(app_data_root, &registry)?;
+    current_location(app_data_root, &registry)
+        .ok_or_else(|| "The installed collection could not be reopened.".into())
+}
+
+pub(crate) fn load_current(app_data_root: &Path) -> Result<Option<LibraryLocation>, String> {
+    let registry = read_registry(app_data_root)?;
+    Ok(current_location(app_data_root, &registry))
+}
+
+fn current_location(app_data_root: &Path, registry: &LibraryRegistry) -> Option<LibraryLocation> {
+    let id = registry.current_collection_id.as_ref()?;
+    let installed = registry.collections.get(id)?;
+    if !installed.enabled {
+        return None;
+    }
+    let manifest_path = app_data_root.join(&installed.manifest_path);
+    let metadata_root = app_data_root.join(&installed.metadata_root);
+    if !manifest_path.is_file() || !metadata_root.is_dir() {
+        return None;
+    }
+    Some(LibraryLocation {
+        selected_root: installed.source.selected_root.clone(),
+        collection_id: installed.collection_id.clone(),
+        manifest_path,
+        metadata_root,
+        media_root: installed
+            .media_binding
+            .as_ref()
+            .map(|binding| binding.path.clone())
+            .filter(|path| path.is_dir()),
+        media_expected: installed.media_expected,
+        media_found: installed.media_found,
+        media_extra: installed.media_extra,
+    })
+}
+
+fn discover_manifest(selected_root: &Path) -> Result<PathBuf, String> {
+    let mut files = candidate_files(selected_root)?;
+    for child in sorted_children(selected_root)? {
+        if child.is_dir() {
+            files.extend(candidate_files(&child)?);
+        }
+    }
+    files.sort();
+    files.dedup();
+    let mut manifests = files
+        .into_iter()
+        .filter(|path| read_manifest(path).is_ok())
+        .collect::<Vec<_>>();
+    match manifests.len() {
+        0 => Err("No Watchcraft collection manifest was found in the selected folder or an immediate child folder.".into()),
+        1 => Ok(manifests.remove(0)),
+        count => Err(format!(
+            "The selected folder contains {count} Watchcraft collections. Choose the specific collection folder you want to install."
+        )),
+    }
+}
+
+fn candidate_files(folder: &Path) -> Result<Vec<PathBuf>, String> {
+    Ok(sorted_children(folder)?
+        .into_iter()
+        .filter(|path| path.is_file() && is_manifest_candidate(path))
+        .collect())
+}
+
+fn sorted_children(folder: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut paths = fs::read_dir(folder)
+        .map_err(|error| format!("Could not inspect {}: {error}", folder.display()))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    paths.sort();
+    Ok(paths)
+}
+
+fn is_manifest_candidate(path: &Path) -> bool {
+    let within_limit = path
+        .metadata()
+        .map(|metadata| metadata.len() <= MANIFEST_SCAN_LIMIT)
+        .unwrap_or(false);
+    let supported_extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "json" | "watchcraft" | "manifest"
+            )
+        })
+        .unwrap_or(true);
+    within_limit && supported_extension
+}
+
+fn read_manifest(path: &Path) -> Result<CollectionManifest, String> {
+    let file = fs::File::open(path)
+        .map_err(|error| format!("Could not open {}: {error}", path.display()))?;
+    let manifest: CollectionManifest = serde_json::from_reader(file)
+        .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+    if manifest.kind != COLLECTION_KIND {
+        return Err(format!(
+            "{} is not a Watchcraft collection.",
+            path.display()
+        ));
+    }
+    if manifest.schema_version != COLLECTION_SCHEMA_VERSION {
+        return Err(format!(
+            "{} uses schema version {}; Watchcraft requires version {COLLECTION_SCHEMA_VERSION}.",
+            path.display(),
+            manifest.schema_version
+        ));
+    }
+    if manifest.collection_id.trim().is_empty() {
+        return Err("The collection_id cannot be empty.".into());
+    }
+    if manifest.title.trim().is_empty() || manifest.topic_scope != "collection" {
+        return Err("The collection title and collection topic scope are required.".into());
+    }
+    if !manifest.root.is_object()
+        || !manifest.topics.is_object()
+        || !manifest.topic_families.is_object()
+        || !manifest.stats.is_object()
+    {
+        return Err(
+            "The collection hierarchy, topic registries, and stats must be objects.".into(),
+        );
+    }
+    if manifest.revision == 0
+        || manifest.content_hash.len() != 64
+        || !manifest
+            .content_hash
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return Err("The collection revision or content_hash is invalid.".into());
+    }
+    Ok(manifest)
+}
+
+fn local_media_paths(manifest: &CollectionManifest) -> Result<Vec<PathBuf>, String> {
+    let mut paths = BTreeSet::new();
+    for (item_id, item) in &manifest.items {
+        if item.item_id != *item_id || item.title.trim().is_empty() || item.media.is_empty() {
+            return Err(
+                "Each collection item requires a matching item_id, a title, and media.".into(),
+            );
+        }
+        for media in &item.media {
+            match media {
+                MediaReference::LocalFile { relative_path } => {
+                    validate_relative_path(relative_path, "local media")?;
+                    paths.insert(relative_path.clone());
+                }
+                MediaReference::YouTube { video_id, url } => {
+                    if video_id.trim().is_empty()
+                        || url
+                            .as_ref()
+                            .is_some_and(|value| !value.starts_with("https://"))
+                    {
+                        return Err("A YouTube media reference is invalid.".into());
+                    }
+                }
+                MediaReference::HttpVideo { url } => {
+                    if !url.starts_with("https://") && !url.starts_with("http://") {
+                        return Err("An HTTP video reference must use an HTTP(S) URL.".into());
+                    }
+                }
+            }
+        }
+    }
+    Ok(paths.into_iter().collect())
+}
+
+fn resolve_media_root(
+    selected_root: &Path,
+    metadata_root: &Path,
+    hint: Option<&Path>,
+    local_paths: &[PathBuf],
+) -> Result<Option<PathBuf>, String> {
+    if local_paths.is_empty() {
+        return Ok(None);
+    }
+    let candidate = if let Some(hint) = hint {
+        validate_media_root_hint(hint)?;
+        metadata_root.join(hint)
+    } else {
+        selected_root.to_path_buf()
+    };
+    let candidate = candidate
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve the suggested local media folder: {error}"))?;
+    if !candidate.is_dir() {
+        return Err("The suggested local media location is not a folder.".into());
+    }
+    let within_selection = candidate.starts_with(selected_root);
+    let selected_is_manifest_folder = selected_root == metadata_root;
+    let is_direct_parent = selected_is_manifest_folder
+        && metadata_root
+            .parent()
+            .map(|parent| parent == candidate)
+            .unwrap_or(false);
+    if !within_selection && !is_direct_parent {
+        return Err("media_root_hint points outside the selected library boundary.".into());
+    }
+    Ok(Some(candidate))
+}
+
+fn validate_media_root_hint(path: &Path) -> Result<(), String> {
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        return Err("The media_root_hint must be a non-empty relative path.".into());
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::RootDir | Component::Prefix(_)))
+    {
+        return Err("The media_root_hint must be relative to the collection folder.".into());
+    }
+    Ok(())
+}
+
+fn media_stats(media_root: Option<&Path>, local_paths: &[PathBuf]) -> (usize, usize, usize) {
+    let expected = local_paths.len();
+    let Some(media_root) = media_root else {
+        return (expected, 0, 0);
+    };
+    let found = local_paths
+        .iter()
+        .filter(|relative| media_root.join(relative).is_file())
+        .count();
+    let total_video_files = count_video_files(media_root);
+    (expected, found, total_video_files.saturating_sub(found))
+}
+
+fn count_video_files(folder: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(folder) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .map(|path| {
+            if path.is_dir() && !path.is_symlink() {
+                count_video_files(&path)
+            } else if is_video_path(&path) {
+                1
+            } else {
+                0
+            }
+        })
+        .sum()
+}
+
+fn is_video_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| VIDEO_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+fn install_metadata_revision(
+    source_root: &Path,
+    source_manifest: &Path,
+    manifest: &CollectionManifest,
+    target_root: &Path,
+) -> Result<(), String> {
+    let parent = target_root
+        .parent()
+        .ok_or("Private revision storage has no parent folder.")?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Could not create private collection storage: {error}"))?;
+    let staging = parent.join(format!(".{}-{}.tmp", manifest.revision, std::process::id()));
+    if staging.exists() {
+        fs::remove_dir_all(&staging)
+            .map_err(|error| format!("Could not clear private install staging: {error}"))?;
+    }
+    fs::create_dir_all(&staging)
+        .map_err(|error| format!("Could not create private install staging: {error}"))?;
+    copy_file(source_manifest, &staging.join("manifest.json"))?;
+
+    let mut metadata_paths = BTreeSet::new();
+    for item in manifest.items.values() {
+        metadata_paths.insert(item.analysis.path.clone());
+        metadata_paths.extend(item.transcript.subtitles.iter().cloned());
+        metadata_paths.extend(item.transcript.text.iter().cloned());
+        metadata_paths.extend(item.transcript.segments.iter().cloned());
+    }
+    for relative in metadata_paths {
+        validate_relative_path(&relative, "metadata")?;
+        let source = source_root.join(&relative);
+        let canonical_source = source.canonicalize().map_err(|error| {
+            format!(
+                "Could not resolve referenced metadata {}: {error}",
+                source.display()
+            )
+        })?;
+        if !canonical_source.starts_with(source_root) || !canonical_source.is_file() {
+            return Err(format!(
+                "Referenced metadata is outside the collection folder: {}",
+                relative.display()
+            ));
+        }
+        copy_file(&canonical_source, &staging.join(&relative))?;
+    }
+
+    if target_root.exists() {
+        fs::remove_dir_all(&staging)
+            .map_err(|error| format!("Could not clear private install staging: {error}"))?;
+    } else {
+        fs::rename(&staging, target_root)
+            .map_err(|error| format!("Could not finalize private collection metadata: {error}"))?;
+    }
+    Ok(())
+}
+
+fn copy_file(source: &Path, target: &Path) -> Result<(), String> {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Could not create private metadata folder: {error}"))?;
+    }
+    fs::copy(source, target).map_err(|error| {
+        format!(
+            "Could not copy {} into private collection storage: {error}",
+            source.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn validate_relative_path(path: &Path, label: &str) -> Result<(), String> {
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        return Err(format!(
+            "The {label} path must be a non-empty relative path."
+        ));
+    }
+    if path.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err(format!(
+            "The {label} path cannot leave its collection folder."
+        ));
+    }
+    Ok(())
+}
+
+fn safe_component(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("The collection_id cannot be empty.".into());
+    }
+    let readable: String = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let hash = value
+        .as_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        });
+    Ok(format!("{readable}-{hash:016x}"))
+}
+
+fn registry_path(app_data_root: &Path) -> PathBuf {
+    app_data_root.join("library.json")
+}
+
+fn read_registry(app_data_root: &Path) -> Result<LibraryRegistry, String> {
+    let path = registry_path(app_data_root);
+    if !path.is_file() {
+        return Ok(LibraryRegistry::default());
+    }
+    let registry: LibraryRegistry = serde_json::from_reader(
+        fs::File::open(&path)
+            .map_err(|error| format!("Could not open the private library registry: {error}"))?,
+    )
+    .map_err(|error| format!("Could not read the private library registry: {error}"))?;
+    if registry.schema_version != LIBRARY_SCHEMA_VERSION {
+        return Err(format!(
+            "The private library registry uses unsupported schema version {}.",
+            registry.schema_version
+        ));
+    }
+    Ok(registry)
+}
+
+fn write_registry(app_data_root: &Path, registry: &LibraryRegistry) -> Result<(), String> {
+    fs::create_dir_all(app_data_root)
+        .map_err(|error| format!("Could not create the Watchcraft data folder: {error}"))?;
+    let destination = registry_path(app_data_root);
+    let temporary = app_data_root.join("library.json.tmp");
+    let bytes = serde_json::to_vec_pretty(registry)
+        .map_err(|error| format!("Could not serialize the private library registry: {error}"))?;
+    fs::write(&temporary, bytes)
+        .map_err(|error| format!("Could not stage the private library registry: {error}"))?;
+    replace_file(&temporary, &destination)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn replace_file(source: &Path, destination: &Path) -> Result<(), String> {
+    fs::rename(source, destination)
+        .map_err(|error| format!("Could not save the private library registry: {error}"))
+}
+
+#[cfg(target_os = "windows")]
+fn replace_file(source: &Path, destination: &Path) -> Result<(), String> {
+    let backup = destination.with_extension("json.backup");
+    if destination.exists() {
+        fs::rename(destination, &backup)
+            .map_err(|error| format!("Could not prepare the private library registry: {error}"))?;
+    }
+    if let Err(error) = fs::rename(source, destination) {
+        let _ = fs::rename(&backup, destination);
+        return Err(format!(
+            "Could not save the private library registry: {error}"
+        ));
+    }
+    if backup.exists() {
+        let _ = fs::remove_file(backup);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{discover_manifest, install_from_folder, load_current};
+    use std::fs;
+    use std::path::PathBuf;
+
+    #[test]
+    fn discovers_an_arbitrarily_named_manifest_from_collection_or_parent() {
+        let root = temporary_root("discovery");
+        let collection = root.join("Course Metadata");
+        fs::create_dir_all(&collection).unwrap();
+        write_fixture(&collection.join("course.watchcraft"), "demo", 1, "..");
+        assert_eq!(
+            discover_manifest(&root).unwrap(),
+            collection.join("course.watchcraft")
+        );
+        assert_eq!(
+            discover_manifest(&collection).unwrap(),
+            collection.join("course.watchcraft")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn asks_for_a_specific_collection_when_a_parent_contains_multiple() {
+        let root = temporary_root("multiple");
+        for (name, id) in [("Course One", "one"), ("Course Two", "two")] {
+            let collection = root.join(name);
+            fs::create_dir_all(&collection).unwrap();
+            write_fixture(&collection.join("manifest.json"), id, 1, ".");
+        }
+        let error = discover_manifest(&root).unwrap_err();
+        assert!(error.contains("2 Watchcraft collections"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_a_media_hint_beyond_the_selected_boundary() {
+        let root = temporary_root("unsafe-hint");
+        let collection = root.join("Course Metadata");
+        fs::create_dir_all(collection.join("analysis")).unwrap();
+        fs::write(collection.join("analysis/lesson.json"), "{}").unwrap();
+        write_fixture(&collection.join("manifest.json"), "unsafe", 1, "../..");
+        let error = install_from_folder(&root.join("private"), &collection).unwrap_err();
+        assert!(error.contains("outside the selected library boundary"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn installs_metadata_and_restores_private_media_binding() {
+        let root = temporary_root("install");
+        let app_data = root.join("private");
+        let collection = root.join("Course Metadata");
+        fs::create_dir_all(collection.join("analysis")).unwrap();
+        fs::create_dir_all(root.join("media")).unwrap();
+        fs::write(collection.join("analysis/lesson.json"), "{}").unwrap();
+        fs::write(root.join("media/lesson.mp4"), "video").unwrap();
+        write_fixture(&collection.join("anything.json"), "demo", 2, "..");
+
+        let installed = install_from_folder(&app_data, &root).unwrap();
+        assert_eq!(installed.collection_id, "demo");
+        assert_eq!(installed.media_expected, 1);
+        assert_eq!(installed.media_found, 1);
+        assert_eq!(installed.media_extra, 0);
+        assert!(installed.manifest_path.starts_with(&app_data));
+        assert!(installed
+            .metadata_root
+            .join("analysis/lesson.json")
+            .is_file());
+        assert!(app_data.join("library.json").is_file());
+        assert_eq!(load_current(&app_data).unwrap(), Some(installed));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn allows_partial_local_collections_and_ignores_extra_videos() {
+        let root = temporary_root("partial");
+        let app_data = root.join("private");
+        let collection = root.join("Course Metadata");
+        fs::create_dir_all(collection.join("analysis")).unwrap();
+        fs::create_dir_all(root.join("media")).unwrap();
+        fs::write(collection.join("analysis/lesson.json"), "{}").unwrap();
+        fs::write(root.join("media/extra.mp4"), "video").unwrap();
+        write_fixture(&collection.join("catalog-data"), "partial", 1, "..");
+        let installed = install_from_folder(&app_data, &root).unwrap();
+        assert_eq!(
+            (
+                installed.media_expected,
+                installed.media_found,
+                installed.media_extra
+            ),
+            (1, 0, 1)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn installs_a_hosted_collection_without_a_local_media_binding() {
+        let root = temporary_root("hosted");
+        let app_data = root.join("private");
+        fs::create_dir_all(root.join("analysis")).unwrap();
+        fs::write(root.join("analysis/lesson.json"), "{}").unwrap();
+        fs::write(
+            root.join("remote.json"),
+            r#"{
+              "kind":"watchcraft.collection",
+              "schema_version":4,
+              "collection_id":"hosted/demo",
+              "title":"Hosted Demo",
+              "revision":1,
+              "topic_scope":"collection",
+              "root":{"type":"group","group_id":"root","title":"Hosted Demo","children":[]},
+              "topics":{},
+              "topic_families":{},
+              "items":{
+                "lesson":{
+                  "item_id":"lesson",
+                  "title":"Lesson",
+                  "media":[{"type":"youtube","video_id":"abc123"}],
+                  "transcript":{},
+                  "analysis":{"path":"analysis/lesson.json"},
+                  "summary":"Lesson",
+                  "locations":[],
+                  "topic_ids":[],
+                  "family_ids":[],
+                  "topic_sections":{},
+                  "chapter_count":1
+                }
+              },
+              "stats":{"video_count":1,"topic_count":0,"topic_family_count":0},
+              "content_hash":"0000000000000000000000000000000000000000000000000000000000000000"
+            }"#,
+        )
+        .unwrap();
+        let installed = install_from_folder(&app_data, &root).unwrap();
+        assert_eq!(installed.collection_id, "hosted/demo");
+        assert_eq!(installed.media_root, None);
+        assert_eq!(installed.media_expected, 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn write_fixture(path: &std::path::Path, id: &str, revision: u64, hint: &str) {
+        let json = format!(
+            r#"{{
+              "kind":"watchcraft.collection",
+              "schema_version":4,
+              "collection_id":"{id}",
+              "title":"Demo",
+              "revision":{revision},
+              "media_root_hint":"{hint}",
+              "topic_scope":"collection",
+              "root":{{"type":"group","group_id":"root","title":"Demo","children":[]}},
+              "topics":{{}},
+              "topic_families":{{}},
+              "items":{{
+                "lesson":{{
+                  "item_id":"lesson",
+                  "title":"Lesson",
+                  "media":[{{"type":"local-file","relative_path":"media/lesson.mp4"}}],
+                  "transcript":{{}},
+                  "analysis":{{"path":"analysis/lesson.json"}},
+                  "summary":"Lesson",
+                  "locations":[],
+                  "topic_ids":[],
+                  "family_ids":[],
+                  "topic_sections":{{}},
+                  "chapter_count":1
+                }}
+              }},
+              "stats":{{"video_count":1,"topic_count":0,"topic_family_count":0}},
+              "content_hash":"0000000000000000000000000000000000000000000000000000000000000000"
+            }}"#
+        );
+        fs::write(path, json).unwrap();
+    }
+
+    fn temporary_root(suffix: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "watchcraft-library-test-{}-{suffix}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+}

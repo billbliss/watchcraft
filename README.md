@@ -83,9 +83,12 @@ npm run desktop:dev
 ```
 
 The first launch asks for a collection folder or its parent. A collection
-folder is identified only by `collection.json`; its name is not significant.
-The manifest's required `media_root` field locates the videos relative to the
-manifest. Development runs as **Watchcraft Dev** with its own app identity, so
+manifest is identified by `kind: "watchcraft.collection"`; its filename and
+folder name are not significant. Watchcraft copies the manifest and referenced
+metadata into its private app-data directory, while local videos remain in place
+and are connected through a private directory binding. An optional
+`media_root_hint` helps establish that binding during installation but is not
+used as runtime authority. Development runs as **Watchcraft Dev** with its own app identity, so
 an installed or previously bundled Watchcraft copy cannot be mistaken for the
 freshly launched development build.
 
@@ -95,7 +98,8 @@ Before merging desktop playback changes, run the native smoke test:
 npm run desktop:smoke
 ```
 
-It generates a complete one-video catalog with a small H.264/AAC fixture,
+It generates a complete one-video schema-v4 collection with an arbitrarily
+named manifest and a small H.264/AAC fixture,
 launches the normal catalog and player UI in an isolated Watchcraft profile,
 verifies that playback advances, then restarts the profile and verifies playback
 again using restored read-only folder access. The runner fails unless the app

@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://watchcraft.dev/schema/collection-v3.json",
+  "$id": "https://watchcraft.dev/schema/collection-v4.json",
   "title": "Watchcraft Collection",
   "type": "object",
   "required": [
+    "kind",
     "schema_version",
     "collection_id",
     "title",
-    "media_root",
     "topic_scope",
     "root",
     "topics",
@@ -18,11 +18,12 @@
     "content_hash"
   ],
   "properties": {
-    "schema_version": { "const": 3 },
+    "kind": { "const": "watchcraft.collection" },
+    "schema_version": { "const": 4 },
     "collection_id": { "$ref": "#/$defs/id" },
     "title": { "type": "string", "minLength": 1 },
     "description": { "type": "string" },
-    "media_root": { "$ref": "#/$defs/path" },
+    "media_root_hint": { "$ref": "#/$defs/path" },
     "publisher": {},
     "metadata_url": { "type": "string" },
     "license": {},
@@ -127,15 +128,7 @@
         "media": {
           "type": "array",
           "minItems": 1,
-          "items": {
-            "type": "object",
-            "required": ["type", "relative_path"],
-            "properties": {
-              "type": { "enum": ["local-file", "url"] },
-              "relative_path": { "$ref": "#/$defs/path" }
-            },
-            "additionalProperties": true
-          }
+          "items": { "$ref": "#/$defs/mediaReference" }
         },
         "transcript": {
           "type": "object",
@@ -172,6 +165,38 @@
         "chapter_count": { "type": "integer", "minimum": 0 }
       },
       "additionalProperties": false
+    },
+    "mediaReference": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["type", "relative_path"],
+          "properties": {
+            "type": { "const": "local-file" },
+            "relative_path": { "$ref": "#/$defs/path" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "video_id"],
+          "properties": {
+            "type": { "const": "youtube" },
+            "video_id": { "type": "string", "minLength": 1 },
+            "url": { "type": "string", "format": "uri" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "url"],
+          "properties": {
+            "type": { "const": "http-video" },
+            "url": { "type": "string", "format": "uri", "pattern": "^https?://" }
+          },
+          "additionalProperties": false
+        }
+      ]
     }
   }
 }

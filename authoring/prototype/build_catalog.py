@@ -201,7 +201,7 @@ def load_analyses(root: Path) -> list[dict]:
     return analyses
 
 
-COLLECTION_SCHEMA_VERSION = 3
+COLLECTION_SCHEMA_VERSION = 4
 
 
 def stable_id(prefix: str, value: str) -> str:
@@ -443,10 +443,11 @@ def build_collection_manifest(
         }
 
     manifest_body = {
+        "kind": "watchcraft.collection",
         "schema_version": COLLECTION_SCHEMA_VERSION,
         "collection_id": collection_id,
         "title": title,
-        "media_root": "..",
+        "media_root_hint": "..",
         "topic_scope": "collection",
         "topic_normalization": {
             "schema_version": normalization.get("schema_version"),

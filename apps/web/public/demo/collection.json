@@ -1,8 +1,9 @@
 {
-  "schema_version": 3,
+  "kind": "watchcraft.collection",
+  "schema_version": 4,
   "collection_id": "watchcraft-demo",
   "title": "Example Collection",
-  "media_root": ".",
+  "media_root_hint": ".",
   "description": "A small catalog fixture for developing the Watchcraft reader.",
   "topic_scope": "collection",
   "root": {

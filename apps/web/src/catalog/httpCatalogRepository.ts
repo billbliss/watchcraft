@@ -7,6 +7,7 @@ import type {
 
 export interface HttpCatalogOptions {
   manifestUrl: string;
+  mediaRootUrl?: string;
 }
 
 async function fetchJson<T>(url: URL): Promise<T> {
@@ -19,10 +20,14 @@ async function fetchJson<T>(url: URL): Promise<T> {
 
 export class HttpCatalogRepository implements CatalogRepository {
   readonly manifestUrl: URL;
+  readonly configuredMediaRootUrl: URL | null;
   private mediaRootUrl: URL | null = null;
 
   constructor(options: HttpCatalogOptions) {
     this.manifestUrl = new URL(options.manifestUrl, window.location.href);
+    this.configuredMediaRootUrl = options.mediaRootUrl
+      ? new URL(options.mediaRootUrl, window.location.href)
+      : null;
   }
 
   get manifestLocation(): string {
@@ -31,8 +36,9 @@ export class HttpCatalogRepository implements CatalogRepository {
 
   async loadCollection(): Promise<CollectionManifest> {
     const manifest = await fetchJson<CollectionManifest>(this.manifestUrl);
-    const directory = manifest.media_root.replace(/[\\/]+$/, "") || ".";
-    this.mediaRootUrl = new URL(`${directory}/`, this.manifestUrl);
+    const hint = manifest.media_root_hint?.replace(/[\\/]+$/, "") || ".";
+    this.mediaRootUrl = this.configuredMediaRootUrl
+      ?? new URL(`${hint}/`, this.manifestUrl);
     return manifest;
   }
 
@@ -43,9 +49,10 @@ export class HttpCatalogRepository implements CatalogRepository {
   mediaUrl(item: CatalogItem): string | null {
     const media = item.media[0];
     if (!media) return null;
-    if (media.type === "url" && media.url) {
+    if (media.type === "http-video") {
       return new URL(media.url, this.manifestUrl).href;
     }
+    if (media.type === "youtube") return null;
     if (!this.mediaRootUrl) return null;
     return new URL(media.relative_path, this.mediaRootUrl).href;
   }
@@ -70,5 +77,6 @@ export function repositoryFromLocation(location: Location): HttpCatalogRepositor
   const params = new URLSearchParams(location.search);
   return new HttpCatalogRepository({
     manifestUrl: params.get("catalog") ?? "/demo/collection.json",
+    mediaRootUrl: params.get("mediaRoot") ?? undefined,
   });
 }

@@ -35,11 +35,26 @@ export interface TopicFamily {
   video_count: number;
 }
 
-export interface MediaReference {
-  type: "local-file" | "url";
+export interface LocalFileMediaReference {
+  type: "local-file";
   relative_path: string;
+}
+
+export interface YouTubeMediaReference {
+  type: "youtube";
+  video_id: string;
   url?: string;
 }
+
+export interface HttpVideoMediaReference {
+  type: "http-video";
+  url: string;
+}
+
+export type MediaReference =
+  | LocalFileMediaReference
+  | YouTubeMediaReference
+  | HttpVideoMediaReference;
 
 export interface CatalogItem {
   item_id: string;
@@ -75,11 +90,12 @@ export interface CatalogItem {
 }
 
 export interface CollectionManifest {
-  schema_version: 3;
+  kind: "watchcraft.collection";
+  schema_version: 4;
   collection_id: string;
   title: string;
   description?: string;
-  media_root: string;
+  media_root_hint?: string;
   topic_scope: "collection";
   root: CollectionGroup;
   topics: Record<string, Topic>;
