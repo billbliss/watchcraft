@@ -13,6 +13,7 @@
 }
 
 * { box-sizing: border-box; }
+html { font-size: 80%; }
 html, body, #root { height: 100%; }
 body { margin: 0; overflow: hidden; }
 button, input { font: inherit; }
@@ -338,7 +339,7 @@ button { color: inherit; }
 .detail-inner { width: min(1440px, 100%); margin: 0 auto; padding: 18px 30px 70px; }
 .detail-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 24px 32px; align-items: start; }
 .eyebrow { margin: 0 0 7px; color: var(--muted); font-size: .73rem; letter-spacing: .04em; text-transform: uppercase; }
-h2 { margin: 0; font-size: clamp(1.55rem, 2.5vw, 2.45rem); line-height: 1.08; letter-spacing: -.035em; }
+h2 { margin: 0; font-size: clamp(1.55rem, 2vw, 2.45rem); line-height: 1.08; letter-spacing: -.035em; }
 h3 { margin: 27px 0 11px; font-size: 1rem; }
 .facts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
 .facts span { padding: 7px 10px; border: 1px solid var(--line); border-radius: 999px; color: #c6d0c9; background: var(--panel); font-size: .84rem; }
