@@ -43,7 +43,7 @@ button { color: inherit; }
 .brand-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 15px; }
 .brand-row h1 { margin: 0; font-size: 1.4rem; letter-spacing: -.03em; }
 .tagline, .collection-name { margin: 3px 0 0; color: var(--muted); font-size: .74rem; }
-.collection-name { margin-top: 7px; color: #c6d0c9; font-weight: 650; }
+.collection-name { margin-top: 7px; color: #c6d0c9; font-size: .95rem; font-weight: 650; }
 .result-count { flex: none; padding-top: 4px; color: var(--muted); font-size: .75rem; white-space: nowrap; }
 .search-row { position: relative; margin-top: 16px; }
 .search-input {
@@ -372,9 +372,6 @@ h3 { margin: 27px 0 11px; font-size: 1rem; }
 .related-box { margin-top: 13px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; background: #111713; }
 .related-box > strong { display: block; margin-bottom: 8px; color: var(--muted); font-size: .7rem; letter-spacing: .05em; text-transform: uppercase; }
 .related-box p { margin: 0; color: var(--muted); font-size: .8rem; line-height: 1.45; }
-.evidence-details { max-width: 900px; margin-top: 27px; padding-top: 15px; border-top: 1px solid var(--line); color: var(--muted); font-size: .85rem; }
-.evidence-details summary { color: #b7c2ba; cursor: pointer; }
-.evidence-details ul { margin: 12px 0 0; padding-left: 19px; line-height: 1.55; }
 .chapters-column h3 { margin-top: 0; }
 .timeline {
   display: grid;

@@ -770,40 +770,6 @@ export function App({ repository }: AppProps): ReactElement {
                         ) : <p>No related topics are recorded.</p>
                       ) : <p>Select a topic to highlight its chapters and see related topics.</p>}
                     </div>
-                    {(typeof selectedItem.date === "object" && selectedItem.date?.basis
-                      || selectedItem.locations.some((location) =>
-                        typeof location === "object" && Boolean(location.basis),
-                      )) && (
-                      <details className="evidence-details">
-                        <summary>Date and location evidence</summary>
-                        <ul>
-                          {typeof selectedItem.date === "object" && selectedItem.date?.basis && (
-                            <li>
-                              <strong>
-                                Date: {selectedItem.date.display || "Unknown"}
-                                {Number.isFinite(selectedItem.date.confidence)
-                                  ? ` (${Math.round((selectedItem.date.confidence ?? 0) * 100)}% confidence). `
-                                  : ". "}
-                              </strong>
-                              {selectedItem.date.basis}
-                            </li>
-                          )}
-                          {selectedItem.locations.map((location, index) =>
-                            typeof location === "object" && location.basis ? (
-                              <li key={`${location.name}-${index}`}>
-                                <strong>
-                                  Location: {location.name || "Unknown"}
-                                  {Number.isFinite(location.confidence)
-                                    ? ` (${Math.round((location.confidence ?? 0) * 100)}% confidence). `
-                                    : ". "}
-                                </strong>
-                                {location.basis}
-                              </li>
-                            ) : null,
-                          )}
-                        </ul>
-                      </details>
-                    )}
                   </section>
 
                   <section className="chapters-column">
