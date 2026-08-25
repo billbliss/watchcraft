@@ -201,7 +201,7 @@ def load_analyses(root: Path) -> list[dict]:
     return analyses
 
 
-COLLECTION_SCHEMA_VERSION = 2
+COLLECTION_SCHEMA_VERSION = 3
 
 
 def stable_id(prefix: str, value: str) -> str:
@@ -446,6 +446,7 @@ def build_collection_manifest(
         "schema_version": COLLECTION_SCHEMA_VERSION,
         "collection_id": collection_id,
         "title": title,
+        "media_root": "..",
         "topic_scope": "collection",
         "topic_normalization": {
             "schema_version": normalization.get("schema_version"),

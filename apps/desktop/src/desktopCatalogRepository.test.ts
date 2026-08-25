@@ -1,12 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  isCatalogMetadataFolder,
-  joinLocalPath,
-  localPathName,
-  mediaRootForLibrary,
-  parentLocalPath,
-} from "./desktopCatalogRepository.ts";
+import { joinLocalPath } from "./desktopCatalogRepository.ts";
 
 test("joins portable catalog paths on macOS", () => {
   assert.equal(
@@ -20,29 +14,4 @@ test("joins portable catalog paths on Windows", () => {
     joinLocalPath("C:\\Courses", "Part 1/video.mp4"),
     "C:\\Courses\\Part 1\\video.mp4",
   );
-});
-
-test("finds the manifest parent on both path styles", () => {
-  assert.equal(
-    parentLocalPath("/Courses/Video Catalog/collection.json"),
-    "/Courses/Video Catalog",
-  );
-  assert.equal(
-    parentLocalPath("C:\\Courses\\Video Catalog\\collection.json"),
-    "C:\\Courses\\Video Catalog",
-  );
-});
-
-test("recognizes a selected catalog metadata folder on both path styles", () => {
-  assert.equal(localPathName("/Courses/Video Catalog/"), "Video Catalog");
-  assert.equal(localPathName("C:\\Courses\\Video Catalog\\"), "Video Catalog");
-  assert.equal(isCatalogMetadataFolder("/Courses/Video Catalog"), true);
-  assert.equal(isCatalogMetadataFolder("C:\\Courses\\video catalog\\"), true);
-  assert.equal(isCatalogMetadataFolder("/Courses"), false);
-});
-
-test("uses the collection parent as the media root when Video Catalog is selected", () => {
-  assert.equal(mediaRootForLibrary("/Courses/Video Catalog"), "/Courses");
-  assert.equal(mediaRootForLibrary("C:\\Courses\\Video Catalog"), "C:\\Courses");
-  assert.equal(mediaRootForLibrary("/Courses"), "/Courses");
 });

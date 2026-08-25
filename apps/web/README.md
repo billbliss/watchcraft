@@ -12,5 +12,5 @@ Pass `?catalog=<manifest-url>` to use another catalog. For the existing Python
 server, use:
 
 ```text
-?catalog=http://127.0.0.1:8765/Video%20Catalog/collection.json
+?catalog=http://127.0.0.1:8765/course-data/collection.json
 ```

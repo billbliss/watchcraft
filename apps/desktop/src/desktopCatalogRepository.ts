@@ -19,26 +19,10 @@ export function joinLocalPath(root: string, relativePath: string): string {
   return `${cleanRoot}${separator}${cleanRelative}`;
 }
 
-export function parentLocalPath(path: string): string {
-  const separator = separatorFor(path);
-  const cleanPath = path.replace(/[\\/]+$/, "");
-  const boundary = cleanPath.lastIndexOf(separator);
-  return boundary > 0 ? cleanPath.slice(0, boundary) : cleanPath;
-}
-
-export function localPathName(path: string): string {
-  const separator = separatorFor(path);
-  const cleanPath = path.replace(/[\\/]+$/, "");
-  const boundary = cleanPath.lastIndexOf(separator);
-  return boundary >= 0 ? cleanPath.slice(boundary + 1) : cleanPath;
-}
-
-export function isCatalogMetadataFolder(path: string): boolean {
-  return localPathName(path).toLocaleLowerCase() === "video catalog";
-}
-
-export function mediaRootForLibrary(path: string): string {
-  return isCatalogMetadataFolder(path) ? parentLocalPath(path) : path;
+export interface DesktopLibraryLocation {
+  selectedRoot: string;
+  catalogRoot: string;
+  mediaRoot: string;
 }
 
 async function fetchLocalJson<T>(path: string): Promise<T> {
@@ -51,55 +35,31 @@ async function fetchLocalJson<T>(path: string): Promise<T> {
 
 export class DesktopCatalogRepository implements CatalogRepository {
   readonly canOpenInDefaultPlayer = true;
-  readonly libraryRoot: string;
-  readonly mediaRoot: string;
-  private catalogRoot: string | null = null;
+  readonly location: DesktopLibraryLocation;
 
-  constructor(libraryRoot: string) {
-    this.libraryRoot = libraryRoot;
-    this.mediaRoot = mediaRootForLibrary(libraryRoot);
+  constructor(location: DesktopLibraryLocation) {
+    this.location = location;
   }
 
   get manifestLocation(): string {
-    return this.catalogRoot
-      ? joinLocalPath(this.catalogRoot, "collection.json")
-      : this.libraryRoot;
+    return joinLocalPath(this.location.catalogRoot, "collection.json");
   }
 
   async loadCollection(): Promise<CollectionManifest> {
-    const candidates = [
-      joinLocalPath(this.libraryRoot, "collection.json"),
-      joinLocalPath(this.libraryRoot, "Video Catalog/collection.json"),
-    ];
-    const failures: string[] = [];
-
-    for (const candidate of candidates) {
-      try {
-        const manifest = await fetchLocalJson<CollectionManifest>(candidate);
-        this.catalogRoot = parentLocalPath(candidate);
-        return manifest;
-      } catch (error: unknown) {
-        failures.push(error instanceof Error ? error.message : String(error));
-      }
-    }
-
-    throw new Error(
-      `No collection.json was found in the selected library. ${failures.join(" ")}`,
-    );
+    return fetchLocalJson<CollectionManifest>(this.manifestLocation);
   }
 
   loadAnalysis(item: CatalogItem): Promise<VideoAnalysis> {
-    if (!this.catalogRoot) {
-      return Promise.reject(new Error("The collection manifest has not loaded."));
-    }
-    return fetchLocalJson<VideoAnalysis>(joinLocalPath(this.catalogRoot, item.analysis.path));
+    return fetchLocalJson<VideoAnalysis>(
+      joinLocalPath(this.location.catalogRoot, item.analysis.path),
+    );
   }
 
   mediaUrl(item: CatalogItem): string | null {
     const media = item.media[0];
     if (!media) return null;
     if (media.type === "url" && media.url) return media.url;
-    return convertFileSrc(joinLocalPath(this.mediaRoot, media.relative_path), "stream");
+    return convertFileSrc(joinLocalPath(this.location.mediaRoot, media.relative_path), "stream");
   }
 
   async defaultPlayerName(item: CatalogItem): Promise<string | null> {
@@ -107,7 +67,7 @@ export class DesktopCatalogRepository implements CatalogRepository {
     if (!media) return null;
     try {
       return await invoke<string | null>("default_video_player", {
-        path: joinLocalPath(this.mediaRoot, media.relative_path),
+        path: joinLocalPath(this.location.mediaRoot, media.relative_path),
       });
     } catch {
       return null;
@@ -119,7 +79,7 @@ export class DesktopCatalogRepository implements CatalogRepository {
     if (!media) return false;
     try {
       return await invoke<boolean>("open_video", {
-        path: joinLocalPath(this.mediaRoot, media.relative_path),
+        path: joinLocalPath(this.location.mediaRoot, media.relative_path),
       });
     } catch {
       return false;

@@ -245,7 +245,8 @@ class FormattingTests(unittest.TestCase):
             Path("/library/Landscape Classes"), analyses, mappings
         )
 
-        self.assertEqual(manifest["schema_version"], 2)
+        self.assertEqual(manifest["schema_version"], 3)
+        self.assertEqual(manifest["media_root"], "..")
         self.assertEqual(manifest["collection_id"], "landscape-classes")
         self.assertEqual(manifest["topic_scope"], "collection")
         self.assertEqual(

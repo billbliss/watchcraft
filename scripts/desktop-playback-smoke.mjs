@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -11,13 +11,22 @@ const videoPath = providedVideo ? resolve(providedVideo) : join(temporaryRoot, "
 function findLibraryRoot(path) {
   let candidate = resolve(path, "..");
   while (candidate !== resolve(candidate, "..")) {
-    if (
-      existsSync(join(candidate, "collection.json"))
-      || existsSync(join(candidate, "Video Catalog", "collection.json"))
-    ) return candidate;
+    if (findCatalogRoot(candidate)) return candidate;
     candidate = resolve(candidate, "..");
   }
   throw new Error(`Could not find a Watchcraft collection above ${path}`);
+}
+
+function findCatalogRoot(selectedRoot) {
+  if (existsSync(join(selectedRoot, "collection.json"))) return selectedRoot;
+  try {
+    const candidates = readdirSync(selectedRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && existsSync(join(selectedRoot, entry.name, "collection.json")))
+      .map((entry) => join(selectedRoot, entry.name));
+    return candidates.length === 1 ? candidates[0] : null;
+  } catch {
+    return null;
+  }
 }
 
 const libraryRoot = providedVideo ? findLibraryRoot(videoPath) : temporaryRoot;
@@ -104,13 +113,14 @@ try {
     ]);
     if ((ffmpegResult.status ?? 1) !== 0) throw new Error("Could not generate the playback fixture");
 
-    const catalogRoot = join(libraryRoot, "Video Catalog");
+    const catalogRoot = join(libraryRoot, "Course Metadata");
     mkdirSync(join(catalogRoot, "analysis"), { recursive: true });
     writeFileSync(join(catalogRoot, "collection.json"), JSON.stringify({
-      schema_version: 2,
+      schema_version: 3,
       collection_id: "playback-smoke",
       title: "Playback Smoke Test",
       topic_scope: "collection",
+      media_root: "..",
       root: {
         type: "group",
         group_id: "root",
@@ -160,7 +170,8 @@ try {
   const restore = runDesktopPhase("verify playback after restart", false);
   if (restore.status !== 0 || !restore.passed) throw new Error("Native playback failed after restart");
 
-  const metadataFolder = join(libraryRoot, "Video Catalog");
+  const metadataFolder = findCatalogRoot(libraryRoot);
+  if (!metadataFolder) throw new Error("Could not locate the generated collection metadata");
   const metadataGuard = runDesktopPhase(
     "play when the metadata folder is selected",
     true,

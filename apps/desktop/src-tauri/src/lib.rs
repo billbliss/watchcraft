@@ -4,7 +4,9 @@ use http::{
 };
 use http_range::HttpRange;
 use percent_encoding::percent_decode_str;
+use serde::{Deserialize, Serialize};
 use std::error::Error;
+use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -17,6 +19,20 @@ const MAX_STREAM_CHUNK: u64 = 2 * 1024 * 1024;
 
 #[derive(Default)]
 struct ApprovedLibraryRoot(RwLock<Option<PathBuf>>);
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LibraryLocation {
+    selected_root: PathBuf,
+    catalog_root: PathBuf,
+    media_root: PathBuf,
+}
+
+#[derive(Deserialize)]
+struct CollectionLocationManifest {
+    schema_version: u64,
+    media_root: PathBuf,
+}
 
 fn is_video_path(path: &Path) -> bool {
     path.extension()
@@ -43,20 +59,80 @@ fn is_within_approved_root(root: &Path, path: &Path) -> bool {
     path.starts_with(root)
 }
 
-fn is_catalog_metadata_root(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| name.eq_ignore_ascii_case("Video Catalog"))
-        .unwrap_or(false)
-        && path.join("collection.json").is_file()
+fn discover_catalog_root(selected_root: &Path) -> Result<PathBuf, String> {
+    if selected_root.join("collection.json").is_file() {
+        return Ok(selected_root.to_path_buf());
+    }
+
+    let mut candidates = fs::read_dir(selected_root)
+        .map_err(|error| format!("Could not inspect the selected folder: {error}"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir() && path.join("collection.json").is_file())
+        .collect::<Vec<_>>();
+    candidates.sort();
+
+    match candidates.len() {
+        0 => Err(
+            "No collection.json was found in the selected folder or an immediate child folder."
+                .into(),
+        ),
+        1 => Ok(candidates.remove(0)),
+        count => Err(format!(
+            "The selected folder contains {count} Watchcraft collections. Choose the specific collection folder you want to open."
+        )),
+    }
 }
 
-fn effective_library_root(path: &Path) -> PathBuf {
-    if is_catalog_metadata_root(path) {
-        path.parent().unwrap_or(path).to_path_buf()
-    } else {
-        path.to_path_buf()
+fn resolve_library_location(selected_root: &Path) -> Result<LibraryLocation, String> {
+    let selected_root = selected_root
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve the selected folder: {error}"))?;
+    let catalog_root = discover_catalog_root(&selected_root)?
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve the collection folder: {error}"))?;
+    let manifest_path = catalog_root.join("collection.json");
+    let manifest: CollectionLocationManifest = serde_json::from_reader(
+        fs::File::open(&manifest_path)
+            .map_err(|error| format!("Could not open collection.json: {error}"))?,
+    )
+    .map_err(|error| format!("Could not read collection.json: {error}"))?;
+    if manifest.schema_version != 3 {
+        return Err(format!(
+            "This collection uses schema version {}. Watchcraft currently requires collection schema version 3.",
+            manifest.schema_version
+        ));
     }
+    if manifest.media_root.is_absolute() {
+        return Err("collection.json media_root must be relative to the collection folder.".into());
+    }
+    let media_root = catalog_root
+        .join(&manifest.media_root)
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve collection.json media_root: {error}"))?;
+    if !media_root.is_dir() {
+        return Err("collection.json media_root does not resolve to a folder.".into());
+    }
+
+    let media_is_within_selection = media_root.starts_with(&selected_root);
+    let selection_is_catalog = catalog_root == selected_root;
+    let media_is_catalog_parent = selection_is_catalog
+        && catalog_root
+            .parent()
+            .map(|parent| parent == media_root)
+            .unwrap_or(false);
+    if !media_is_within_selection && !media_is_catalog_parent {
+        return Err(
+            "collection.json media_root is outside the selected folder. Choose a common parent folder, or use the collection folder with a direct parent media_root."
+                .into(),
+        );
+    }
+
+    Ok(LibraryLocation {
+        selected_root,
+        catalog_root,
+        media_root,
+    })
 }
 
 fn validated_video_path<R: Runtime>(
@@ -87,39 +163,39 @@ fn validated_video_path<R: Runtime>(
 fn ensure_library_scope_inner<R: Runtime>(
     app: &tauri::AppHandle<R>,
     requested_root: &str,
-) -> Result<bool, String> {
+) -> Result<Option<LibraryLocation>, String> {
     let root = PathBuf::from(requested_root);
     if !root.is_dir() {
-        return Ok(false);
+        return Ok(None);
     }
     let scope = app.asset_protocol_scope();
     if !scope.is_allowed(&root) {
-        return Ok(false);
+        return Ok(None);
     }
-    approve_selected_library_root(app, &root)?;
-    Ok(true)
+    approve_selected_library_root(app, &root).map(Some)
 }
 
 fn approve_selected_library_root<R: Runtime>(
     app: &tauri::AppHandle<R>,
     root: &Path,
-) -> Result<PathBuf, String> {
+) -> Result<LibraryLocation, String> {
     if !root.is_dir() {
         return Err("The selected library folder is unavailable.".into());
     }
-    let effective_root = effective_library_root(root);
+    let location = resolve_library_location(root)?;
     app.asset_protocol_scope()
-        .allow_directory(&effective_root, true)
-        .map_err(|error| format!("Could not allow library access: {error}"))?;
-    let canonical_root = effective_root
-        .canonicalize()
-        .map_err(|error| format!("Could not resolve the selected library: {error}"))?;
+        .allow_directory(&location.catalog_root, true)
+        .map_err(|error| format!("Could not allow collection access: {error}"))?;
+    app.asset_protocol_scope()
+        .allow_directory(&location.media_root, true)
+        .map_err(|error| format!("Could not allow media access: {error}"))?;
     let approved_root = app.state::<ApprovedLibraryRoot>();
     *approved_root
         .0
         .write()
-        .map_err(|_| "The selected library state is unavailable.")? = Some(canonical_root.clone());
-    Ok(canonical_root)
+        .map_err(|_| "The selected library state is unavailable.")? =
+        Some(location.media_root.clone());
+    Ok(location)
 }
 
 #[cfg(target_os = "macos")]
@@ -360,7 +436,10 @@ fn default_video_player(app: tauri::AppHandle, path: String) -> Result<Option<St
 }
 
 #[tauri::command]
-fn ensure_library_scope(app: tauri::AppHandle, path: String) -> Result<bool, String> {
+fn ensure_library_scope(
+    app: tauri::AppHandle,
+    path: String,
+) -> Result<Option<LibraryLocation>, String> {
     ensure_library_scope_inner(&app, &path)
 }
 
@@ -368,7 +447,7 @@ fn ensure_library_scope(app: tauri::AppHandle, path: String) -> Result<bool, Str
 async fn choose_library_folder(
     app: tauri::AppHandle,
     default_path: Option<String>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<LibraryLocation>, String> {
     let mut picker = app
         .dialog()
         .file()
@@ -385,8 +464,7 @@ async fn choose_library_folder(
     let selected = selected
         .into_path()
         .map_err(|error| format!("Could not read the selected folder: {error}"))?;
-    approve_selected_library_root(&app, &selected)?;
-    Ok(Some(selected.to_string_lossy().into_owned()))
+    approve_selected_library_root(&app, &selected).map(Some)
 }
 
 #[tauri::command]
@@ -398,12 +476,13 @@ fn playback_smoke_library_root(app: tauri::AppHandle) -> Result<Option<String>, 
     let root_string = root
         .to_str()
         .ok_or("Playback smoke library has no valid root directory")?;
-    if std::env::var("WATCHCRAFT_PLAYBACK_SMOKE_PRIME").as_deref() == Ok("1") {
-        approve_selected_library_root(&app, &root)?;
-    } else if !ensure_library_scope_inner(&app, root_string)? {
-        return Err("Playback smoke library access was not restored.".into());
-    }
-    Ok(Some(root_string.to_owned()))
+    let location = if std::env::var("WATCHCRAFT_PLAYBACK_SMOKE_PRIME").as_deref() == Ok("1") {
+        approve_selected_library_root(&app, &root)?
+    } else {
+        ensure_library_scope_inner(&app, root_string)?
+            .ok_or("Playback smoke library access was not restored.")?
+    };
+    Ok(Some(location.selected_root.to_string_lossy().into_owned()))
 }
 
 #[tauri::command]
@@ -457,7 +536,10 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{effective_library_root, is_video_path, is_within_approved_root, video_content_type};
+    use super::{
+        discover_catalog_root, is_video_path, is_within_approved_root, resolve_library_location,
+        video_content_type,
+    };
     use std::fs;
     use std::path::Path;
 
@@ -494,16 +576,69 @@ mod tests {
     }
 
     #[test]
-    fn treats_a_video_catalog_selection_as_its_media_parent() {
+    fn resolves_an_arbitrarily_named_collection_from_itself_or_its_parent() {
+        let root = temporary_test_root("arbitrary-name");
+        let catalog = root.join("Course Metadata");
+        fs::create_dir_all(&catalog).unwrap();
+        fs::write(
+            catalog.join("collection.json"),
+            r#"{"schema_version":3,"media_root":".."}"#,
+        )
+        .unwrap();
+        let canonical_root = root.canonicalize().unwrap();
+        assert_eq!(discover_catalog_root(&root).unwrap(), catalog);
+        assert_eq!(discover_catalog_root(&catalog).unwrap(), catalog);
+        assert_eq!(
+            resolve_library_location(&root).unwrap().media_root,
+            canonical_root
+        );
+        assert_eq!(
+            resolve_library_location(&catalog).unwrap().media_root,
+            canonical_root
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn asks_for_a_specific_collection_when_a_parent_contains_multiple() {
+        let root = temporary_test_root("multiple-collections");
+        for name in ["Course One", "Course Two"] {
+            let catalog = root.join(name);
+            fs::create_dir_all(&catalog).unwrap();
+            fs::write(
+                catalog.join("collection.json"),
+                r#"{"schema_version":3,"media_root":"."}"#,
+            )
+            .unwrap();
+        }
+        let error = discover_catalog_root(&root).unwrap_err();
+        assert!(error.contains("2 Watchcraft collections"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn rejects_a_media_root_beyond_the_collection_parent() {
+        let root = temporary_test_root("unsafe-parent");
+        let catalog = root.join("Course Metadata");
+        fs::create_dir_all(&catalog).unwrap();
+        fs::write(
+            catalog.join("collection.json"),
+            r#"{"schema_version":3,"media_root":"../.."}"#,
+        )
+        .unwrap();
+        let error = resolve_library_location(&catalog).unwrap_err();
+        assert!(error.contains("outside the selected folder"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    fn temporary_test_root(suffix: &str) -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!(
-            "watchcraft-catalog-root-test-{}",
+            "watchcraft-catalog-root-test-{}-{suffix}",
             std::process::id()
         ));
-        let catalog = root.join("Video Catalog");
-        fs::create_dir_all(&catalog).unwrap();
-        fs::write(catalog.join("collection.json"), "{}").unwrap();
-        assert_eq!(effective_library_root(&catalog), root);
-        fs::remove_dir_all(&root).unwrap();
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
     }
 
     #[test]

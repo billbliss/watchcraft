@@ -1,7 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useState, type ReactElement } from "react";
 import { App } from "../../web/src/App";
-import { DesktopCatalogRepository } from "./desktopCatalogRepository";
+import {
+  DesktopCatalogRepository,
+  type DesktopLibraryLocation,
+} from "./desktopCatalogRepository";
 
 const LIBRARY_ROOT_KEY = "watchcraft.desktop.libraryRoot";
 
@@ -18,12 +21,13 @@ export function DesktopApp({ initialLibraryRoot }: DesktopAppProps = {}): ReactE
   const [scopeStatus, setScopeStatus] = useState<ScopeStatus>(
     libraryRoot ? "checking" : "needs-access",
   );
+  const [libraryLocation, setLibraryLocation] = useState<DesktopLibraryLocation | null>(null);
   const [libraryError, setLibraryError] = useState<string | null>(null);
   const repository = useMemo(
-    () => libraryRoot && scopeStatus === "ready"
-      ? new DesktopCatalogRepository(libraryRoot)
+    () => libraryLocation && scopeStatus === "ready"
+      ? new DesktopCatalogRepository(libraryLocation)
       : null,
-    [libraryRoot, scopeStatus],
+    [libraryLocation, scopeStatus],
   );
 
   useEffect(() => {
@@ -33,11 +37,12 @@ export function DesktopApp({ initialLibraryRoot }: DesktopAppProps = {}): ReactE
     }
     let current = true;
     setScopeStatus("checking");
-    void invoke<boolean>("ensure_library_scope", { path: libraryRoot })
-      .then((allowed) => {
+    void invoke<DesktopLibraryLocation | null>("ensure_library_scope", { path: libraryRoot })
+      .then((location) => {
         if (!current) return;
-        setScopeStatus(allowed ? "ready" : "needs-access");
-        setLibraryError(allowed ? null : "Watchcraft could not restore access to that folder.");
+        setLibraryLocation(location);
+        setScopeStatus(location ? "ready" : "needs-access");
+        setLibraryError(location ? null : "Watchcraft could not restore access to that folder.");
       })
       .catch((error: unknown) => {
         if (!current) return;
@@ -52,12 +57,13 @@ export function DesktopApp({ initialLibraryRoot }: DesktopAppProps = {}): ReactE
   async function chooseLibrary(): Promise<void> {
     setLibraryError(null);
     try {
-      const selected = await invoke<string | null>("choose_library_folder", {
+      const location = await invoke<DesktopLibraryLocation | null>("choose_library_folder", {
         defaultPath: libraryRoot,
       });
-      if (!selected) return;
-      localStorage.setItem(LIBRARY_ROOT_KEY, selected);
-      setLibraryRoot(selected);
+      if (!location) return;
+      localStorage.setItem(LIBRARY_ROOT_KEY, location.selectedRoot);
+      setLibraryRoot(location.selectedRoot);
+      setLibraryLocation(location);
       setScopeStatus("ready");
     } catch (error: unknown) {
       setScopeStatus("needs-access");
@@ -77,8 +83,8 @@ export function DesktopApp({ initialLibraryRoot }: DesktopAppProps = {}): ReactE
           ) : (
             <>
               <p>
-                Choose a Watchcraft collection folder, such as Video Catalog, or
-                the folder containing it and the local videos.
+                Choose the folder containing a Watchcraft collection, or choose
+                the collection folder itself.
               </p>
               <button className="primary-action" onClick={() => void chooseLibrary()} type="button">
                 {libraryRoot ? "Reconnect library folder" : "Choose library folder"}
@@ -100,7 +106,7 @@ export function DesktopApp({ initialLibraryRoot }: DesktopAppProps = {}): ReactE
       >
         Change library
       </button>
-      <App key={libraryRoot} repository={repository} />
+      <App key={libraryLocation?.catalogRoot} repository={repository} />
     </div>
   );
 }

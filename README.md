@@ -59,7 +59,7 @@ To use a live catalog, keep the Python catalog server running and pass its
 manifest URL to the web reader:
 
 ```text
-http://127.0.0.1:5173/?catalog=http://127.0.0.1:8765/Video%20Catalog/collection.json
+http://127.0.0.1:5173/?catalog=http://127.0.0.1:8765/course-data/collection.json
 ```
 
 The query parameter is an adapter setting, not catalog content. The React reader
@@ -82,11 +82,12 @@ npm install --prefer-offline --no-audit --no-fund
 npm run desktop:dev
 ```
 
-The first launch asks for the root folder of a local video library. The adapter
-recognizes both `collection.json` at that root and the current
-`Video Catalog/collection.json` layout. Development runs as **Watchcraft Dev**
-with its own app identity, so an installed or previously bundled Watchcraft
-copy cannot be mistaken for the freshly launched development build.
+The first launch asks for a collection folder or its parent. A collection
+folder is identified only by `collection.json`; its name is not significant.
+The manifest's required `media_root` field locates the videos relative to the
+manifest. Development runs as **Watchcraft Dev** with its own app identity, so
+an installed or previously bundled Watchcraft copy cannot be mistaken for the
+freshly launched development build.
 
 Before merging desktop playback changes, run the native smoke test:
 

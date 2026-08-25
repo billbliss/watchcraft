@@ -7,7 +7,6 @@ import type {
 
 export interface HttpCatalogOptions {
   manifestUrl: string;
-  mediaRootUrl?: string;
 }
 
 async function fetchJson<T>(url: URL): Promise<T> {
@@ -20,22 +19,21 @@ async function fetchJson<T>(url: URL): Promise<T> {
 
 export class HttpCatalogRepository implements CatalogRepository {
   readonly manifestUrl: URL;
-  readonly mediaRootUrl: URL;
+  private mediaRootUrl: URL | null = null;
 
   constructor(options: HttpCatalogOptions) {
     this.manifestUrl = new URL(options.manifestUrl, window.location.href);
-    this.mediaRootUrl = new URL(
-      options.mediaRootUrl ?? "../",
-      this.manifestUrl,
-    );
   }
 
   get manifestLocation(): string {
     return this.manifestUrl.href;
   }
 
-  loadCollection(): Promise<CollectionManifest> {
-    return fetchJson<CollectionManifest>(this.manifestUrl);
+  async loadCollection(): Promise<CollectionManifest> {
+    const manifest = await fetchJson<CollectionManifest>(this.manifestUrl);
+    const directory = manifest.media_root.replace(/[\\/]+$/, "") || ".";
+    this.mediaRootUrl = new URL(`${directory}/`, this.manifestUrl);
+    return manifest;
   }
 
   loadAnalysis(item: CatalogItem): Promise<VideoAnalysis> {
@@ -48,6 +46,7 @@ export class HttpCatalogRepository implements CatalogRepository {
     if (media.type === "url" && media.url) {
       return new URL(media.url, this.manifestUrl).href;
     }
+    if (!this.mediaRootUrl) return null;
     return new URL(media.relative_path, this.mediaRootUrl).href;
   }
 
@@ -71,6 +70,5 @@ export function repositoryFromLocation(location: Location): HttpCatalogRepositor
   const params = new URLSearchParams(location.search);
   return new HttpCatalogRepository({
     manifestUrl: params.get("catalog") ?? "/demo/collection.json",
-    mediaRootUrl: params.get("mediaRoot") ?? undefined,
   });
 }

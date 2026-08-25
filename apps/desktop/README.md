@@ -21,8 +21,9 @@ authoring.
 npm run desktop:dev
 ```
 
-Choose the root of a local video library. The adapter recognizes both a
-portable `collection.json` at that root and the current
-`Video Catalog/collection.json` layout. The development build is titled
-**Watchcraft Dev** and uses a separate app identity from bundled builds, so it
-will ask for the library once even if Watchcraft was configured previously.
+Choose a collection folder or its parent. A collection folder is identified
+only by `collection.json`; its folder name is not significant. The manifest's
+required `media_root` field locates the videos relative to the manifest. The
+development build is titled **Watchcraft Dev** and uses a separate app identity
+from bundled builds, so it will ask for the library once even if Watchcraft was
+configured previously.

@@ -75,10 +75,11 @@ export interface CatalogItem {
 }
 
 export interface CollectionManifest {
-  schema_version: 2;
+  schema_version: 3;
   collection_id: string;
   title: string;
   description?: string;
+  media_root: string;
   topic_scope: "collection";
   root: CollectionGroup;
   topics: Record<string, Topic>;

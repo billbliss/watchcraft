@@ -3959,6 +3959,8 @@ dependencies = [
  "http",
  "http-range",
  "percent-encoding",
+ "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
