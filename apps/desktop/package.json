@@ -8,6 +8,7 @@
     "build": "tauri build",
     "test": "node --experimental-strip-types --test src/*.test.ts",
     "web:dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+    "web:smoke": "vite --host 127.0.0.1 --port 1421 --strictPort",
     "web:build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit"
   },

@@ -1,0 +1,20 @@
+{
+  "identifier": "app.watchcraft.reader.smoke",
+  "build": {
+    "devUrl": "http://127.0.0.1:1421/?playbackSmoke=1",
+    "beforeDevCommand": "npm run web:smoke"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Watchcraft Playback Smoke Test",
+        "width": 640,
+        "height": 480,
+        "resizable": false
+      }
+    ]
+  },
+  "bundle": {
+    "active": false
+  }
+}

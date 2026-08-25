@@ -48,6 +48,24 @@ fn validated_video_path<R: Runtime>(
     Ok(path)
 }
 
+fn ensure_library_scope_inner<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    requested_root: &str,
+) -> Result<bool, String> {
+    let root = PathBuf::from(requested_root);
+    if !root.is_dir() {
+        return Ok(false);
+    }
+    let scope = app.asset_protocol_scope();
+    if !scope.is_allowed(&root) {
+        return Ok(false);
+    }
+    scope
+        .allow_directory(&root, true)
+        .map_err(|error| format!("Could not restore library access: {error}"))?;
+    Ok(true)
+}
+
 #[cfg(target_os = "macos")]
 fn default_player_name(path: &Path) -> Option<String> {
     let content_type = match path
@@ -285,12 +303,64 @@ fn default_video_player(app: tauri::AppHandle, path: String) -> Result<Option<St
     Ok(default_player_name(&path))
 }
 
+#[tauri::command]
+fn ensure_library_scope(app: tauri::AppHandle, path: String) -> Result<bool, String> {
+    ensure_library_scope_inner(&app, &path)
+}
+
+#[tauri::command]
+fn playback_smoke_video(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let video = match std::env::var("WATCHCRAFT_PLAYBACK_SMOKE_VIDEO") {
+        Ok(video) => PathBuf::from(video),
+        Err(_) => return Ok(None),
+    };
+    let parent = video
+        .parent()
+        .and_then(Path::to_str)
+        .ok_or("Playback smoke video has no valid parent directory")?;
+    if !ensure_library_scope_inner(&app, parent)? {
+        return Err("Playback smoke library access was not restored.".into());
+    }
+    Ok(video.to_str().map(str::to_owned))
+}
+
+#[tauri::command]
+fn finish_playback_smoke(
+    app: tauri::AppHandle,
+    passed: bool,
+    detail: String,
+) -> Result<(), String> {
+    if std::env::var_os("WATCHCRAFT_PLAYBACK_SMOKE_VIDEO").is_none() {
+        return Err("Playback smoke mode is not enabled.".into());
+    }
+    if passed {
+        println!("WATCHCRAFT_PLAYBACK_SMOKE_PASS: {detail}");
+        app.exit(0);
+    } else {
+        eprintln!("WATCHCRAFT_PLAYBACK_SMOKE_FAIL: {detail}");
+        app.exit(1);
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_persisted_scope::init())
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            if std::env::var("WATCHCRAFT_PLAYBACK_SMOKE_PRIME").as_deref() == Ok("1") {
+                let video = std::env::var("WATCHCRAFT_PLAYBACK_SMOKE_VIDEO")
+                    .map_err(|_| "Playback smoke video is missing")?;
+                let video = PathBuf::from(video);
+                let parent = video
+                    .parent()
+                    .ok_or("Playback smoke video has no parent directory")?;
+                app.asset_protocol_scope().allow_directory(parent, true)?;
+            }
+            Ok(())
+        })
         .register_asynchronous_uri_scheme_protocol("stream", |context, request, responder| {
             let response =
                 video_stream_response(context.app_handle(), request).unwrap_or_else(|_| {
@@ -301,7 +371,13 @@ pub fn run() {
                 });
             responder.respond(response);
         })
-        .invoke_handler(tauri::generate_handler![open_video, default_video_player])
+        .invoke_handler(tauri::generate_handler![
+            open_video,
+            default_video_player,
+            ensure_library_scope,
+            playback_smoke_video,
+            finish_playback_smoke
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
