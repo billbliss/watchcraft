@@ -96,7 +96,7 @@ export function DesktopApp({ initialLibraryRoot }: DesktopAppProps = {}): ReactE
                 the collection folder itself.
               </p>
               <button className="primary-action" onClick={() => void chooseLibrary()} type="button">
-                {libraryRoot ? "Reconnect library folder" : "Choose library folder"}
+                {libraryRoot ? "Connect library folder" : "Choose library folder"}
               </button>
             </>
           )}

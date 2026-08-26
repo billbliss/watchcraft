@@ -617,7 +617,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     .fact-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0 0; }
     .fact { border: 1px solid var(--line); border-radius: 999px; padding: 7px 10px; background: var(--panel); color: #c6d0c9; font-size: .84rem; }
     .actions { display: flex; flex-wrap: wrap; gap: 9px; margin: 18px 0 25px; }
-    .action { display: inline-flex; align-items: center; min-height: 39px; padding: 8px 12px; border: 1px solid #405047; border-radius: 9px; background: #1b241e; color: var(--text); text-decoration: none; cursor: pointer; }
+    .action { display: inline-flex; align-items: center; min-height: 25px; padding: 8px 12px; border: 1px solid #405047; border-radius: 9px; background: #1b241e; color: var(--text); text-decoration: none; cursor: pointer; }
     .action.primary { border-color: #578c67; background: #2e5139; }
     .action:hover { filter: brightness(1.12); }
     .action:disabled { opacity: .52; cursor: default; filter: none; }
