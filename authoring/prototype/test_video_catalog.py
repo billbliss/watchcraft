@@ -156,6 +156,7 @@ class FormattingTests(unittest.TestCase):
                     collection_title="Editing Course",
                     language="en",
                     force=False,
+                    position=2,
                 )
             self.assertEqual(video_catalog.catalog_root(root), root)
             self.assertTrue((root / "transcripts/PjObX9XQvgI.transcript.json").is_file())
@@ -185,6 +186,35 @@ class FormattingTests(unittest.TestCase):
             self.assertEqual(item["transcript"], {})
             self.assertNotIn("media_root_hint", manifest)
             self.assertEqual(manifest["title"], "Editing Course")
+            self.assertEqual(
+                json.loads((root / "watchcraft-authoring.json").read_text())["sources"]
+                ["PjObX9XQvgI.youtube"]["position"],
+                2,
+            )
+
+    def test_youtube_source_positions_control_root_lesson_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "watchcraft-authoring.json").write_text(
+                json.dumps({
+                    "collection": {"title": "Editing Course"},
+                    "sources": {
+                        "later.youtube": {"type": "youtube", "video_id": "later", "position": 2},
+                        "first.youtube": {"type": "youtube", "video_id": "first", "position": 1},
+                    },
+                }),
+                encoding="utf-8",
+            )
+            analyses = [
+                {"video": "later.youtube", "title": "Alphabetically First", "topics": [], "sections": []},
+                {"video": "first.youtube", "title": "Alphabetically Last", "topics": [], "sections": []},
+            ]
+            manifest = build_collection_manifest(root, analyses, {})
+            ordered_titles = [
+                manifest["items"][child["item_id"]]["title"]
+                for child in manifest["root"]["children"]
+            ]
+            self.assertEqual(ordered_titles, ["Alphabetically Last", "Alphabetically First"])
 
     def test_srt_timestamp(self):
         self.assertEqual(video_catalog.format_clock(3661.234, srt=True), "01:01:01,234")

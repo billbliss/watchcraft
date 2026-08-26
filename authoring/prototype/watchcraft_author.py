@@ -202,6 +202,7 @@ def import_youtube(
     collection_title: str | None,
     language: str,
     force: bool,
+    position: int | None = None,
 ) -> dict[str, Any]:
     video_id = youtube_video_id(url)
     key = f"{video_id}.youtube"
@@ -210,6 +211,10 @@ def import_youtube(
     if key in config.get("sources", {}) and state_path.is_file() and not force:
         return config["sources"][key]
     metadata = youtube_metadata(video_id)
+    if position is not None:
+        if position < 1:
+            raise ValueError("YouTube source position must be at least 1")
+        metadata["position"] = position
     segments, caption_metadata = youtube_transcript(video_id, language)
     if not segments:
         raise RuntimeError("YouTube returned an empty transcript")
@@ -347,6 +352,11 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--collection-title")
     add.add_argument("--language", default="en")
     add.add_argument("--force", action="store_true")
+    add.add_argument(
+        "--position",
+        type=int,
+        help="One-based lesson position retained by future collection rebuilds",
+    )
 
     process = commands.add_parser("process", help="Analyze pending sources and build collection")
     process.add_argument("--workspace", required=True, type=workspace_path)
@@ -371,6 +381,7 @@ def main(argv: list[str] | None = None) -> int:
             collection_title=args.collection_title,
             language=args.language,
             force=args.force,
+            position=args.position,
         )
         duration = metadata.get("duration_seconds")
         duration_label = f"{duration // 60}:{duration % 60:02d}" if duration else "unknown"

@@ -65,7 +65,7 @@ export function topicPassesFrequencyFilter(
   collectionVideoCount: number,
   maximumPercentage: number,
 ): boolean {
-  if (collectionVideoCount <= 1) return true;
+  if (collectionVideoCount < 5) return true;
   const percentage = (topicVideoCount * 100) / collectionVideoCount;
   return topicVideoCount > 1 && percentage <= maximumPercentage;
 }

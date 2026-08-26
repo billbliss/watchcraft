@@ -20,5 +20,6 @@ through a Python web server.
 
 Public YouTube items play through `youtube-nocookie.com`; chapter navigation uses
 the embedded-player command API. Local filesystem media remains a desktop-only
-capability. Frequency filtering is bypassed for a one-video collection so its
-topics remain visible even though each necessarily appears in 100% of the corpus.
+capability. Collections with fewer than five videos bypass corpus-frequency
+filtering because percentage and repetition thresholds are not meaningful at
+that size.

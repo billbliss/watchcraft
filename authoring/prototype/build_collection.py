@@ -406,6 +406,7 @@ def build_collection_manifest(
 
     items = {}
     item_ids_by_video = {}
+    item_sort_keys = {}
     for analysis in sorted(analyses, key=lambda item: item.get("video", "").casefold()):
         video = analysis.get("video", "")
         source = sources.get(video, {}) if isinstance(sources, dict) else {}
@@ -414,6 +415,12 @@ def build_collection_manifest(
         )
         item_ids_by_video[video] = item_id
         relative = Path(video)
+        position = source.get("position")
+        item_sort_keys[item_id] = (
+            (0, position, str(analysis.get("title") or relative.stem).casefold())
+            if isinstance(position, int) and position > 0
+            else (1, str(analysis.get("title") or relative.stem).casefold())
+        )
         ordered_topics = []
         ordered_families = []
         seen_topics = set()
@@ -492,7 +499,7 @@ def build_collection_manifest(
             children.append(serialize_group(child, (*parts, name)))
         children.extend(
             {"type": "video", "item_id": item_id}
-            for item_id in sorted(node["items"], key=lambda value: items[value]["title"].casefold())
+            for item_id in sorted(node["items"], key=lambda value: item_sort_keys[value])
         )
         group_title = title if root_group else parts[-1]
         return {

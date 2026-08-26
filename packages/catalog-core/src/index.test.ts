@@ -32,8 +32,10 @@ test("creates a privacy-enhanced controllable YouTube embed URL", () => {
   );
 });
 
-test("shows topics in a one-video collection regardless of frequency", () => {
+test("shows topics in small collections where frequency is not meaningful", () => {
   assert.equal(topicPassesFrequencyFilter(1, 1, 40), true);
+  assert.equal(topicPassesFrequencyFilter(1, 4, 40), true);
+  assert.equal(topicPassesFrequencyFilter(4, 4, 40), true);
   assert.equal(topicPassesFrequencyFilter(1, 5, 40), false);
   assert.equal(topicPassesFrequencyFilter(2, 5, 40), true);
 });

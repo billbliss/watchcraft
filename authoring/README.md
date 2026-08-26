@@ -23,6 +23,7 @@ into that directory, while retrieved captions remain private authoring inputs.
 python prototype/watchcraft_author.py youtube add \
   --workspace ~/dev/watchcraft-collections/collections/premiere-pro-ai-tools \
   --collection-title "Premiere Pro AI Tools" \
+  --position 1 \
   "https://www.youtube.com/watch?v=PjObX9XQvgI"
 
 python prototype/watchcraft_author.py process \
@@ -36,6 +37,8 @@ canonical schema, and preserves the collection revision when content is unchange
 Publisher-authored timestamps in the YouTube description are authoritative when
 present: Watchcraft keeps those chapter titles and boundaries while enriching them
 with its generated descriptions and concepts. AI-generated chapters are the fallback.
+Use `--position N` when a collection has an intentional lesson sequence; the
+compiler retains that ordering across subsequent rebuilds.
 
 The content repository should ignore `**/transcripts/`, downloaded media, caches,
 credentials, and other private working material. YouTube collection items publish
