@@ -87,7 +87,16 @@ export function CollectionSettings({
               {collections.map((collection) => {
                 const media = mediaSummary(collection);
                 return (
-                  <article className={`collection-entry ${collection.active ? "active" : ""}`} key={collection.collectionId}>
+                  <article
+                    className={`collection-entry ${collection.active ? "active" : ""}`}
+                    key={collection.collectionId}
+                    onDoubleClick={(event) => {
+                      if (busy || collection.active) return;
+                      if ((event.target as HTMLElement).closest("button")) return;
+                      void onSwitch(collection);
+                    }}
+                    title={collection.active ? undefined : "Double-click to open"}
+                  >
                     <div className="collection-entry-copy">
                       <div className="collection-title-row">
                         <strong>{collection.title}</strong>

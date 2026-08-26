@@ -204,6 +204,10 @@
   background: #19251d;
 }
 
+.collection-entry:not(.active) {
+  cursor: pointer;
+}
+
 .collection-entry-copy {
   display: grid;
   min-width: 0;
