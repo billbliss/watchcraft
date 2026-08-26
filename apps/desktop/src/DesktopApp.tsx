@@ -5,6 +5,7 @@ import {
   DesktopCatalogRepository,
   type DesktopLibraryLocation,
 } from "./desktopCatalogRepository";
+import { singleFlight } from "./singleFlight";
 
 const LIBRARY_ROOT_KEY = "watchcraft.desktop.libraryRoot";
 
@@ -14,16 +15,14 @@ interface DesktopAppProps {
 
 type ScopeStatus = "checking" | "ready" | "needs-access";
 
-let restoreLibraryRequest: Promise<DesktopLibraryLocation | null> | null = null;
-
-function restoreLibrary(legacyRoot: string | null): Promise<DesktopLibraryLocation | null> {
-  restoreLibraryRequest ??= invoke<DesktopLibraryLocation | null>("load_current_collection")
+const restoreLibrary = singleFlight(
+  (legacyRoot: string | null): Promise<DesktopLibraryLocation | null> =>
+    invoke<DesktopLibraryLocation | null>("load_current_collection")
     .then((location) => {
       if (location || !legacyRoot) return location;
       return invoke<DesktopLibraryLocation | null>("ensure_library_scope", { path: legacyRoot });
-    });
-  return restoreLibraryRequest;
-}
+    }),
+);
 
 export function DesktopApp({ initialLibraryRoot }: DesktopAppProps = {}): ReactElement {
   const [libraryRoot, setLibraryRoot] = useState<string | null>(() =>
