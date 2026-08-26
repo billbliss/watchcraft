@@ -279,6 +279,7 @@
 }
 
 .settings-dialog .compact-action {
+  margin: 0;
   padding: 7px 11px;
 }
 
