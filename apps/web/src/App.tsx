@@ -23,6 +23,7 @@ import {
 
 interface AppProps {
   repository: CatalogRepository;
+  sidebarFooter?: ReactElement;
 }
 
 const MIN_SIDEBAR_WIDTH = 270;
@@ -177,7 +178,7 @@ function LoadingScreen(): ReactElement {
   );
 }
 
-export function App({ repository }: AppProps): ReactElement {
+export function App({ repository, sidebarFooter }: AppProps): ReactElement {
   const [manifest, setManifest] = useState<CollectionManifest | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(routeVideoId);
@@ -639,6 +640,7 @@ export function App({ repository }: AppProps): ReactElement {
             <p className="empty-state">No videos match the current filters.</p>
           )}
         </nav>
+        {sidebarFooter ? <footer className="sidebar-footer">{sidebarFooter}</footer> : null}
       </aside>
 
       <div

@@ -1,36 +1,42 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useMemo, useState, type ReactElement } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactElement } from "react";
 import { App } from "../../web/src/App";
+import { CollectionSettings, type RegisteredCollection } from "./CollectionSettings";
 import {
   DesktopCatalogRepository,
   type DesktopLibraryLocation,
 } from "./desktopCatalogRepository";
 import { singleFlight } from "./singleFlight";
 
-const LIBRARY_ROOT_KEY = "watchcraft.desktop.libraryRoot";
-
-interface DesktopAppProps {
-  initialLibraryRoot?: string | null;
-}
-
 type ScopeStatus = "checking" | "ready" | "needs-access";
 
 const restoreLibrary = singleFlight(
-  (legacyRoot: string | null): Promise<DesktopLibraryLocation | null> =>
-    invoke<DesktopLibraryLocation | null>("load_current_collection")
-    .then((location) => {
-      if (location || !legacyRoot) return location;
-      return invoke<DesktopLibraryLocation | null>("ensure_library_scope", { path: legacyRoot });
-    }),
+  (): Promise<DesktopLibraryLocation | null> =>
+    invoke<DesktopLibraryLocation | null>("load_current_collection"),
 );
 
-export function DesktopApp({ initialLibraryRoot }: DesktopAppProps = {}): ReactElement {
-  const [libraryRoot, setLibraryRoot] = useState<string | null>(() =>
-    initialLibraryRoot ?? localStorage.getItem(LIBRARY_ROOT_KEY),
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function SettingsIcon(): ReactElement {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24">
+      <path d="M12 8.4a3.6 3.6 0 1 0 0 7.2 3.6 3.6 0 0 0 0-7.2Z" />
+      <path d="m19.2 13.1 1.5 1.2-1.8 3.1-1.8-.7c-.5.4-1 .7-1.6.9l-.3 1.9h-3.6l-.3-1.9c-.6-.2-1.1-.5-1.6-.9l-1.8.7-1.8-3.1 1.5-1.2a7 7 0 0 1 0-1.9L6.1 10l1.8-3.1 1.8.7c.5-.4 1-.7 1.6-.9l.3-1.9h3.6l.3 1.9c.6.2 1.1.5 1.6.9l1.8-.7 1.8 3.1-1.5 1.2a7 7 0 0 1 0 1.9Z" />
+    </svg>
   );
+}
+
+export function DesktopApp(): ReactElement {
+  const [libraryRoot, setLibraryRoot] = useState<string | null>(null);
   const [scopeStatus, setScopeStatus] = useState<ScopeStatus>("checking");
   const [libraryLocation, setLibraryLocation] = useState<DesktopLibraryLocation | null>(null);
+  const [collections, setCollections] = useState<RegisteredCollection[]>([]);
   const [libraryError, setLibraryError] = useState<string | null>(null);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
   const repository = useMemo(
     () => libraryLocation && scopeStatus === "ready"
       ? new DesktopCatalogRepository(libraryLocation)
@@ -38,83 +44,196 @@ export function DesktopApp({ initialLibraryRoot }: DesktopAppProps = {}): ReactE
     [libraryLocation, scopeStatus],
   );
 
+  const refreshCollections = useCallback(async (): Promise<void> => {
+    setCollections(await invoke<RegisteredCollection[]>("list_registered_collections"));
+  }, []);
+
+  const openLocation = useCallback((location: DesktopLibraryLocation): void => {
+    setLibraryLocation(location);
+    if (location.selectedRoot) setLibraryRoot(location.selectedRoot);
+    setScopeStatus("ready");
+    setLibraryError(null);
+  }, []);
+
   useEffect(() => {
     let current = true;
     setScopeStatus("checking");
-    void restoreLibrary(libraryRoot)
-      .then((location) => {
+    void restoreLibrary()
+      .then(async (location) => {
         if (!current) return;
-        setLibraryLocation(location);
-        if (location) {
-          setLibraryRoot(location.selectedRoot);
-          localStorage.removeItem(LIBRARY_ROOT_KEY);
-        }
-        setScopeStatus(location ? "ready" : "needs-access");
-        setLibraryError(null);
+        if (location) openLocation(location);
+        else setScopeStatus("needs-access");
+        await refreshCollections();
       })
       .catch((error: unknown) => {
         if (!current) return;
         setScopeStatus("needs-access");
-        setLibraryError(error instanceof Error ? error.message : String(error));
+        setLibraryError(errorMessage(error));
       });
     return () => {
       current = false;
     };
-  }, [libraryRoot]);
+  }, [openLocation, refreshCollections]);
 
-  async function chooseLibrary(): Promise<void> {
-    setLibraryError(null);
+  useEffect(() => {
+    function openSettingsShortcut(event: KeyboardEvent): void {
+      if ((event.metaKey || event.ctrlKey) && event.key === ",") {
+        event.preventDefault();
+        setSettingsError(null);
+        setSettingsOpen(true);
+      }
+    }
+    window.addEventListener("keydown", openSettingsShortcut);
+    return () => window.removeEventListener("keydown", openSettingsShortcut);
+  }, []);
+
+  function defaultFolder(): string | null {
+    return libraryRoot
+      ?? collections.find((collection) => collection.sourceType === "folder")?.sourceLabel
+      ?? null;
+  }
+
+  async function addFolder(openAfter: boolean): Promise<boolean> {
+    setBusy(true);
+    setSettingsError(null);
     try {
-      const location = await invoke<DesktopLibraryLocation | null>("choose_library_folder", {
-        defaultPath: libraryRoot,
+      const location = await invoke<DesktopLibraryLocation | null>("choose_collection_folder", {
+        defaultPath: defaultFolder(),
+        openAfter,
       });
-      if (!location) return;
-      localStorage.removeItem(LIBRARY_ROOT_KEY);
-      setLibraryRoot(location.selectedRoot);
-      setLibraryLocation(location);
-      setScopeStatus("ready");
+      if (!location) return false;
+      openLocation(location);
+      await refreshCollections();
+      if (openAfter) setSettingsOpen(false);
+      return true;
     } catch (error: unknown) {
-      setScopeStatus("needs-access");
-      setLibraryError(error instanceof Error ? error.message : String(error));
+      const message = errorMessage(error);
+      setSettingsError(message);
+      if (!repository) setLibraryError(message);
+      return false;
+    } finally {
+      setBusy(false);
     }
   }
 
+  async function addUrl(url: string, openAfter: boolean): Promise<boolean> {
+    setBusy(true);
+    setSettingsError(null);
+    try {
+      const location = await invoke<DesktopLibraryLocation | null>("install_collection_url", {
+        url,
+        openAfter,
+      });
+      if (!location) throw new Error("The collection was installed but could not be opened.");
+      openLocation(location);
+      await refreshCollections();
+      if (openAfter) setSettingsOpen(false);
+      return true;
+    } catch (error: unknown) {
+      const message = errorMessage(error);
+      setSettingsError(message);
+      if (!repository) setLibraryError(message);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function switchCollection(collection: RegisteredCollection): Promise<void> {
+    setBusy(true);
+    setSettingsError(null);
+    try {
+      const location = await invoke<DesktopLibraryLocation>("activate_registered_collection", {
+        collectionId: collection.collectionId,
+      });
+      openLocation(location);
+      await refreshCollections();
+      setSettingsOpen(false);
+    } catch (error: unknown) {
+      setSettingsError(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeCollection(collection: RegisteredCollection): Promise<void> {
+    const confirmed = window.confirm(
+      `Remove “${collection.title}” from Watchcraft?\n\nIts original collection files and videos will not be deleted.`,
+    );
+    if (!confirmed) return;
+    setBusy(true);
+    setSettingsError(null);
+    try {
+      const location = await invoke<DesktopLibraryLocation>("remove_registered_collection", {
+        collectionId: collection.collectionId,
+      });
+      openLocation(location);
+      await refreshCollections();
+    } catch (error: unknown) {
+      setSettingsError(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const settings = settingsOpen ? (
+    <CollectionSettings
+      busy={busy}
+      collections={collections}
+      error={settingsError}
+      onAddFolder={addFolder}
+      onAddUrl={addUrl}
+      onClose={() => setSettingsOpen(false)}
+      onRemove={removeCollection}
+      onSwitch={switchCollection}
+    />
+  ) : null;
+
   if (!repository) {
     return (
-      <main className="desktop-welcome">
-        <section className="desktop-welcome-card">
-          <span className="eyebrow">Watchcraft</span>
-          <h1>Learn a craft by watching</h1>
-          {libraryError ? <p className="desktop-library-error" role="alert">{libraryError}</p> : null}
-          {scopeStatus === "checking" ? (
-            <p>Restoring read-only access to your library…</p>
-          ) : (
-            <>
-              <p>
-                Choose the folder containing a Watchcraft collection, or choose
-                the collection folder itself.
-              </p>
-              <button className="primary-action" onClick={() => void chooseLibrary()} type="button">
-                {libraryRoot ? "Connect library folder" : "Choose library folder"}
-              </button>
-            </>
-          )}
-        </section>
-      </main>
+      <>
+        <main className="desktop-welcome">
+          <section className="desktop-welcome-card">
+            <span className="eyebrow">Watchcraft</span>
+            <h1>Learn a craft by watching</h1>
+            {libraryError ? <p className="desktop-library-error" role="alert">{libraryError}</p> : null}
+            {scopeStatus === "checking" ? (
+              <p>Restoring your collections…</p>
+            ) : (
+              <>
+                <p>Add a Watchcraft collection from a folder on this computer or from a URL.</p>
+                <div className="welcome-actions">
+                  <button className="primary-action" onClick={() => void addFolder(true)} type="button">Choose collection folder</button>
+                  <button onClick={() => { setSettingsError(null); setSettingsOpen(true); }} type="button">Add from URL…</button>
+                </div>
+              </>
+            )}
+          </section>
+        </main>
+        {settings}
+      </>
     );
   }
 
   return (
     <div className="desktop-root">
-      <button
-        className="desktop-change-library"
-        onClick={() => void chooseLibrary()}
-        title={libraryRoot ?? undefined}
-        type="button"
-      >
-        Change library
-      </button>
-      <App key={libraryLocation?.manifestPath} repository={repository} />
+      <App
+        key={libraryLocation?.manifestPath}
+        repository={repository}
+        sidebarFooter={(
+          <button
+            aria-label="Open Watchcraft settings"
+            className="desktop-settings-button"
+            onClick={() => { setSettingsError(null); setSettingsOpen(true); }}
+            title="Settings"
+            type="button"
+          >
+            <SettingsIcon />
+            <span>Settings</span>
+          </button>
+        )}
+      />
+      {settings}
     </div>
   );
 }

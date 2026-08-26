@@ -228,6 +228,15 @@ button { color: inherit; }
 .filter-footer { margin-top: 8px; color: var(--muted); font-size: .69rem; }
 
 .video-list { flex: 1; min-height: 0; padding: 8px; overflow: auto; }
+.sidebar-footer {
+  display: flex;
+  flex: none;
+  align-items: center;
+  min-height: 42px;
+  padding: 5px 8px;
+  border-top: 1px solid var(--line);
+  background: #101512;
+}
 .video-row {
   display: grid;
   width: 100%;

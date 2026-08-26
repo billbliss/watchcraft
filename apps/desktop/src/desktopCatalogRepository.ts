@@ -21,7 +21,7 @@ export function joinLocalPath(root: string, relativePath: string): string {
 }
 
 export interface DesktopLibraryLocation {
-  selectedRoot: string;
+  selectedRoot: string | null;
   collectionId: string;
   manifestPath: string;
   metadataRoot: string;

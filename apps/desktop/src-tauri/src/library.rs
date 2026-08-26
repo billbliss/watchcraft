@@ -1,22 +1,41 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
+use url::Url;
 
 const COLLECTION_KIND: &str = "watchcraft.collection";
 const COLLECTION_SCHEMA_VERSION: u64 = 4;
 const LIBRARY_SCHEMA_VERSION: u64 = 1;
 const MANIFEST_SCAN_LIMIT: u64 = 64 * 1024 * 1024;
+const REMOTE_FILE_LIMIT: usize = 64 * 1024 * 1024;
+const REMOTE_TOTAL_LIMIT: usize = 256 * 1024 * 1024;
 const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "webm", "mkv"];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LibraryLocation {
-    pub(crate) selected_root: PathBuf,
+    pub(crate) selected_root: Option<PathBuf>,
     pub(crate) collection_id: String,
     pub(crate) manifest_path: PathBuf,
     pub(crate) metadata_root: PathBuf,
     pub(crate) media_root: Option<PathBuf>,
+    pub(crate) media_expected: usize,
+    pub(crate) media_found: usize,
+    pub(crate) media_extra: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RegisteredCollection {
+    pub(crate) collection_id: String,
+    pub(crate) title: String,
+    pub(crate) revision: u64,
+    pub(crate) source_type: String,
+    pub(crate) source_label: String,
+    pub(crate) active: bool,
     pub(crate) media_expected: usize,
     pub(crate) media_found: usize,
     pub(crate) media_extra: usize,
@@ -111,7 +130,7 @@ struct InstalledCollection {
     revision: u64,
     manifest_path: PathBuf,
     metadata_root: PathBuf,
-    source: LocalSource,
+    source: CollectionSource,
     media_binding: Option<DirectoryBinding>,
     media_expected: usize,
     media_found: usize,
@@ -120,11 +139,15 @@ struct InstalledCollection {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct LocalSource {
-    #[serde(rename = "type")]
-    source_type: String,
-    manifest_path: PathBuf,
-    selected_root: PathBuf,
+#[serde(tag = "type")]
+enum CollectionSource {
+    #[serde(rename = "local-manifest")]
+    LocalManifest {
+        manifest_path: PathBuf,
+        selected_root: PathBuf,
+    },
+    #[serde(rename = "remote-manifest")]
+    RemoteManifest { url: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -134,9 +157,10 @@ struct DirectoryBinding {
     path: PathBuf,
 }
 
-pub(crate) fn install_from_folder(
+pub(crate) fn install_from_folder_with_activation(
     app_data_root: &Path,
     selected_root: &Path,
+    activate: bool,
 ) -> Result<LibraryLocation, String> {
     let selected_root = selected_root
         .canonicalize()
@@ -189,8 +213,7 @@ pub(crate) fn install_from_folder(
         revision: manifest.revision,
         manifest_path: relative_manifest,
         metadata_root: relative_revision,
-        source: LocalSource {
-            source_type: "local-manifest".into(),
+        source: CollectionSource::LocalManifest {
             manifest_path,
             selected_root: selected_root.clone(),
         },
@@ -203,12 +226,90 @@ pub(crate) fn install_from_folder(
         media_extra,
         enabled: true,
     };
-    registry.current_collection_id = Some(manifest.collection_id.clone());
+    let collection_id = manifest.collection_id.clone();
+    if activate || registry.current_collection_id.is_none() {
+        registry.current_collection_id = Some(collection_id.clone());
+    }
     registry
         .collections
-        .insert(manifest.collection_id, installed);
+        .insert(collection_id.clone(), installed);
     write_registry(app_data_root, &registry)?;
-    current_location(app_data_root, &registry)
+    location_for_id(app_data_root, &registry, &collection_id)
+        .ok_or_else(|| "The installed collection could not be reopened.".into())
+}
+
+pub(crate) fn install_from_url(
+    app_data_root: &Path,
+    manifest_url: &str,
+    activate: bool,
+) -> Result<LibraryLocation, String> {
+    let requested_url = parse_remote_url(manifest_url)?;
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(90))
+        .user_agent("Watchcraft/0.1")
+        .build()
+        .map_err(|error| format!("Could not prepare the collection download: {error}"))?;
+    let (manifest_bytes, resolved_url) = download_remote_file(
+        &client,
+        requested_url,
+        MANIFEST_SCAN_LIMIT as usize,
+        "collection manifest",
+    )?;
+    let manifest = parse_manifest(&manifest_bytes, resolved_url.as_str())?;
+    local_media_paths(&manifest)?;
+
+    let safe_id = safe_component(&manifest.collection_id)?;
+    let revision_root = app_data_root
+        .join("collections")
+        .join(safe_id)
+        .join("revisions")
+        .join(manifest.revision.to_string());
+    let private_manifest_path = revision_root.join("manifest.json");
+    if !private_manifest_path.is_file() {
+        install_remote_metadata_revision(
+            &client,
+            &resolved_url,
+            &manifest_bytes,
+            &manifest,
+            &revision_root,
+        )?;
+    }
+
+    let mut registry = read_registry(app_data_root)?;
+    let relative_revision = revision_root
+        .strip_prefix(app_data_root)
+        .map_err(|_| "Private collection storage is outside the Watchcraft data folder.")?
+        .to_path_buf();
+    let relative_manifest = private_manifest_path
+        .strip_prefix(app_data_root)
+        .map_err(|_| "Private manifest storage is outside the Watchcraft data folder.")?
+        .to_path_buf();
+    let collection_id = manifest.collection_id.clone();
+    let media_expected = local_media_paths(&manifest)?.len();
+    let installed = InstalledCollection {
+        collection_id: collection_id.clone(),
+        title: manifest.title,
+        revision: manifest.revision,
+        manifest_path: relative_manifest,
+        metadata_root: relative_revision,
+        source: CollectionSource::RemoteManifest {
+            url: resolved_url.to_string(),
+        },
+        media_binding: None,
+        media_expected,
+        media_found: 0,
+        media_extra: 0,
+        enabled: true,
+    };
+    if activate || registry.current_collection_id.is_none() {
+        registry.current_collection_id = Some(collection_id.clone());
+    }
+    registry
+        .collections
+        .insert(collection_id.clone(), installed);
+    write_registry(app_data_root, &registry)?;
+    location_for_id(app_data_root, &registry, &collection_id)
         .ok_or_else(|| "The installed collection could not be reopened.".into())
 }
 
@@ -217,8 +318,98 @@ pub(crate) fn load_current(app_data_root: &Path) -> Result<Option<LibraryLocatio
     Ok(current_location(app_data_root, &registry))
 }
 
+pub(crate) fn list_collections(app_data_root: &Path) -> Result<Vec<RegisteredCollection>, String> {
+    let registry = read_registry(app_data_root)?;
+    let current = registry.current_collection_id.as_deref();
+    let mut collections = registry
+        .collections
+        .values()
+        .filter(|installed| installed.enabled)
+        .map(|installed| {
+            let (source_type, source_label) = match &installed.source {
+                CollectionSource::LocalManifest { selected_root, .. } => (
+                    "folder".to_string(),
+                    selected_root.to_string_lossy().into_owned(),
+                ),
+                CollectionSource::RemoteManifest { url } => ("url".to_string(), url.clone()),
+            };
+            RegisteredCollection {
+                collection_id: installed.collection_id.clone(),
+                title: installed.title.clone(),
+                revision: installed.revision,
+                source_type,
+                source_label,
+                active: current == Some(installed.collection_id.as_str()),
+                media_expected: installed.media_expected,
+                media_found: installed.media_found,
+                media_extra: installed.media_extra,
+            }
+        })
+        .collect::<Vec<_>>();
+    collections.sort_by(|left, right| {
+        right
+            .active
+            .cmp(&left.active)
+            .then_with(|| left.title.to_lowercase().cmp(&right.title.to_lowercase()))
+    });
+    Ok(collections)
+}
+
+pub(crate) fn activate_collection(
+    app_data_root: &Path,
+    collection_id: &str,
+) -> Result<LibraryLocation, String> {
+    let mut registry = read_registry(app_data_root)?;
+    if !registry
+        .collections
+        .get(collection_id)
+        .is_some_and(|installed| installed.enabled)
+    {
+        return Err("That collection is not registered with Watchcraft.".into());
+    }
+    registry.current_collection_id = Some(collection_id.to_string());
+    write_registry(app_data_root, &registry)?;
+    location_for_id(app_data_root, &registry, collection_id)
+        .ok_or_else(|| "The selected collection's private metadata is unavailable.".into())
+}
+
+pub(crate) fn remove_collection(
+    app_data_root: &Path,
+    collection_id: &str,
+) -> Result<LibraryLocation, String> {
+    let mut registry = read_registry(app_data_root)?;
+    if !registry.collections.contains_key(collection_id) {
+        return Err("That collection is not registered with Watchcraft.".into());
+    }
+    if registry.collections.len() <= 1 {
+        return Err("The final collection cannot be removed. Add another collection first.".into());
+    }
+    registry.collections.remove(collection_id);
+    if registry.current_collection_id.as_deref() == Some(collection_id) {
+        registry.current_collection_id = registry.collections.keys().next().cloned();
+    }
+    write_registry(app_data_root, &registry)?;
+
+    if let Ok(safe_id) = safe_component(collection_id) {
+        let private_root = app_data_root.join("collections").join(safe_id);
+        if private_root.is_dir() {
+            let _ = fs::remove_dir_all(private_root);
+        }
+    }
+    current_location(app_data_root, &registry)
+        .ok_or_else(|| "The remaining collection could not be opened.".into())
+}
+
 fn current_location(app_data_root: &Path, registry: &LibraryRegistry) -> Option<LibraryLocation> {
     let id = registry.current_collection_id.as_ref()?;
+    location_for_id(app_data_root, registry, id)
+}
+
+fn location_for_id(
+    app_data_root: &Path,
+    registry: &LibraryRegistry,
+    id: &str,
+) -> Option<LibraryLocation> {
     let installed = registry.collections.get(id)?;
     if !installed.enabled {
         return None;
@@ -229,7 +420,10 @@ fn current_location(app_data_root: &Path, registry: &LibraryRegistry) -> Option<
         return None;
     }
     Some(LibraryLocation {
-        selected_root: installed.source.selected_root.clone(),
+        selected_root: match &installed.source {
+            CollectionSource::LocalManifest { selected_root, .. } => Some(selected_root.clone()),
+            CollectionSource::RemoteManifest { .. } => None,
+        },
         collection_id: installed.collection_id.clone(),
         manifest_path,
         metadata_root,
@@ -302,20 +496,20 @@ fn is_manifest_candidate(path: &Path) -> bool {
 }
 
 fn read_manifest(path: &Path) -> Result<CollectionManifest, String> {
-    let file = fs::File::open(path)
-        .map_err(|error| format!("Could not open {}: {error}", path.display()))?;
-    let manifest: CollectionManifest = serde_json::from_reader(file)
-        .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+    let bytes =
+        fs::read(path).map_err(|error| format!("Could not open {}: {error}", path.display()))?;
+    parse_manifest(&bytes, &path.display().to_string())
+}
+
+fn parse_manifest(bytes: &[u8], source: &str) -> Result<CollectionManifest, String> {
+    let manifest: CollectionManifest = serde_json::from_slice(bytes)
+        .map_err(|error| format!("Could not read {source}: {error}"))?;
     if manifest.kind != COLLECTION_KIND {
-        return Err(format!(
-            "{} is not a Watchcraft collection.",
-            path.display()
-        ));
+        return Err(format!("{source} is not a Watchcraft collection."));
     }
     if manifest.schema_version != COLLECTION_SCHEMA_VERSION {
         return Err(format!(
-            "{} uses schema version {}; Watchcraft requires version {COLLECTION_SCHEMA_VERSION}.",
-            path.display(),
+            "{source} uses schema version {}; Watchcraft requires version {COLLECTION_SCHEMA_VERSION}.",
             manifest.schema_version
         ));
     }
@@ -344,6 +538,52 @@ fn read_manifest(path: &Path) -> Result<CollectionManifest, String> {
         return Err("The collection revision or content_hash is invalid.".into());
     }
     Ok(manifest)
+}
+
+fn parse_remote_url(value: &str) -> Result<Url, String> {
+    let url = Url::parse(value.trim())
+        .map_err(|error| format!("The collection URL is invalid: {error}"))?;
+    if !matches!(url.scheme(), "https" | "http") {
+        return Err("A collection URL must use HTTP or HTTPS.".into());
+    }
+    if url.host_str().is_none() {
+        return Err("The collection URL must include a host.".into());
+    }
+    Ok(url)
+}
+
+fn download_remote_file(
+    client: &reqwest::blocking::Client,
+    url: Url,
+    limit: usize,
+    label: &str,
+) -> Result<(Vec<u8>, Url), String> {
+    let response = client
+        .get(url.clone())
+        .send()
+        .map_err(|error| format!("Could not download {label} from {url}: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("Could not download {label} from {url}: {error}"))?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(format!(
+            "The downloaded {label} is larger than Watchcraft permits."
+        ));
+    }
+    let resolved_url = response.url().clone();
+    let mut bytes = Vec::new();
+    response
+        .take((limit + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("Could not read the downloaded {label}: {error}"))?;
+    if bytes.len() > limit {
+        return Err(format!(
+            "The downloaded {label} is larger than Watchcraft permits."
+        ));
+    }
+    Ok((bytes, resolved_url))
 }
 
 fn local_media_paths(manifest: &CollectionManifest) -> Result<Vec<PathBuf>, String> {
@@ -486,14 +726,7 @@ fn install_metadata_revision(
         .map_err(|error| format!("Could not create private install staging: {error}"))?;
     copy_file(source_manifest, &staging.join("manifest.json"))?;
 
-    let mut metadata_paths = BTreeSet::new();
-    for item in manifest.items.values() {
-        metadata_paths.insert(item.analysis.path.clone());
-        metadata_paths.extend(item.transcript.subtitles.iter().cloned());
-        metadata_paths.extend(item.transcript.text.iter().cloned());
-        metadata_paths.extend(item.transcript.segments.iter().cloned());
-    }
-    for relative in metadata_paths {
+    for relative in referenced_metadata_paths(manifest) {
         validate_relative_path(&relative, "metadata")?;
         let source = source_root.join(&relative);
         let canonical_source = source.canonicalize().map_err(|error| {
@@ -519,6 +752,78 @@ fn install_metadata_revision(
             .map_err(|error| format!("Could not finalize private collection metadata: {error}"))?;
     }
     Ok(())
+}
+
+fn install_remote_metadata_revision(
+    client: &reqwest::blocking::Client,
+    manifest_url: &Url,
+    manifest_bytes: &[u8],
+    manifest: &CollectionManifest,
+    target_root: &Path,
+) -> Result<(), String> {
+    let parent = target_root
+        .parent()
+        .ok_or("Private revision storage has no parent folder.")?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Could not create private collection storage: {error}"))?;
+    let staging = parent.join(format!(".{}-{}.tmp", manifest.revision, std::process::id()));
+    if staging.exists() {
+        fs::remove_dir_all(&staging)
+            .map_err(|error| format!("Could not clear private install staging: {error}"))?;
+    }
+    fs::create_dir_all(&staging)
+        .map_err(|error| format!("Could not create private install staging: {error}"))?;
+    fs::write(staging.join("manifest.json"), manifest_bytes)
+        .map_err(|error| format!("Could not store the downloaded collection manifest: {error}"))?;
+
+    let mut downloaded = manifest_bytes.len();
+    for relative in referenced_metadata_paths(manifest) {
+        validate_relative_path(&relative, "metadata")?;
+        let relative_url = relative
+            .to_str()
+            .ok_or("A remote metadata path contains unsupported characters.")?
+            .replace('\\', "/");
+        let url = manifest_url.join(&relative_url).map_err(|error| {
+            format!("Could not resolve remote metadata {relative_url}: {error}")
+        })?;
+        let (bytes, _) =
+            download_remote_file(client, url, REMOTE_FILE_LIMIT, "collection metadata")?;
+        downloaded = downloaded.saturating_add(bytes.len());
+        if downloaded > REMOTE_TOTAL_LIMIT {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(
+                "The collection metadata download is larger than Watchcraft permits.".into(),
+            );
+        }
+        let target = staging.join(&relative);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("Could not create private metadata folder: {error}"))?;
+        }
+        fs::write(&target, bytes).map_err(|error| {
+            format!("Could not store downloaded metadata {relative_url}: {error}")
+        })?;
+    }
+
+    if target_root.exists() {
+        fs::remove_dir_all(&staging)
+            .map_err(|error| format!("Could not clear private install staging: {error}"))?;
+    } else {
+        fs::rename(&staging, target_root)
+            .map_err(|error| format!("Could not finalize private collection metadata: {error}"))?;
+    }
+    Ok(())
+}
+
+fn referenced_metadata_paths(manifest: &CollectionManifest) -> BTreeSet<PathBuf> {
+    let mut paths = BTreeSet::new();
+    for item in manifest.items.values() {
+        paths.insert(item.analysis.path.clone());
+        paths.extend(item.transcript.subtitles.iter().cloned());
+        paths.extend(item.transcript.text.iter().cloned());
+        paths.extend(item.transcript.segments.iter().cloned());
+    }
+    paths
 }
 
 fn copy_file(source: &Path, target: &Path) -> Result<(), String> {
@@ -640,9 +945,15 @@ fn replace_file(source: &Path, destination: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{discover_manifest, install_from_folder, load_current};
+    use super::{
+        activate_collection, discover_manifest, install_from_folder_with_activation,
+        install_from_url, list_collections, load_current, remove_collection,
+    };
     use std::fs;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::path::PathBuf;
+    use std::thread;
 
     #[test]
     fn discovers_an_arbitrarily_named_manifest_from_collection_or_parent() {
@@ -681,7 +992,8 @@ mod tests {
         fs::create_dir_all(collection.join("analysis")).unwrap();
         fs::write(collection.join("analysis/lesson.json"), "{}").unwrap();
         write_fixture(&collection.join("manifest.json"), "unsafe", 1, "../..");
-        let error = install_from_folder(&root.join("private"), &collection).unwrap_err();
+        let error = install_from_folder_with_activation(&root.join("private"), &collection, true)
+            .unwrap_err();
         assert!(error.contains("outside the selected library boundary"));
         fs::remove_dir_all(root).unwrap();
     }
@@ -697,7 +1009,7 @@ mod tests {
         fs::write(root.join("media/lesson.mp4"), "video").unwrap();
         write_fixture(&collection.join("anything.json"), "demo", 2, "..");
 
-        let installed = install_from_folder(&app_data, &root).unwrap();
+        let installed = install_from_folder_with_activation(&app_data, &root, true).unwrap();
         assert_eq!(installed.collection_id, "demo");
         assert_eq!(installed.media_expected, 1);
         assert_eq!(installed.media_found, 1);
@@ -722,7 +1034,7 @@ mod tests {
         fs::write(collection.join("analysis/lesson.json"), "{}").unwrap();
         fs::write(root.join("media/extra.mp4"), "video").unwrap();
         write_fixture(&collection.join("catalog-data"), "partial", 1, "..");
-        let installed = install_from_folder(&app_data, &root).unwrap();
+        let installed = install_from_folder_with_activation(&app_data, &root, true).unwrap();
         assert_eq!(
             (
                 installed.media_expected,
@@ -772,10 +1084,97 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let installed = install_from_folder(&app_data, &root).unwrap();
+        let installed = install_from_folder_with_activation(&app_data, &root, true).unwrap();
         assert_eq!(installed.collection_id, "hosted/demo");
         assert_eq!(installed.media_root, None);
         assert_eq!(installed.media_expected, 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn registers_switches_and_safely_removes_multiple_collections() {
+        let root = temporary_root("registry");
+        let app_data = root.join("private");
+        let first = root.join("First Course");
+        let second = root.join("Second Course");
+        for (folder, id) in [(&first, "first"), (&second, "second")] {
+            fs::create_dir_all(folder.join("analysis")).unwrap();
+            fs::create_dir_all(folder.join("media")).unwrap();
+            fs::write(folder.join("analysis/lesson.json"), "{}").unwrap();
+            fs::write(folder.join("media/lesson.mp4"), "video").unwrap();
+            write_fixture(&folder.join("course.watchcraft"), id, 1, ".");
+        }
+
+        install_from_folder_with_activation(&app_data, &first, true).unwrap();
+        install_from_folder_with_activation(&app_data, &second, false).unwrap();
+        let registered = list_collections(&app_data).unwrap();
+        assert_eq!(registered.len(), 2);
+        assert!(registered
+            .iter()
+            .any(|collection| collection.collection_id == "first" && collection.active));
+
+        let activated = activate_collection(&app_data, "second").unwrap();
+        assert_eq!(activated.collection_id, "second");
+        let remaining = remove_collection(&app_data, "second").unwrap();
+        assert_eq!(remaining.collection_id, "first");
+        assert_eq!(list_collections(&app_data).unwrap().len(), 1);
+        assert!(second.join("course.watchcraft").is_file());
+        assert!(remove_collection(&app_data, "first")
+            .unwrap_err()
+            .contains("final collection"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn installs_a_remote_manifest_and_its_referenced_metadata() {
+        let manifest = r#"{
+          "kind":"watchcraft.collection",
+          "schema_version":4,
+          "collection_id":"remote-demo",
+          "title":"Remote Demo",
+          "revision":1,
+          "topic_scope":"collection",
+          "root":{"type":"group","group_id":"root","title":"Remote Demo","children":[]},
+          "topics":{},
+          "topic_families":{},
+          "items":{"lesson":{"item_id":"lesson","title":"Lesson","media":[{"type":"youtube","video_id":"abc123"}],"transcript":{},"analysis":{"path":"analysis/lesson.json"},"summary":"Lesson","locations":[],"topic_ids":[],"family_ids":[],"topic_sections":{},"chapter_count":1}},
+          "stats":{"video_count":1,"topic_count":0,"topic_family_count":0},
+          "content_hash":"0000000000000000000000000000000000000000000000000000000000000000"
+        }"#;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 2048];
+                let length = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..length]);
+                let body = if request.starts_with("GET /course.watchcraft ") {
+                    manifest
+                } else {
+                    "{}"
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            }
+        });
+
+        let root = temporary_root("remote");
+        let installed =
+            install_from_url(&root, &format!("http://{address}/course.watchcraft"), true).unwrap();
+        assert_eq!(installed.collection_id, "remote-demo");
+        assert_eq!(installed.selected_root, None);
+        assert!(installed
+            .metadata_root
+            .join("analysis/lesson.json")
+            .is_file());
+        assert_eq!(list_collections(&root).unwrap()[0].source_type, "url");
+        server.join().unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -14,7 +14,7 @@ use tauri_plugin_dialog::DialogExt;
 
 mod library;
 
-use library::LibraryLocation;
+use library::{LibraryLocation, RegisteredCollection};
 
 const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "webm", "mkv"];
 const MAX_STREAM_CHUNK: u64 = 2 * 1024 * 1024;
@@ -72,21 +72,6 @@ fn validated_video_path<R: Runtime>(
     Ok(canonical_path)
 }
 
-fn ensure_library_scope_inner<R: Runtime>(
-    app: &tauri::AppHandle<R>,
-    requested_root: &str,
-) -> Result<Option<LibraryLocation>, String> {
-    let root = PathBuf::from(requested_root);
-    if !root.is_dir() {
-        return Ok(None);
-    }
-    let scope = app.asset_protocol_scope();
-    if !scope.is_allowed(&root) {
-        return Ok(None);
-    }
-    install_selected_library(app, &root).map(Some)
-}
-
 fn app_data_root<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
@@ -117,11 +102,19 @@ fn install_selected_library<R: Runtime>(
     app: &tauri::AppHandle<R>,
     selected_root: &Path,
 ) -> Result<LibraryLocation, String> {
+    let location = install_selected_library_with_activation(app, selected_root, true)?;
+    approve_library_location(app, location)
+}
+
+fn install_selected_library_with_activation<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    selected_root: &Path,
+    activate: bool,
+) -> Result<LibraryLocation, String> {
     if !selected_root.is_dir() {
         return Err("The selected library folder is unavailable.".into());
     }
-    let location = library::install_from_folder(&app_data_root(app)?, selected_root)?;
-    approve_library_location(app, location)
+    library::install_from_folder_with_activation(&app_data_root(app)?, selected_root, activate)
 }
 
 fn load_current_library<R: Runtime>(
@@ -370,22 +363,20 @@ fn default_video_player(app: tauri::AppHandle, path: String) -> Result<Option<St
 }
 
 #[tauri::command]
-fn ensure_library_scope(
-    app: tauri::AppHandle,
-    path: String,
-) -> Result<Option<LibraryLocation>, String> {
-    ensure_library_scope_inner(&app, &path)
-}
-
-#[tauri::command]
 fn load_current_collection(app: tauri::AppHandle) -> Result<Option<LibraryLocation>, String> {
     load_current_library(&app)
 }
 
 #[tauri::command]
-async fn choose_library_folder(
+fn list_registered_collections(app: tauri::AppHandle) -> Result<Vec<RegisteredCollection>, String> {
+    library::list_collections(&app_data_root(&app)?)
+}
+
+#[tauri::command]
+async fn choose_collection_folder(
     app: tauri::AppHandle,
     default_path: Option<String>,
+    open_after: bool,
 ) -> Result<Option<LibraryLocation>, String> {
     let mut picker = app
         .dialog()
@@ -403,7 +394,41 @@ async fn choose_library_folder(
     let selected = selected
         .into_path()
         .map_err(|error| format!("Could not read the selected folder: {error}"))?;
-    install_selected_library(&app, &selected).map(Some)
+    install_selected_library_with_activation(&app, &selected, open_after)?;
+    load_current_library(&app)
+}
+
+#[tauri::command]
+async fn install_collection_url(
+    app: tauri::AppHandle,
+    url: String,
+    open_after: bool,
+) -> Result<Option<LibraryLocation>, String> {
+    let data_root = app_data_root(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        library::install_from_url(&data_root, &url, open_after)
+    })
+    .await
+    .map_err(|error| format!("The collection download could not finish: {error}"))??;
+    load_current_library(&app)
+}
+
+#[tauri::command]
+fn activate_registered_collection(
+    app: tauri::AppHandle,
+    collection_id: String,
+) -> Result<LibraryLocation, String> {
+    let location = library::activate_collection(&app_data_root(&app)?, &collection_id)?;
+    approve_library_location(&app, location)
+}
+
+#[tauri::command]
+fn remove_registered_collection(
+    app: tauri::AppHandle,
+    collection_id: String,
+) -> Result<LibraryLocation, String> {
+    let location = library::remove_collection(&app_data_root(&app)?, &collection_id)?;
+    approve_library_location(&app, location)
 }
 
 #[tauri::command]
@@ -412,18 +437,16 @@ fn playback_smoke_library_root(app: tauri::AppHandle) -> Result<Option<String>, 
         Ok(root) => PathBuf::from(root),
         Err(_) => return Ok(None),
     };
-    let root_string = root
-        .to_str()
-        .ok_or("Playback smoke library has no valid root directory")?;
     let location = if std::env::var("WATCHCRAFT_PLAYBACK_SMOKE_PRIME").as_deref() == Ok("1") {
         install_selected_library(&app, &root)?
     } else if let Some(location) = load_current_library(&app)? {
         location
     } else {
-        ensure_library_scope_inner(&app, root_string)?
-            .ok_or("Playback smoke library access was not restored.")?
+        return Err("Playback smoke collection was not restored from the registry.".into());
     };
-    Ok(Some(location.selected_root.to_string_lossy().into_owned()))
+    Ok(location
+        .selected_root
+        .map(|path| path.to_string_lossy().into_owned()))
 }
 
 #[tauri::command]
@@ -466,9 +489,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             open_video,
             default_video_player,
-            ensure_library_scope,
             load_current_collection,
-            choose_library_folder,
+            list_registered_collections,
+            choose_collection_folder,
+            install_collection_url,
+            activate_registered_collection,
+            remove_registered_collection,
             playback_smoke_library_root,
             finish_playback_smoke
         ])

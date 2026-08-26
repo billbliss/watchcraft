@@ -76,5 +76,5 @@ export function PlaybackSmokeTest(): ReactElement {
   if (!libraryRoot) {
     return <main className="playback-smoke">Preparing the normal Watchcraft catalog…</main>;
   }
-  return <DesktopApp initialLibraryRoot={libraryRoot} />;
+  return <DesktopApp />;
 }
