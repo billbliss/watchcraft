@@ -4,6 +4,7 @@ import {
   clockSeconds,
   displayClock,
   inferTimelineClockMode,
+  topicPassesFrequencyFilter,
   youtubeEmbedUrl,
   type AnalysisSection,
 } from "./index.ts";
@@ -29,6 +30,12 @@ test("creates a privacy-enhanced controllable YouTube embed URL", () => {
     youtubeEmbedUrl("PjObX9XQvgI", "https://watchcraft.example"),
     "https://www.youtube-nocookie.com/embed/PjObX9XQvgI?enablejsapi=1&playsinline=1&rel=0&origin=https%3A%2F%2Fwatchcraft.example&widget_referrer=https%3A%2F%2Fwatchcraft.example",
   );
+});
+
+test("shows topics in a one-video collection regardless of frequency", () => {
+  assert.equal(topicPassesFrequencyFilter(1, 1, 40), true);
+  assert.equal(topicPassesFrequencyFilter(1, 5, 40), false);
+  assert.equal(topicPassesFrequencyFilter(2, 5, 40), true);
 });
 
 test("keeps valid hour-minute-second timelines", () => {

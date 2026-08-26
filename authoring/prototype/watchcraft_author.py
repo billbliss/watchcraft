@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from analyze_catalog import (
+    analysis_with_publisher_chapters,
     analysis_path,
     analyze_state,
     create_openai_client,
@@ -83,6 +84,31 @@ def first_json_string(page: str, name: str) -> str:
         return html.unescape(match.group(1))
 
 
+def youtube_description_chapters(
+    description: str, duration_seconds: int | None
+) -> list[dict[str, Any]]:
+    chapters: list[dict[str, Any]] = []
+    for line in description.splitlines():
+        match = re.match(
+            r"^\s*((?:\d{1,2}:)?\d{1,2}:\d{2})\s+(.+?)\s*$", line
+        )
+        if not match:
+            continue
+        parts = [int(part) for part in match.group(1).split(":")]
+        seconds = 0
+        for part in parts:
+            seconds = seconds * 60 + part
+        title = " ".join(match.group(2).split())
+        if not title or (duration_seconds is not None and seconds >= duration_seconds):
+            continue
+        if chapters and seconds <= chapters[-1]["start_seconds"]:
+            continue
+        chapters.append({"start_seconds": seconds, "title": title})
+    if len(chapters) < 3 or chapters[0]["start_seconds"] != 0:
+        return []
+    return chapters
+
+
 def youtube_metadata(video_id: str) -> dict[str, Any]:
     canonical_url = f"https://www.youtube.com/watch?v={video_id}"
     oembed_url = "https://www.youtube.com/oembed?" + urllib.parse.urlencode(
@@ -94,9 +120,11 @@ def youtube_metadata(video_id: str) -> dict[str, Any]:
         raise RuntimeError("YouTube returned invalid embed metadata") from error
     page = request_text(canonical_url)
     duration = first_json_string(page, "lengthSeconds")
+    duration_seconds = int(duration) if duration.isdigit() else None
     published_at = first_json_string(page, "publishDate") or first_json_string(
         page, "uploadDate"
     )
+    description = first_json_string(page, "shortDescription")
     return {
         "source_id": f"youtube:{video_id}",
         "type": "youtube",
@@ -106,8 +134,9 @@ def youtube_metadata(video_id: str) -> dict[str, Any]:
         "publisher": str(embed.get("author_name") or ""),
         "publisher_url": str(embed.get("author_url") or ""),
         "thumbnail_url": str(embed.get("thumbnail_url") or ""),
-        "duration_seconds": int(duration) if duration.isdigit() else None,
+        "duration_seconds": duration_seconds,
         "published_at": published_at,
+        "chapters": youtube_description_chapters(description, duration_seconds),
     }
 
 
@@ -229,6 +258,7 @@ def process_workspace(args: argparse.Namespace) -> int:
     states = discover_transcript_states(args.workspace)
     pending = []
     repairs = []
+    chapter_updates: list[tuple[Path, dict[str, Any]]] = []
     for state_path in states:
         state = load_transcript_state(state_path)
         output = analysis_path(args.workspace, state["video"])
@@ -236,11 +266,17 @@ def process_workspace(args: argparse.Namespace) -> int:
             pending.append(state_path)
         else:
             analysis = json.loads(output.read_text(encoding="utf-8"))
-            if len(analysis.get("sections", [])) < MIN_USEFUL_TIMELINE_SECTIONS:
+            aligned = analysis_with_publisher_chapters(
+                args.workspace, state["video"], analysis
+            )
+            if aligned != analysis:
+                chapter_updates.append((output, aligned))
+            if len(aligned.get("sections", [])) < MIN_USEFUL_TIMELINE_SECTIONS:
                 repairs.append(state_path)
     print(
         f"{len(states)} transcripts | {len(pending)} pending analyses | "
-        f"{len(repairs)} timeline repairs",
+        f"{len(repairs)} timeline repairs | "
+        f"{len(chapter_updates)} publisher chapter updates",
         flush=True,
     )
     if args.dry_run:
@@ -248,7 +284,13 @@ def process_workspace(args: argparse.Namespace) -> int:
             print(f"  analyze: {load_transcript_state(path)['video']}")
         for path in repairs:
             print(f"  repair: {load_transcript_state(path)['video']}")
+        for _, analysis in chapter_updates:
+            print(f"  publisher chapters: {analysis['video']}")
         return 0
+    for output, analysis in chapter_updates:
+        atomic_write_text(
+            output, json.dumps(analysis, ensure_ascii=False, indent=2) + "\n"
+        )
     if pending or repairs:
         client = create_openai_client(args.timeout)
     if pending:
@@ -337,6 +379,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "process":
         return process_workspace(args)
     if args.command == "build":
+        states = discover_transcript_states(args.workspace)
+        for state_path in states:
+            state = load_transcript_state(state_path)
+            output = analysis_path(args.workspace, state["video"])
+            if not output.is_file():
+                continue
+            analysis = json.loads(output.read_text(encoding="utf-8"))
+            aligned = analysis_with_publisher_chapters(
+                args.workspace, state["video"], analysis
+            )
+            if aligned != analysis:
+                atomic_write_text(
+                    output,
+                    json.dumps(aligned, ensure_ascii=False, indent=2) + "\n",
+                )
         write_collection(args.workspace)
         return 0
     return 2

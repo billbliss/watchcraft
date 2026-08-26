@@ -42,9 +42,11 @@ async function fetchLocalJson<T>(path: string): Promise<T> {
 export class DesktopCatalogRepository implements CatalogRepository {
   readonly canOpenInDefaultPlayer = true;
   readonly location: DesktopLibraryLocation;
+  readonly youtubeClientOrigin: string;
 
-  constructor(location: DesktopLibraryLocation) {
+  constructor(location: DesktopLibraryLocation, youtubeClientOrigin = window.location.origin) {
     this.location = location;
+    this.youtubeClientOrigin = youtubeClientOrigin;
   }
 
   get manifestLocation(): string {
@@ -66,7 +68,7 @@ export class DesktopCatalogRepository implements CatalogRepository {
     if (!media) return null;
     if (media.type === "http-video") return media.url;
     if (media.type === "youtube") {
-      return youtubeEmbedUrl(media.video_id, "https://app.watchcraft.reader");
+      return youtubeEmbedUrl(media.video_id, this.youtubeClientOrigin);
     }
     if (!this.location.mediaRoot) return null;
     return convertFileSrc(joinLocalPath(this.location.mediaRoot, media.relative_path), "stream");

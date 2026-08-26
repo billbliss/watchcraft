@@ -3,6 +3,7 @@ import {
   displayClock,
   inferTimelineClockMode,
   orderedItems,
+  topicPassesFrequencyFilter,
   type CatalogItem,
   type CatalogRepository,
   type CollectionManifest,
@@ -315,12 +316,13 @@ export function App({ repository }: AppProps): ReactElement {
     const facetQuery = normalized(topicFilterQuery);
     return Object.values(manifest.topics)
       .filter((topic) => {
-        const percentage = manifest.stats.video_count
-          ? (topic.video_count * 100) / manifest.stats.video_count
-          : 0;
         if (selectedTopics.has(topic.topic_id)) return true;
         if (facetQuery) return normalized(topic.canonical_key || topic.label).includes(facetQuery);
-        return topic.video_count > 1 && percentage <= topicThreshold;
+        return topicPassesFrequencyFilter(
+          topic.video_count,
+          manifest.stats.video_count,
+          topicThreshold,
+        );
       })
       .sort((left, right) => {
         const selectedDifference = Number(selectedTopics.has(right.topic_id))
@@ -354,11 +356,12 @@ export function App({ repository }: AppProps): ReactElement {
         .map((topicId) => manifest.topics[topicId])
         .filter((topic): topic is Topic => {
           if (!topic) return false;
-          const percentage = manifest.stats.video_count
-            ? (topic.video_count * 100) / manifest.stats.video_count
-            : 0;
           return selectedTopics.has(topic.topic_id)
-            || (topic.video_count > 1 && percentage <= topicThreshold);
+            || topicPassesFrequencyFilter(
+              topic.video_count,
+              manifest.stats.video_count,
+              topicThreshold,
+            );
         })
     : [];
   const relatedTopics = highlightedTopic && manifest

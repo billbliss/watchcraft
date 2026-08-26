@@ -12,6 +12,7 @@ from analyze_catalog import (
     GeneratedTimeline,
     Location,
     Section,
+    analysis_with_publisher_chapters,
     analysis_path,
     analyze_state,
     request_timeline_repair,
@@ -33,7 +34,11 @@ from normalize_topics import (
     topic_inventory,
 )
 from process_catalog import select_work
-from watchcraft_author import import_youtube, youtube_video_id
+from watchcraft_author import (
+    import_youtube,
+    youtube_description_chapters,
+    youtube_video_id,
+)
 
 
 class FormattingTests(unittest.TestCase):
@@ -47,6 +52,78 @@ class FormattingTests(unittest.TestCase):
         self.assertEqual(
             youtube_video_id("https://youtu.be/PjObX9XQvgI"), "PjObX9XQvgI"
         )
+
+    def test_youtube_description_chapters_extracts_publisher_timestamps(self):
+        description = """Links and notes
+00:00 Introduction
+00:19 Audio Remix
+01:28 Generative Extend
+04:00 Text-Based Editing
+"""
+        self.assertEqual(
+            youtube_description_chapters(description, 300),
+            [
+                {"start_seconds": 0, "title": "Introduction"},
+                {"start_seconds": 19, "title": "Audio Remix"},
+                {"start_seconds": 88, "title": "Generative Extend"},
+                {"start_seconds": 240, "title": "Text-Based Editing"},
+            ],
+        )
+
+    def test_publisher_chapters_replace_ai_boundaries_but_keep_enrichment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "watchcraft-authoring.json").write_text(
+                json.dumps({
+                    "sources": {
+                        "video.youtube": {
+                            "duration_seconds": 30,
+                            "chapters": [
+                                {"start_seconds": 0, "title": "Publisher Intro"},
+                                {"start_seconds": 10, "title": "Publisher Tool One"},
+                                {"start_seconds": 20, "title": "Publisher Tool Two"},
+                            ],
+                        }
+                    }
+                }),
+                encoding="utf-8",
+            )
+            analysis = {
+                "video": "video.youtube",
+                "sections": [
+                    {
+                        "start": "00:00:00",
+                        "end": "00:00:12",
+                        "title": "AI Intro",
+                        "concepts": ["Orientation"],
+                        "description": "Introduces the lesson.",
+                    },
+                    {
+                        "start": "00:00:12",
+                        "end": "00:00:21",
+                        "title": "AI Tool One",
+                        "concepts": ["First tool"],
+                        "description": "Demonstrates the first tool.",
+                    },
+                    {
+                        "start": "00:00:21",
+                        "end": "00:00:30",
+                        "title": "AI Tool Two",
+                        "concepts": ["Second tool"],
+                        "description": "Demonstrates the second tool.",
+                    },
+                ],
+            }
+            updated = analysis_with_publisher_chapters(root, "video.youtube", analysis)
+            self.assertEqual(
+                [section["start"] for section in updated["sections"]],
+                ["00:00:00", "00:00:10", "00:00:20"],
+            )
+            self.assertEqual(
+                [section["title"] for section in updated["sections"]],
+                ["Publisher Intro", "Publisher Tool One", "Publisher Tool Two"],
+            )
+            self.assertEqual(updated["timeline_source"], "youtube-publisher-chapters")
 
     def test_youtube_workspace_keeps_transcript_private_and_emits_remote_media(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -443,6 +520,7 @@ class FormattingTests(unittest.TestCase):
             "sections": [],
         }
         rows = render_csv([analysis]).splitlines()
+        self.assertNotIn("\r", render_csv([analysis]))
         self.assertEqual(
             rows[0],
             "video,title,date,location,summary,topics,featured_techniques,section_count",

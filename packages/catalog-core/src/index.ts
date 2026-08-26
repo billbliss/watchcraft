@@ -60,6 +60,16 @@ export function youtubeEmbedUrl(videoId: string, clientOrigin?: string): string 
   return `https://www.youtube-nocookie.com/embed/${encoded}?${parameters}`;
 }
 
+export function topicPassesFrequencyFilter(
+  topicVideoCount: number,
+  collectionVideoCount: number,
+  maximumPercentage: number,
+): boolean {
+  if (collectionVideoCount <= 1) return true;
+  const percentage = (topicVideoCount * 100) / collectionVideoCount;
+  return topicVideoCount > 1 && percentage <= maximumPercentage;
+}
+
 export interface HttpVideoMediaReference {
   type: "http-video";
   url: string;

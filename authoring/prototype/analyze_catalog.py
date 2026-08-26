@@ -234,6 +234,84 @@ def clock_seconds(value: str) -> float:
     return parts[0] * 3600 + parts[1] * 60 + parts[2]
 
 
+def format_clock(seconds: float) -> str:
+    total = max(0, int(seconds))
+    hours, remainder = divmod(total, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def analysis_with_publisher_chapters(
+    root: Path, relative_video: str, analysis: dict[str, Any]
+) -> dict[str, Any]:
+    source = load_authoring_source(root, relative_video)
+    chapters = source.get("chapters", []) if source else []
+    if not isinstance(chapters, list) or len(chapters) < 3:
+        return analysis
+    prepared = []
+    for chapter in chapters:
+        if not isinstance(chapter, dict):
+            continue
+        try:
+            start = float(chapter["start_seconds"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        title = " ".join(str(chapter.get("title", "")).split())
+        if start < 0 or not title:
+            continue
+        if prepared and start <= prepared[-1]["start"]:
+            continue
+        prepared.append({"start": start, "title": title})
+    if len(prepared) < 3 or prepared[0]["start"] != 0:
+        return analysis
+    try:
+        duration = float(source.get("duration_seconds") or 0) if source else 0
+    except (TypeError, ValueError):
+        duration = 0
+    existing = analysis.get("sections", [])
+    if duration <= prepared[-1]["start"]:
+        duration = max(
+            (clock_seconds(str(section.get("end", ""))) for section in existing),
+            default=prepared[-1]["start"] + 1,
+        )
+    if duration <= prepared[-1]["start"]:
+        return analysis
+
+    sections = []
+    for index, chapter in enumerate(prepared):
+        start = chapter["start"]
+        end = prepared[index + 1]["start"] if index + 1 < len(prepared) else duration
+        overlaps = []
+        for old_index, old in enumerate(existing):
+            old_start = clock_seconds(str(old.get("start", "")))
+            old_end = clock_seconds(str(old.get("end", "")))
+            overlap = min(end, old_end) - max(start, old_start)
+            if overlap > 0:
+                overlaps.append((old_index, overlap, old))
+        best = max(overlaps, key=lambda value: value[1])[2] if overlaps else {}
+        concepts = unique_strings(
+            [
+                concept
+                for _, _, old in sorted(overlaps)
+                for concept in old.get("concepts", [])
+            ],
+            maximum=15,
+        )
+        sections.append(
+            {
+                "start": format_clock(start),
+                "end": format_clock(end),
+                "title": chapter["title"],
+                "concepts": concepts,
+                "description": str(best.get("description") or chapter["title"]),
+            }
+        )
+    updated = dict(analysis)
+    updated["sections"] = sections
+    updated["timeline_source"] = "youtube-publisher-chapters"
+    return updated
+
+
 def clamp_confidence(value: float) -> float:
     return round(max(0.0, min(1.0, float(value))), 3)
 
@@ -442,6 +520,7 @@ def analyze_state(
             }
         except ValueError:
             pass
+    normalized = analysis_with_publisher_chapters(root, relative_video, normalized)
     atomic_write_text(
         output, json.dumps(normalized, ensure_ascii=False, indent=2) + "\n"
     )

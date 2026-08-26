@@ -580,6 +580,7 @@ def render_csv(analyses: list[dict], collection_manifest: dict | None = None) ->
     output = io.StringIO()
     writer = csv.DictWriter(
         output,
+        lineterminator="\n",
         fieldnames=[
             "video", "title", "date", "location", "summary", "topics",
             "featured_techniques", "section_count",

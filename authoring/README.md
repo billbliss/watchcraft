@@ -33,6 +33,9 @@ python prototype/watchcraft_author.py process \
 downloading the video. `process` analyzes unfinished sources, repairs an
 underspecified timeline, validates the resulting `collection.json` against the
 canonical schema, and preserves the collection revision when content is unchanged.
+Publisher-authored timestamps in the YouTube description are authoritative when
+present: Watchcraft keeps those chapter titles and boundaries while enriching them
+with its generated descriptions and concepts. AI-generated chapters are the fallback.
 
 The content repository should ignore `**/transcripts/`, downloaded media, caches,
 credentials, and other private working material. YouTube collection items publish
