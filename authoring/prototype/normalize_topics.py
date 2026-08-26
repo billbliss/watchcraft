@@ -33,7 +33,11 @@ NORMALIZATION_MODEL_ENV = "VIDEO_CATALOG_NORMALIZATION_MODEL"
 BUILTIN_NORMALIZATION_MODEL = "gpt-5.4-mini"
 NORMALIZATION_SCHEMA_VERSION = 1
 NORMALIZATION_PROMPT_VERSION = 2
+DISPLAY_LABEL_PROMPT_VERSION = 1
 DEFAULT_BATCH_SIZE = 40
+MAX_DISPLAY_LABEL_CHARS = 32
+MIN_DISPLAY_LABEL_WORDS = 2
+MAX_DISPLAY_LABEL_WORDS = 5
 
 
 def default_normalization_model() -> str:
@@ -76,6 +80,15 @@ class GeneratedRelatedTopics(StrictModel):
     decisions: list[RelatedDecision]
 
 
+class DisplayLabelDecision(StrictModel):
+    source_id: str
+    label: str
+
+
+class GeneratedDisplayLabels(StrictModel):
+    labels: list[DisplayLabelDecision]
+
+
 TAXONOMY_PROMPT = """You organize topics within one educational-video collection.
 Create 12-24 useful, broad topic families that help people browse this corpus.
 
@@ -110,6 +123,21 @@ For every source_id, return exactly one decision and copy source_id exactly. Cho
 from that topic's supplied candidates. Related means a person studying one would reasonably
 want to discover the other. Copy candidate_id values exactly. Do not choose aliases, parent
 families, generic associations, or every topic that happens to share a family.
+"""
+
+
+DISPLAY_LABEL_PROMPT = """Create compact UI labels for educational-video topics.
+
+For every source_id, return exactly one label and copy source_id exactly.
+Rules:
+- Use two to five words and no more than 32 characters, including spaces.
+- Preserve the distinctive technique, tool, panel, or workflow name.
+- Remove parenthetical examples, keyboard-shortcut lists, settings, and enumerations.
+- Do not use commas, colons, semicolons, parentheses, or square brackets.
+- Labels must be unique within this batch and must not duplicate reserved_labels.
+- Prefer natural title-style labels such as "Multi-Camera Editing", "Essential Sound",
+  "Lumetri Scopes", "Transcript-Based Editing", or "Video Transitions".
+- Do not broaden a specific topic into only its family name.
 """
 
 
@@ -344,6 +372,8 @@ def initial_state(collection_id: str, source_hash: str, model: str) -> dict:
         "families": {},
         "assignments": {},
         "related": {},
+        "display_label_prompt_version": DISPLAY_LABEL_PROMPT_VERSION,
+        "display_labels": {},
     }
 
 
@@ -368,6 +398,7 @@ def load_state(
         payload.get("families")
         or payload.get("assignments")
         or payload.get("related")
+        or payload.get("display_labels")
     )
     if has_model_output and previous_model != model:
         raise RuntimeError(
@@ -376,6 +407,8 @@ def load_state(
         )
     payload["source_hash"] = source_hash
     payload["model"] = model
+    payload.setdefault("display_label_prompt_version", DISPLAY_LABEL_PROMPT_VERSION)
+    payload.setdefault("display_labels", {})
     return payload
 
 
@@ -578,6 +611,92 @@ def canonical_inventory(records: dict[str, dict], assignments: dict[str, dict]) 
     return result
 
 
+def display_label_error(label: str, reserved_keys: set[str]) -> str | None:
+    if not label:
+        return "label is empty"
+    if len(label) > MAX_DISPLAY_LABEL_CHARS:
+        return f"label exceeds {MAX_DISPLAY_LABEL_CHARS} characters"
+    if any(character in label for character in ",:;()[]{}"):
+        return "label contains list or parenthetical punctuation"
+    words = re.findall(r"[A-Za-z0-9]+(?:[&+./-][A-Za-z0-9]+)*", label)
+    if not MIN_DISPLAY_LABEL_WORDS <= len(words) <= MAX_DISPLAY_LABEL_WORDS:
+        return (
+            f"label must contain {MIN_DISPLAY_LABEL_WORDS} to "
+            f"{MAX_DISPLAY_LABEL_WORDS} words"
+        )
+    if canonical_topic_key(label) in reserved_keys:
+        return "label duplicates another display label"
+    return None
+
+
+def label_batch(
+    client: Any,
+    *,
+    model: str,
+    keys: list[str],
+    canonical: dict[str, dict],
+    families: dict[str, dict],
+    reserved_labels: list[str],
+    retries: int,
+) -> dict[str, str]:
+    results: dict[str, str] = {}
+    remaining = list(keys)
+    reserved_keys = {
+        canonical_topic_key(label) for label in reserved_labels if label.strip()
+    }
+    rejected: dict[str, str] = {}
+    for repair_attempt in range(4):
+        source_ids = {f"D{index + 1:03d}": key for index, key in enumerate(remaining)}
+        payload = {
+            "reserved_labels": sorted(
+                [*reserved_labels, *results.values()], key=str.casefold
+            ),
+            "topics": [
+                {
+                    "source_id": source_id,
+                    "current_label": canonical[key]["label"],
+                    "families": [
+                        families[family_id]["label"]
+                        for family_id in canonical[key]["family_ids"]
+                        if family_id in families
+                    ],
+                    "chapter_context": sorted(canonical[key]["contexts"])[:2],
+                    "previous_rejection": rejected.get(key),
+                }
+                for source_id, key in source_ids.items()
+            ],
+        }
+        generated = request_structured(
+            client,
+            model=model,
+            system_prompt=DISPLAY_LABEL_PROMPT,
+            payload=payload,
+            output_type=GeneratedDisplayLabels,
+            retries=retries,
+        )
+        rejected = {}
+        for decision in generated.labels:
+            key = source_ids.get(decision.source_id)
+            if not key or key in results:
+                continue
+            label = " ".join(decision.label.split())
+            error = display_label_error(label, reserved_keys)
+            if error:
+                rejected[key] = f"{label!r}: {error}"
+                continue
+            results[key] = label
+            reserved_keys.add(canonical_topic_key(label))
+        remaining = [key for key in remaining if key not in results]
+        if not remaining:
+            return results
+        print(
+            f"  repairing {len(remaining)} display label(s), attempt "
+            f"{repair_attempt + 1}/4",
+            flush=True,
+        )
+    raise RuntimeError(f"Display-label batch remained invalid: {remaining}")
+
+
 def related_candidates(canonical: dict[str, dict]) -> dict[str, list[str]]:
     family_members: dict[str, set[str]] = defaultdict(set)
     for key, record in canonical.items():
@@ -674,13 +793,15 @@ def relate_batch(
 
 
 def make_related_symmetric(related: dict[str, list[str]]) -> dict[str, list[str]]:
-    graph: dict[str, set[str]] = defaultdict(set)
+    graph: dict[str, set[str]] = {
+        source: set() for source in related
+    }
     for source, targets in related.items():
         for target in targets:
             if source == target:
                 continue
-            graph[source].add(target)
-            graph[target].add(source)
+            graph.setdefault(source, set()).add(target)
+            graph.setdefault(target, set()).add(source)
     return {key: sorted(values) for key, values in sorted(graph.items())}
 
 
@@ -706,6 +827,13 @@ def run(args: argparse.Namespace) -> int:
         state.pop("stats", None)
         if state.get("assignments"):
             state["status"] = "assigning"
+    if (
+        args.rebuild_display_labels
+        or state.get("display_label_prompt_version") != DISPLAY_LABEL_PROMPT_VERSION
+    ):
+        state["display_label_prompt_version"] = DISPLAY_LABEL_PROMPT_VERSION
+        state["display_labels"] = {}
+        state.pop("stats", None)
     known_keys = set(records)
     state["assignments"] = {
         key: value for key, value in state.get("assignments", {}).items() if key in known_keys
@@ -720,6 +848,16 @@ def run(args: argparse.Namespace) -> int:
     if args.dry_run:
         print("family taxonomy: " + ("present" if state.get("families") else "pending"))
         print(f"related topics: {len(state.get('related', {}))} completed")
+        canonical_keys = {
+            assignment.get("canonical_key")
+            for assignment in state["assignments"].values()
+            if assignment.get("canonical_key")
+        }
+        completed_labels = canonical_keys & set(state.get("display_labels", {}))
+        print(
+            f"display labels: {len(completed_labels)} completed | "
+            f"{len(canonical_keys - completed_labels)} pending"
+        )
         return 0
 
     client = create_openai_client(args.timeout)
@@ -762,6 +900,31 @@ def run(args: argparse.Namespace) -> int:
     finalize_canonical_assignments(records, state["assignments"])
     save_state(path, state)
     canonical = canonical_inventory(records, state["assignments"])
+    state["display_labels"] = {
+        key: label
+        for key, label in state.get("display_labels", {}).items()
+        if key in canonical
+    }
+    pending_labels = sorted(set(canonical) - set(state["display_labels"]))
+    for batch_number, keys in enumerate(chunks(pending_labels, args.batch_size), start=1):
+        print(
+            f"Labeling batch {batch_number}/{max(1, len(chunks(pending_labels, args.batch_size)))} "
+            f"({len(keys)} canonical topics)…",
+            flush=True,
+        )
+        state["display_labels"].update(
+            label_batch(
+                client,
+                model=args.normalization_model,
+                keys=keys,
+                canonical=canonical,
+                families=state["families"],
+                reserved_labels=list(state["display_labels"].values()),
+                retries=args.retries,
+            )
+        )
+        state["status"] = "labeling"
+        save_state(path, state)
     relation_candidates = related_candidates(canonical)
     pending_related = sorted(set(canonical) - set(state.get("related", {})))
     for batch_number, keys in enumerate(chunks(pending_related, args.batch_size), start=1):
@@ -789,11 +952,13 @@ def run(args: argparse.Namespace) -> int:
         "raw_topic_count": len(records),
         "canonical_topic_count": len(canonical),
         "family_count": len(state["families"]),
+        "display_label_count": len(state["display_labels"]),
         "related_edge_count": sum(len(values) for values in state["related"].values()) // 2,
     }
     save_state(path, state)
     print(
         f"complete: {len(records)} raw → {len(canonical)} canonical topics | "
+        f"{len(state['display_labels'])} compact labels | "
         f"{len(state['families'])} families | {state['stats']['related_edge_count']} related pairs",
         flush=True,
     )
@@ -821,6 +986,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--rebuild-related",
         action="store_true",
         help="Preserve families and assignments but regenerate related-topic links",
+    )
+    parser.add_argument(
+        "--rebuild-display-labels",
+        action="store_true",
+        help="Preserve normalization and regenerate compact UI topic labels",
     )
     parser.add_argument("--dry-run", action="store_true", help="Report work without API calls")
     parser.add_argument("--no-rebuild", action="store_true")

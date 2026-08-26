@@ -40,6 +40,12 @@ with its generated descriptions and concepts. AI-generated chapters are the fall
 Use `--position N` when a collection has an intentional lesson sequence; the
 compiler retains that ordering across subsequent rebuilds.
 
+Topic normalization also generates compact, unique UI labels of two to five
+words and no more than 32 characters. The original analytical phrase remains a
+searchable alias, so shortening a label does not change topic identity or chapter
+mapping. Regenerate only these labels with
+`normalize_topics.py --rebuild-display-labels`.
+
 The content repository should ignore `**/transcripts/`, downloaded media, caches,
 credentials, and other private working material. YouTube collection items publish
 only their video ID/URL and analysis; their `transcript` reference is empty.

@@ -27,6 +27,7 @@ from chunked_download import chunk_plan
 from normalize_topics import (
     alias_candidates,
     build_parser as build_normalization_parser,
+    display_label_error,
     finalize_canonical_assignments,
     load_state,
     make_related_symmetric,
@@ -68,6 +69,24 @@ class FormattingTests(unittest.TestCase):
                 {"start_seconds": 88, "title": "Generative Extend"},
                 {"start_seconds": 240, "title": "Text-Based Editing"},
             ],
+        )
+
+    def test_compact_topic_display_label_rules(self):
+        self.assertIsNone(display_label_error("Multi-Camera Editing", set()))
+        self.assertIsNone(display_label_error("Essential Sound", set()))
+        self.assertIn(
+            "characters",
+            display_label_error(
+                "Extremely Verbose Topic Label That Cannot Fit", set()
+            ),
+        )
+        self.assertIn(
+            "punctuation",
+            display_label_error("Export Workflow (H.264)", set()),
+        )
+        self.assertIn(
+            "duplicates",
+            display_label_error("Essential Sound", {"essential sound"}),
         )
 
     def test_publisher_chapters_replace_ai_boundaries_but_keep_enrichment(self):
@@ -438,17 +457,24 @@ class FormattingTests(unittest.TestCase):
             },
             "assignments": {
                 "clone stamp": {
+                    "canonical_key": "clone stamp",
                     "canonical_label": "Clone Stamp",
                     "family_ids": [family_id],
                 },
                 "clone stamp tool": {
+                    "canonical_key": "clone stamp",
                     "canonical_label": "Clone Stamp",
                     "family_ids": [family_id],
                 },
                 "content-aware fill": {
+                    "canonical_key": "content-aware fill",
                     "canonical_label": "Content-Aware Fill",
                     "family_ids": [family_id],
                 },
+            },
+            "display_labels": {
+                "clone stamp": "Clone Stamp Cleanup",
+                "content-aware fill": "Content-Aware Fill",
             },
             "related": {
                 "clone stamp": ["content-aware fill"],
@@ -490,7 +516,8 @@ class FormattingTests(unittest.TestCase):
             if topic["canonical_key"] == "content-aware fill"
         )
         self.assertEqual(clone["video_count"], 2)
-        self.assertEqual(clone["aliases"], ["Clone Stamp Tool"])
+        self.assertEqual(clone["label"], "Clone Stamp Cleanup")
+        self.assertEqual(clone["aliases"], ["Clone Stamp", "Clone Stamp Tool"])
         self.assertEqual(clone["family_ids"], [family_id])
         self.assertEqual(clone["related_topic_ids"], [fill["topic_id"]])
         self.assertEqual(
@@ -722,6 +749,10 @@ class FormattingTests(unittest.TestCase):
         self.assertEqual(
             make_related_symmetric({"clone stamp": ["masking"], "masking": []}),
             {"clone stamp": ["masking"], "masking": ["clone stamp"]},
+        )
+        self.assertEqual(
+            make_related_symmetric({"isolated topic": []}),
+            {"isolated topic": []},
         )
         assignments = {
             "clone stamp": {"alias_source_keys": ["clone stamp tool"]},

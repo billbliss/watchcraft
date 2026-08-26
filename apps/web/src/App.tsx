@@ -111,13 +111,22 @@ function searchGroups(value: string): string[] {
   return groups;
 }
 
+function topicHaystack(topic: Topic): string {
+  return normalized(
+    [topic.label, topic.canonical_key, ...topic.aliases].join(" "),
+  );
+}
+
 function itemHaystack(
   ordered: OrderedCatalogItem,
   manifest: CollectionManifest,
 ): string {
   const { item, path } = ordered;
   const topics = item.topic_ids
-    .map((topicId) => manifest.topics[topicId]?.label ?? "")
+    .map((topicId) => {
+      const topic = manifest.topics[topicId];
+      return topic ? topicHaystack(topic) : "";
+    })
     .join(" ");
   const families = item.family_ids
     .map((familyId) => manifest.topic_families[familyId]?.label ?? "")
@@ -317,7 +326,7 @@ export function App({ repository }: AppProps): ReactElement {
     return Object.values(manifest.topics)
       .filter((topic) => {
         if (selectedTopics.has(topic.topic_id)) return true;
-        if (facetQuery) return normalized(topic.canonical_key || topic.label).includes(facetQuery);
+        if (facetQuery) return topicHaystack(topic).includes(facetQuery);
         return topicPassesFrequencyFilter(
           topic.video_count,
           manifest.stats.video_count,

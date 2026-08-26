@@ -310,15 +310,24 @@ def build_collection_manifest(
     normalization = normalization or {}
     assignments = normalization.get("assignments", {})
     normalized_families = normalization.get("families", {})
+    display_labels = normalization.get("display_labels", {})
 
     def assignment_for(raw_topic: str) -> dict:
         source_key = canonical_topic_key(raw_topic)
         assignment = assignments.get(source_key, {})
+        canonical_key = str(
+            assignment.get("canonical_key")
+            or canonical_topic_key(assignment.get("canonical_label") or raw_topic)
+        )
         canonical_label = " ".join(
-            str(assignment.get("canonical_label") or raw_topic).split()
+            str(
+                display_labels.get(canonical_key)
+                or assignment.get("canonical_label")
+                or raw_topic
+            ).split()
         )
         return {
-            "canonical_key": canonical_topic_key(canonical_label),
+            "canonical_key": canonical_key,
             "canonical_label": canonical_label,
             "family_ids": [
                 family_id
