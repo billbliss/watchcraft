@@ -17,5 +17,5 @@
     "jsx": "react-jsx"
   },
   "include": ["src", "../../packages/catalog-core/src"],
-  "exclude": ["../../packages/catalog-core/src/*.test.ts"]
+  "exclude": ["src/*.test.ts", "../../packages/catalog-core/src/*.test.ts"]
 }

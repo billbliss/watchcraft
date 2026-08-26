@@ -23,6 +23,7 @@ import {
 
 interface AppProps {
   repository: CatalogRepository;
+  onCollectionLoaded?: (manifest: CollectionManifest) => void;
   sidebarFooter?: ReactElement;
 }
 
@@ -178,7 +179,7 @@ function LoadingScreen(): ReactElement {
   );
 }
 
-export function App({ repository, sidebarFooter }: AppProps): ReactElement {
+export function App({ onCollectionLoaded, repository, sidebarFooter }: AppProps): ReactElement {
   const [manifest, setManifest] = useState<CollectionManifest | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(routeVideoId);
@@ -215,6 +216,7 @@ export function App({ repository, sidebarFooter }: AppProps): ReactElement {
       .then((collection) => {
         if (!current) return;
         setManifest(collection);
+        onCollectionLoaded?.(collection);
         document.title = `${collection.title} — Watchcraft`;
       })
       .catch((error: unknown) => {
@@ -225,7 +227,7 @@ export function App({ repository, sidebarFooter }: AppProps): ReactElement {
     return () => {
       current = false;
     };
-  }, [repository]);
+  }, [onCollectionLoaded, repository]);
 
   const items = useMemo(
     () => (manifest ? orderedItems(manifest) : []),
