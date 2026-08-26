@@ -39,7 +39,7 @@ button { color: inherit; }
   background: #101512;
 }
 
-.sidebar-header { padding: 22px; border-bottom: 1px solid var(--line); }
+.sidebar-header { padding: 18px; border-bottom: 1px solid var(--line); }
 .brand-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 15px; }
 .brand-row h1 { margin: 0; font-size: 1.4rem; letter-spacing: -.03em; }
 .tagline, .collection-name { margin: 3px 0 0; color: var(--muted); font-size: .74rem; }
@@ -48,7 +48,7 @@ button { color: inherit; }
 .search-row { position: relative; margin-top: 16px; }
 .search-input {
   width: 100%;
-  padding: 11px 44px 11px 13px;
+  padding: 6px 15px 6px 8px;
   border: 1px solid #35443a;
   border-radius: 10px;
   outline: 0;
@@ -80,7 +80,7 @@ button { color: inherit; }
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 11px 20px;
+  padding: 8px 10px;
   color: #c6d0c9;
   cursor: pointer;
   font-size: .84rem;
@@ -90,8 +90,8 @@ button { color: inherit; }
 .filters summary::before {
   content: "›";
   display: grid;
-  width: 26px;
-  height: 26px;
+  width: 24px;
+  height: 24px;
   place-items: center;
   border: 1px solid #3a4a40;
   border-radius: 6px;
@@ -232,7 +232,7 @@ button { color: inherit; }
   display: grid;
   width: 100%;
   gap: 5px;
-  padding: 13px 14px;
+  padding: 10px 10px;
   border: 1px solid transparent;
   border-radius: 10px;
   color: inherit;
