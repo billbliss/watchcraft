@@ -1,10 +1,6 @@
 import json
 import tempfile
-import threading
 import unittest
-import urllib.error
-import urllib.request
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,11 +16,11 @@ from analyze_catalog import (
     analyze_state,
     request_timeline_repair,
 )
-from build_catalog import (
+from build_collection import (
     build_collection_manifest,
     build_topic_chapter_map,
     render_csv,
-    render_html,
+    write_collection,
 )
 from chunked_download import chunk_plan
 from normalize_topics import (
@@ -37,7 +33,6 @@ from normalize_topics import (
     topic_inventory,
 )
 from process_catalog import select_work
-from serve_catalog import CatalogHandler
 
 
 class FormattingTests(unittest.TestCase):
@@ -153,63 +148,6 @@ class FormattingTests(unittest.TestCase):
                 "normalization-test-model",
             )
 
-    def test_catalog_includes_metadata_and_split_player(self):
-        analysis = {
-            "video": "Part 3/Lesson.mp4",
-            "title": "Lesson",
-            "date": {"display": "June 2022 (approx.)"},
-            "locations": [{"name": "Oregon Coast (probable)"}],
-            "sections": [],
-        }
-        page = render_html([analysis])
-        self.assertIn("<title>Watchcraft</title>", page)
-        self.assertIn("Learn a craft by watching", page)
-        self.assertIn("— Watchcraft`", page)
-        self.assertIn("Open in default player", page)
-        self.assertIn('class="splitter"', page)
-        self.assertIn('class="horizontal-splitter"', page)
-        self.assertIn('class="detail-scroll"', page)
-        self.assertIn('class="detail-columns"', page)
-        self.assertIn("width: min(1440px, 100%)", page)
-        self.assertLess(page.index('id="player"'), page.index('id="detail-scroll"'))
-        self.assertIn("function playerHeightBounds()", page)
-        self.assertIn("function displayClock(clock)", page)
-        self.assertIn("displayClock(section.start)", page)
-        self.assertIn("sidebar.addEventListener('wheel'", page)
-        self.assertIn("Filter by topic", page)
-        self.assertNotIn("Filter by tag", page)
-        self.assertIn("flex: 0 0 24px", page)
-        self.assertIn(".filters > summary:hover::before", page)
-        self.assertIn('id="topic-threshold"', page)
-        self.assertIn('id="topic-facets"', page)
-        self.assertIn('id="clear-all-filters"', page)
-        self.assertIn("function updateClearAllButton()", page)
-        self.assertIn("topicFilterSearch.value = ''", page)
-        self.assertIn("selectedTopics: new Set", page)
-        self.assertIn("selectedTopics.every(id => video._topicIds.includes(id))", page)
-        self.assertIn("selectedFamilies.every(id => video._familyIds.includes(id))", page)
-        self.assertIn("function topicPassesDisplayThreshold(topic)", page)
-        self.assertIn("!state.selectedTopics.has(topicId) && !topicPassesDisplayThreshold(topic)", page)
-        self.assertIn("function writeFilterRoute", page)
-        self.assertIn("videoId: videosByItemId.has(videoId) ? videoId : null", page)
-        self.assertIn("filterVideos({ preferredVideoId: initialFilter.videoId })", page)
-        self.assertIn("params.append('topic', id)", page)
-        self.assertIn("params.append('family', id)", page)
-        self.assertIn("? `/video/${encodeURIComponent(state.selected._itemId)}`", page)
-        self.assertIn('id="related-topics"', page)
-        self.assertIn('id="related-empty"', page)
-        self.assertIn("Select a topic above to highlight its chapters and see related topics.", page)
-        self.assertIn("Search techniques, year, location", page)
-        self.assertIn("function parseSearchGroups(value)", page)
-        self.assertIn("groups[groups.length - 1] += ` ${token}`", page)
-        self.assertIn("searchGroups.every(group => haystack.includes(group))", page)
-        self.assertIn("video.date?.display", page)
-        self.assertIn("location => location.name", page)
-        self.assertIn("Oregon Coast (probable)", page)
-        self.assertIn("const collection = catalogData.collection", page)
-        self.assertIn('"topic_scope":"collection"', page)
-        self.assertIn('"_itemId":', page)
-        self.assertIn("date,location", render_csv([analysis]).splitlines()[0])
 
     def test_collection_manifest_models_groups_stable_ids_and_scoped_topics(self):
         analyses = [
@@ -420,57 +358,52 @@ class FormattingTests(unittest.TestCase):
         self.assertEqual(mapping["dodge and burn"], [0, 1])
         self.assertEqual(mapping["camera raw"], [1])
         self.assertNotIn("unmapped", mapping)
-        page = render_html([analysis], {"Course/Lesson.mp4": mapping})
-        self.assertIn('"_topicSections":{"topic-dodge-and-burn-', page)
-        self.assertIn('":[0,1]', page)
-        self.assertIn("function toggleTopicHighlight", page)
-        self.assertIn("chapter.topic-match", page)
 
-    def test_catalog_server_supports_video_byte_ranges(self):
+    def test_collection_csv_export_remains_available(self):
+        analysis = {
+            "video": "Course/Lesson.mp4",
+            "title": "Lesson",
+            "date": {"display": "2024"},
+            "locations": [{"name": "Oregon Coast"}],
+            "summary": "A useful lesson.",
+            "topics": ["Dodge and Burn"],
+            "sections": [],
+        }
+        rows = render_csv([analysis]).splitlines()
+        self.assertEqual(
+            rows[0],
+            "video,title,date,location,summary,topics,featured_techniques,section_count",
+        )
+        self.assertIn("Course/Lesson.mp4,Lesson,2024,Oregon Coast", rows[1])
+
+    def test_collection_build_removes_the_legacy_html_artifact(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             catalog = root / video_catalog.CATALOG_DIR_NAME
-            catalog.mkdir()
-            (catalog / "catalog.html").write_text("catalog", encoding="utf-8")
-            (root / "Lesson.mp4").write_bytes(b"0123456789")
-            handler = type("TestCatalogHandler", (CatalogHandler,), {"root": root})
-            server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            try:
-                request = urllib.request.Request(
-                    f"http://127.0.0.1:{server.server_port}/Lesson.mp4",
-                    headers={
-                        "Range": "bytes=2-5",
-                        "Origin": "http://127.0.0.1:5173",
-                    },
-                )
-                with urllib.request.urlopen(request) as response:
-                    self.assertEqual(response.status, 206)
-                    self.assertEqual(response.headers["Content-Range"], "bytes 2-5/10")
-                    self.assertEqual(
-                        response.headers["Access-Control-Allow-Origin"],
-                        "http://127.0.0.1:5173",
-                    )
-                    self.assertEqual(response.read(), b"2345")
-                with urllib.request.urlopen(
-                    f"http://127.0.0.1:{server.server_port}/favicon.ico"
-                ) as response:
-                    self.assertEqual(response.status, 204)
-                with urllib.request.urlopen(
-                    f"http://127.0.0.1:{server.server_port}/video/video-lesson-123"
-                ) as response:
-                    self.assertEqual(response.status, 200)
-                    self.assertEqual(response.read(), b"catalog")
-                with self.assertRaises(urllib.error.HTTPError) as error:
-                    urllib.request.urlopen(
-                        f"http://127.0.0.1:{server.server_port}/filter"
-                    )
-                self.assertEqual(error.exception.code, 404)
-            finally:
-                server.shutdown()
-                server.server_close()
-                thread.join(timeout=2)
+            analysis_path = catalog / "analysis" / "Course" / "Lesson.analysis.json"
+            analysis_path.parent.mkdir(parents=True)
+            analysis_path.write_text(
+                json.dumps(
+                    {
+                        "video": "Course/Lesson.mp4",
+                        "title": "Lesson",
+                        "summary": "A useful lesson.",
+                        "topics": [],
+                        "sections": [],
+                        "locations": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            legacy_html = catalog / "catalog.html"
+            legacy_html.write_text("legacy UI", encoding="utf-8")
+
+            manifest = write_collection(root)
+
+            self.assertEqual(manifest["kind"], "watchcraft.collection")
+            self.assertTrue((catalog / "collection.json").is_file())
+            self.assertTrue((catalog / "catalog.csv").is_file())
+            self.assertFalse(legacy_html.exists())
 
     def test_structured_analysis_is_atomic_normalized_and_resumable(self):
         class FakeResponses:

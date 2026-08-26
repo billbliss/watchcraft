@@ -1,7 +1,7 @@
-# Watchcraft desktop experiment
+# Watchcraft desktop app
 
 This workspace is a deliberately narrow Tauri 2 shell around the shared
-Watchcraft React reader. It is isolated on the `experiment/tauri` branch.
+Watchcraft React reader.
 
 The desktop boundary exposes only:
 

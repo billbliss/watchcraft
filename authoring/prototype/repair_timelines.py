@@ -22,7 +22,7 @@ from analyze_catalog import (
     transcript_text,
     unique_strings,
 )
-from build_catalog import write_catalog
+from build_collection import write_collection
 from video_catalog import atomic_write_text, default_analysis_model, validated_root
 
 
@@ -143,7 +143,7 @@ def main() -> int:
         )
         print(f"  saved {count} sections", flush=True)
     if not args.no_rebuild:
-        write_catalog(args.root)
+        write_collection(args.root)
     return 0
 
 

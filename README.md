@@ -15,24 +15,21 @@ This repository separates two products at a versioned catalog boundary:
 
 ## Repository status
 
-The working Python application has been preserved in `authoring/prototype/` as
-the behavioral baseline. The next migration step is to extract its generated UI
-into React + TypeScript while keeping the Python authoring pipeline intact.
-
-The runtime is being introduced in stages:
+The runtime and authoring pipeline are separated by the versioned collection
+schema:
 
 - a React/Vite web application for the portable reader;
-- an experimental Tauri 2 shell for narrowly scoped local-library access;
-- later desktop work for collection downloads and durable local state;
+- a Tauri 2 shell for narrowly scoped local-library access and private state;
+- later desktop work for collection downloads and multi-collection UI;
 - Python command-line authoring tools;
 - JSON collection packages validated by `packages/catalog-schema`;
-- SQLite only for device-specific state such as media locations and download
-  status. Portable catalog content remains data, never embedded application code.
+- private device-specific state for media locations and installed revisions.
+  Portable collection content remains data, never embedded application code.
 
 See [the architecture decision](docs/architecture/0001-catalog-runtime-boundary.md)
 for the boundary and update model.
 
-## Current prototype
+## Python authoring
 
 ```sh
 cd authoring/prototype
@@ -42,8 +39,8 @@ pip install -r requirements.txt
 python -m unittest -v
 ```
 
-The prototype commands are intentionally retained during the migration so the
-new reader can be compared with the existing behavior.
+The authoring tools generate versioned collection metadata and CSV exports. They
+do not generate or serve reader UI.
 
 ## Web reader
 
@@ -55,20 +52,19 @@ npm install --prefer-offline --no-audit --no-fund
 npm run dev
 ```
 
-To use a live catalog, keep the Python catalog server running and pass its
-manifest URL to the web reader:
+To use a published collection, pass its manifest URL to the web reader:
 
 ```text
-http://127.0.0.1:5173/?catalog=http://127.0.0.1:8765/course-data/collection.json
+http://127.0.0.1:5173/?catalog=https://example.com/courses/collection.json
 ```
 
 The query parameter is an adapter setting, not catalog content. The React reader
 only uses the shared `CatalogRepository` contract.
 
-## Tauri desktop experiment
+## Tauri desktop app
 
-The `experiment/tauri` branch contains a deliberately small native shell in
-`apps/desktop`. It reuses the React reader and adds only a native folder picker,
+`apps/desktop` contains a deliberately small native shell. It reuses the React
+reader and adds only a native folder picker,
 read-only asset-protocol access to the chosen library, restoration of that
 user-approved scope, and a command that opens a supported video in the OS
 default player. That command accepts only existing video files already covered

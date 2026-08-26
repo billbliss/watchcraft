@@ -24,15 +24,15 @@ The React renderer talks to a small `CatalogRepository` interface rather than to
 the filesystem, SQLite, or HTTP directly. Runtime adapters provide the data:
 
 - the web adapter fetches published collection packages over HTTP;
-- the future desktop adapter installs packages, records local media mappings,
+- the desktop adapter installs packages, records local media mappings,
   and exposes media through a restricted application protocol;
 - a future mobile adapter can implement the same repository contract.
 
 Portable collection packages contain stable IDs, relative resource paths, and no
-machine-specific absolute paths. A device-local SQLite database records installed
+machine-specific absolute paths. Device-local state records installed
 collections, local video locations, package revisions, download state, and user
-preferences. Catalog JSON remains the source of truth for authored content;
-SQLite is an index and local-state store, not the publishing format.
+preferences. Collection JSON remains the source of truth for authored content;
+private runtime storage is local state, not the publishing format.
 
 A device has one Watchcraft catalog containing multiple top-level collections.
 Groups beneath a collection may be nested arbitrarily. Topics, topic families,
@@ -51,8 +51,7 @@ filesystem access.
 
 ## Consequences
 
-The current HTML generator remains only as a migration baseline and will be
-removed after feature parity. Authoring and reader releases may proceed
-independently as long as they honor supported schema versions. Web deployments
+Authoring and reader releases may proceed independently as long as they honor
+supported schema versions. Web deployments
 cannot discover arbitrary local files; desktop and future mobile shells supply
 that platform capability without changing the React UI's data model.

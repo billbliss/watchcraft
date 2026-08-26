@@ -11,7 +11,7 @@ from analyze_catalog import (
     analysis_path,
     analyze_state,
     create_openai_client,
-    rebuild_catalog,
+    rebuild_collection,
 )
 from video_catalog import discover_videos, output_paths, resolve_video, transcribe_video
 
@@ -136,8 +136,8 @@ def run_from_args(args: Any) -> int:
             )
             print(f"  analysis: {status}", flush=True)
             if status == "completed" and not args.no_rebuild:
-                rebuild_catalog(args.root)
+                rebuild_collection(args.root)
 
     if args.no_rebuild:
-        print("Catalog rebuild skipped (--no-rebuild).", flush=True)
+        print("Collection rebuild skipped (--no-rebuild).", flush=True)
     return 0

@@ -18,7 +18,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 from analyze_catalog import create_openai_client
-from build_catalog import (
+from build_collection import (
     analysis_topics,
     canonical_topic_key,
     load_analyses,
@@ -798,9 +798,9 @@ def run(args: argparse.Namespace) -> int:
         flush=True,
     )
     if not args.no_rebuild:
-        from build_catalog import write_catalog
+        from build_collection import write_collection
 
-        write_catalog(args.root)
+        write_collection(args.root)
     return 0
 
 

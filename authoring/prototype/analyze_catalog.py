@@ -410,10 +410,10 @@ def analyze_state(
     return "completed"
 
 
-def rebuild_catalog(root: Path) -> None:
-    from build_catalog import write_catalog
+def rebuild_collection(root: Path) -> None:
+    from build_collection import write_collection
 
-    write_catalog(root)
+    write_collection(root)
 
 
 def selected_states(root: Path, requested_video: str | None) -> list[Path]:
@@ -477,7 +477,7 @@ def run_from_args(args: Any) -> int:
         if status == "completed":
             completed += 1
             if not args.no_rebuild:
-                rebuild_catalog(args.root)
+                rebuild_collection(args.root)
     if completed and args.no_rebuild:
-        print("Catalog rebuild skipped (--no-rebuild).", flush=True)
+        print("Collection rebuild skipped (--no-rebuild).", flush=True)
     return 0
