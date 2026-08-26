@@ -277,34 +277,23 @@
   padding: 7px 11px;
 }
 
-.settings-or {
+.add-collection-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin: 12px 0;
+  gap: 9px;
+}
+
+.inline-or {
+  flex: none;
   color: #758279;
   font-size: .67rem;
   text-transform: uppercase;
 }
 
-.settings-or::before,
-.settings-or::after {
-  height: 1px;
-  flex: 1;
-  background: var(--line);
-  content: "";
-}
-
-.collection-url-form label {
-  display: block;
-  margin-bottom: 6px;
-  color: #cbd5ce;
-  font-size: .73rem;
-  font-weight: 650;
-}
-
-.collection-url-form > div {
+.collection-url-form {
   display: flex;
+  min-width: 0;
+  flex: 1;
   gap: 8px;
 }
 
@@ -356,4 +345,6 @@
   .settings-dialog { max-height: calc(100vh - 24px); }
   .collection-entry { align-items: flex-start; flex-direction: column; }
   .collection-actions { align-self: flex-end; }
+  .add-collection-row { flex-wrap: wrap; }
+  .collection-url-form { flex-basis: 100%; }
 }

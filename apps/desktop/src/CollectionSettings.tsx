@@ -134,14 +134,14 @@ export function CollectionSettings({
                 <p>Install from a folder on this computer or from a collection manifest URL.</p>
               </div>
             </div>
-            <button className="primary-action compact-action" disabled={busy} onClick={() => void onAddFolder(openAfter)} type="button">
-              Choose folder…
-            </button>
-            <div className="settings-or"><span>or</span></div>
-            <form className="collection-url-form" onSubmit={submitUrl}>
-              <label htmlFor="collection-url">Collection URL</label>
-              <div>
+            <div className="add-collection-row">
+              <button className="primary-action compact-action" disabled={busy} onClick={() => void onAddFolder(openAfter)} type="button">
+                Choose folder…
+              </button>
+              <span className="inline-or">or</span>
+              <form className="collection-url-form" onSubmit={submitUrl}>
                 <input
+                  aria-label="Collection URL"
                   autoCapitalize="none"
                   autoCorrect="off"
                   disabled={busy}
@@ -153,8 +153,8 @@ export function CollectionSettings({
                   value={url}
                 />
                 <button disabled={busy || !url.trim()} type="submit">Add</button>
-              </div>
-            </form>
+              </form>
+            </div>
             <label className="open-after-option">
               <input checked={openAfter} disabled={busy} onChange={(event) => setOpenAfter(event.target.checked)} type="checkbox" />
               <span>Open the collection after adding it</span>
