@@ -35,6 +35,7 @@ def default_model() -> str:
 def default_analysis_model() -> str:
     return os.environ.get(ANALYSIS_MODEL_ENV, BUILTIN_ANALYSIS_MODEL)
 CATALOG_DIR_NAME = "Video Catalog"
+AUTHORING_CONFIG_NAME = "watchcraft-authoring.json"
 DOMAIN_PROMPT = (
     "Advanced landscape photography instruction. Adobe Photoshop, Adobe Camera Raw, "
     "ACR, luminosity masks, layer masks, manual exposure blending, clone paint, "
@@ -42,6 +43,13 @@ DOMAIN_PROMPT = (
     "tonal color adjustments, directional light, sun star, focus stacking, "
     "panorama stitching, sky replacement, flare removal."
 )
+
+
+def catalog_root(root: Path) -> Path:
+    """Return the metadata directory for legacy libraries or authoring workspaces."""
+    if (root / AUTHORING_CONFIG_NAME).is_file():
+        return root
+    return root / CATALOG_DIR_NAME
 
 
 @dataclass(frozen=True)
@@ -191,7 +199,7 @@ def atomic_write_text(path: Path, content: str) -> None:
 
 def output_paths(root: Path, video: Path) -> tuple[Path, Path, Path]:
     relative = video.relative_to(root)
-    transcript_root = root / CATALOG_DIR_NAME / "transcripts"
+    transcript_root = catalog_root(root) / "transcripts"
     srt_path = transcript_root / relative.with_suffix(".srt")
     text_path = transcript_root / relative.with_suffix(".transcript.txt")
     state_path = transcript_root / relative.with_suffix(
@@ -346,7 +354,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="Report pending work without API calls"
     )
     analyze_parser.add_argument(
-        "--no-rebuild", action="store_true", help="Do not update HTML/CSV after each video"
+        "--no-rebuild", action="store_true", help="Do not update collection/CSV after each video"
     )
 
     process_parser = subparsers.add_parser(
@@ -386,7 +394,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="Show the paired plan without doing work"
     )
     process_parser.add_argument(
-        "--no-rebuild", action="store_true", help="Do not update HTML/CSV after analysis"
+        "--no-rebuild", action="store_true", help="Do not update collection/CSV after analysis"
     )
 
     migration_parser = subparsers.add_parser(

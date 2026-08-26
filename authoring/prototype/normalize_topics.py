@@ -26,7 +26,7 @@ from build_collection import (
     load_topic_chapter_maps,
     stable_id,
 )
-from video_catalog import CATALOG_DIR_NAME, atomic_write_text, validated_root
+from video_catalog import atomic_write_text, catalog_root, validated_root
 
 
 NORMALIZATION_MODEL_ENV = "VIDEO_CATALOG_NORMALIZATION_MODEL"
@@ -118,7 +118,7 @@ def now_iso() -> str:
 
 
 def normalization_path(root: Path) -> Path:
-    return root / CATALOG_DIR_NAME / "topic-normalization.json"
+    return catalog_root(root) / "topic-normalization.json"
 
 
 def preferred_label(forms: Counter) -> str:
@@ -691,7 +691,7 @@ def run(args: argparse.Namespace) -> int:
     source_hash = inventory_hash(records)
     path = normalization_path(args.root)
     previous_manifest = load_collection_manifest(
-        args.root / CATALOG_DIR_NAME / "collection.json"
+        catalog_root(args.root) / "collection.json"
     ) or {}
     collection_id = (
         previous_manifest.get("collection_id")

@@ -11,3 +11,31 @@ Tauri desktop adapter.
 
 The authoring output must validate against `packages/catalog-schema` and must not
 contain absolute paths to an author's media files.
+
+## YouTube collection workspace
+
+Real collections belong in a separate content repository rather than this
+application repository. A source-neutral workspace is identified by
+`watchcraft-authoring.json`; its public manifest and analysis are written directly
+into that directory, while retrieved captions remain private authoring inputs.
+
+```bash
+python prototype/watchcraft_author.py youtube add \
+  --workspace ~/dev/watchcraft-collections/collections/premiere-pro-ai-tools \
+  --collection-title "Premiere Pro AI Tools" \
+  "https://www.youtube.com/watch?v=PjObX9XQvgI"
+
+python prototype/watchcraft_author.py process \
+  --workspace ~/dev/watchcraft-collections/collections/premiere-pro-ai-tools
+```
+
+`youtube add` retrieves public metadata and the requested caption track without
+downloading the video. `process` analyzes unfinished sources, repairs an
+underspecified timeline, validates the resulting `collection.json` against the
+canonical schema, and preserves the collection revision when content is unchanged.
+
+The content repository should ignore `**/transcripts/`, downloaded media, caches,
+credentials, and other private working material. YouTube collection items publish
+only their video ID/URL and analysis; their `transcript` reference is empty.
+
+Legacy local-media libraries continue to use the `Video Catalog/` metadata folder.

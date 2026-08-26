@@ -1,3 +1,4 @@
+import { youtubeEmbedUrl } from "@watchcraft/catalog-core";
 import type {
   CatalogItem,
   CatalogRepository,
@@ -52,7 +53,9 @@ export class HttpCatalogRepository implements CatalogRepository {
     if (media.type === "http-video") {
       return new URL(media.url, this.manifestUrl).href;
     }
-    if (media.type === "youtube") return null;
+    if (media.type === "youtube") {
+      return youtubeEmbedUrl(media.video_id, window.location.origin);
+    }
     if (!this.mediaRootUrl) return null;
     return new URL(media.relative_path, this.mediaRootUrl).href;
   }

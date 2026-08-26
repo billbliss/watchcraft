@@ -195,6 +195,7 @@ export function App({ repository }: AppProps): ReactElement {
   const [mediaErrorUrl, setMediaErrorUrl] = useState<string | null>(null);
   const mediaRetryCountsRef = useRef(new Map<string, number>());
   const playerRef = useRef<HTMLVideoElement>(null);
+  const youtubePlayerRef = useRef<HTMLIFrameElement>(null);
 
   useEffect(() => {
     let current = true;
@@ -371,6 +372,10 @@ export function App({ repository }: AppProps): ReactElement {
         .slice(0, 10)
     : [];
   const mediaUrl = selectedItem ? repository.mediaUrl(selectedItem) : null;
+  const youtubeMedia = selectedItem?.media.find((media) => media.type === "youtube") ?? null;
+  const hasLocalMedia = Boolean(
+    selectedItem?.media.some((media) => media.type === "local-file"),
+  );
   const timelineClockMode = useMemo(
     () => inferTimelineClockMode(analysis?.sections ?? [], mediaDuration),
     [analysis, mediaDuration],
@@ -406,10 +411,21 @@ export function App({ repository }: AppProps): ReactElement {
   }
 
   function seek(start: string): void {
+    const seconds = clockSeconds(start, timelineClockMode);
+    if (youtubeMedia && youtubePlayerRef.current?.contentWindow) {
+      const target = youtubePlayerRef.current.contentWindow;
+      const send = (func: string, args: unknown[]) => target.postMessage(
+        JSON.stringify({ event: "command", func, args }),
+        "https://www.youtube-nocookie.com",
+      );
+      send("seekTo", [seconds, true]);
+      send("playVideo", []);
+      return;
+    }
     const player = playerRef.current;
     if (!player) return;
     const applySeek = () => {
-      player.currentTime = clockSeconds(start, timelineClockMode);
+      player.currentTime = seconds;
       void player.play();
     };
     if (player.readyState >= HTMLMediaElement.HAVE_METADATA) applySeek();
@@ -666,7 +682,17 @@ export function App({ repository }: AppProps): ReactElement {
             <div className="player-pane">
               <div className="player-stack">
                 <div className="player-shell">
-                  {mediaUrl ? (
+                  {mediaUrl && youtubeMedia ? (
+                    <iframe
+                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                      allowFullScreen
+                      key={mediaUrl}
+                      ref={youtubePlayerRef}
+                      referrerPolicy="strict-origin-when-cross-origin"
+                      src={mediaUrl}
+                      title={`YouTube player — ${selectedItem.title}`}
+                    />
+                  ) : mediaUrl ? (
                     <>
                       <video
                         controls
@@ -696,7 +722,7 @@ export function App({ repository }: AppProps): ReactElement {
                     <div className="no-media">No playable media source is available.</div>
                   )}
                 </div>
-                {repository.canOpenInDefaultPlayer !== false && (
+                {hasLocalMedia && repository.canOpenInDefaultPlayer !== false && (
                   <div className="player-footer">
                     <button
                       className="action primary player-action"

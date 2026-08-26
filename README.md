@@ -8,8 +8,8 @@ taught, and plays media without uploading it.
 
 This repository separates two products at a versioned catalog boundary:
 
-- `authoring/` builds and updates portable collection packages from videos,
-  transcripts, and analysis.
+- `authoring/` builds and updates portable collection packages from local videos
+  or public YouTube sources, transcripts, and analysis.
 - `apps/` and `packages/` contain the web and desktop reader. The reader consumes
   catalogs; it does not know how they were authored.
 
@@ -60,6 +60,10 @@ http://127.0.0.1:5173/?catalog=https://example.com/courses/collection.json
 
 The query parameter is an adapter setting, not catalog content. The React reader
 only uses the shared `CatalogRepository` contract.
+
+Collection items may reference local files, HTTP video, or public YouTube videos.
+YouTube playback uses a privacy-enhanced embed and does not require a local media
+binding.
 
 ## Tauri desktop app
 

@@ -33,9 +33,82 @@ from normalize_topics import (
     topic_inventory,
 )
 from process_catalog import select_work
+from watchcraft_author import import_youtube, youtube_video_id
 
 
 class FormattingTests(unittest.TestCase):
+    def test_youtube_video_id_accepts_watch_and_short_urls(self):
+        self.assertEqual(
+            youtube_video_id(
+                "https://www.youtube.com/watch?v=PjObX9XQvgI&list=private"
+            ),
+            "PjObX9XQvgI",
+        )
+        self.assertEqual(
+            youtube_video_id("https://youtu.be/PjObX9XQvgI"), "PjObX9XQvgI"
+        )
+
+    def test_youtube_workspace_keeps_transcript_private_and_emits_remote_media(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            metadata = {
+                "source_id": "youtube:PjObX9XQvgI",
+                "type": "youtube",
+                "video_id": "PjObX9XQvgI",
+                "url": "https://www.youtube.com/watch?v=PjObX9XQvgI",
+                "title": "Premiere Pro AI Tools",
+                "publisher": "Primal Video",
+                "publisher_url": "https://www.youtube.com/@PrimalVideo",
+                "thumbnail_url": "https://i.ytimg.com/test.jpg",
+                "duration_seconds": 936,
+                "published_at": "2025-03-24T21:00:33-07:00",
+            }
+            segments = [{"start": 0.0, "end": 4.0, "text": "First technique."}]
+            captions = {
+                "language": "en",
+                "language_name": "English",
+                "generated": True,
+                "source": "youtube-captions",
+            }
+            with patch("watchcraft_author.youtube_metadata", return_value=metadata), patch(
+                "watchcraft_author.youtube_transcript", return_value=(segments, captions)
+            ):
+                import_youtube(
+                    root,
+                    "PjObX9XQvgI",
+                    collection_title="Editing Course",
+                    language="en",
+                    force=False,
+                )
+            self.assertEqual(video_catalog.catalog_root(root), root)
+            self.assertTrue((root / "transcripts/PjObX9XQvgI.transcript.json").is_file())
+            analysis = {
+                "video": "PjObX9XQvgI.youtube",
+                "title": "Eight Premiere Pro AI Tools",
+                "summary": "A useful lesson.",
+                "schema_version": 2,
+                "analysis_model": "test-model",
+                "topics": ["Premiere Pro"],
+                "sections": [],
+                "locations": [],
+            }
+            analysis_file = root / "analysis/PjObX9XQvgI.analysis.json"
+            analysis_file.parent.mkdir()
+            analysis_file.write_text(json.dumps(analysis), encoding="utf-8")
+            manifest = write_collection(root)
+            item = next(iter(manifest["items"].values()))
+            self.assertEqual(
+                item["media"],
+                [{
+                    "type": "youtube",
+                    "video_id": "PjObX9XQvgI",
+                    "url": "https://www.youtube.com/watch?v=PjObX9XQvgI",
+                }],
+            )
+            self.assertEqual(item["transcript"], {})
+            self.assertNotIn("media_root_hint", manifest)
+            self.assertEqual(manifest["title"], "Editing Course")
+
     def test_srt_timestamp(self):
         self.assertEqual(video_catalog.format_clock(3661.234, srt=True), "01:01:01,234")
 

@@ -1,4 +1,5 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { youtubeEmbedUrl } from "@watchcraft/catalog-core";
 import type {
   CatalogItem,
   CatalogRepository,
@@ -64,7 +65,10 @@ export class DesktopCatalogRepository implements CatalogRepository {
     const media = item.media[0];
     if (!media) return null;
     if (media.type === "http-video") return media.url;
-    if (media.type === "youtube" || !this.location.mediaRoot) return null;
+    if (media.type === "youtube") {
+      return youtubeEmbedUrl(media.video_id, "https://app.watchcraft.reader");
+    }
+    if (!this.location.mediaRoot) return null;
     return convertFileSrc(joinLocalPath(this.location.mediaRoot, media.relative_path), "stream");
   }
 

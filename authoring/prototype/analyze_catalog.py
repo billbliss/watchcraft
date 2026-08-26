@@ -14,14 +14,14 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict
 
 from video_catalog import (
-    CATALOG_DIR_NAME,
     atomic_write_text,
+    catalog_root,
     output_paths,
     render_readable_transcript,
     resolve_video,
 )
 
-PROMPT_VERSION = 2
+PROMPT_VERSION = 3
 TIMELINE_REPAIR_PROMPT_VERSION = 1
 DEFAULT_MAX_TRANSCRIPT_CHARS = 1_500_000
 
@@ -72,7 +72,7 @@ class GeneratedTimeline(StrictModel):
     sections: list[Section]
 
 
-SYSTEM_PROMPT = """You are a meticulous cataloger of advanced landscape-photography instruction.
+SYSTEM_PROMPT = """You are a meticulous cataloger of educational craft instruction.
 Create a useful searchable analysis of one educational video.
 
 Evidence rules:
@@ -82,7 +82,8 @@ Evidence rules:
 - For locations, distinguish explicit identification from reasonable inference. Use an empty
   locations list if nothing useful can be inferred. Include qualifiers such as "probable" in
   the name when appropriate, and explain the evidence in basis.
-- Embedded MP4 creation_time may be an export date. Treat it as approximate unless the
+- A source publication date is authoritative for publication, but not necessarily for when
+  the lesson was recorded. Embedded MP4 creation_time may be an export date. Treat it as approximate unless the
   transcript independently confirms it. Folder names and filenames are supporting evidence.
 - Confidence values range from 0.0 to 1.0.
 
@@ -114,13 +115,13 @@ Return 6-18 chronological sections when the material supports them.
 
 def analysis_path(root: Path, relative_video: str) -> Path:
     relative = Path(relative_video)
-    return root / CATALOG_DIR_NAME / "analysis" / relative.with_suffix(
+    return catalog_root(root) / "analysis" / relative.with_suffix(
         ".analysis.json"
     )
 
 
 def discover_transcript_states(root: Path) -> list[Path]:
-    transcript_root = root / CATALOG_DIR_NAME / "transcripts"
+    transcript_root = catalog_root(root) / "transcripts"
     if not transcript_root.exists():
         return []
     return sorted(
@@ -177,6 +178,17 @@ def transcript_text(payload: dict[str, Any]) -> str:
 
 
 def source_context(root: Path, relative_video: str) -> dict[str, str]:
+    state_metadata = load_authoring_source(root, relative_video)
+    if state_metadata:
+        return {
+            "source_type": str(state_metadata.get("type", "")),
+            "source_id": str(state_metadata.get("source_id", "")),
+            "title": str(state_metadata.get("title", "")),
+            "publisher": str(state_metadata.get("publisher", "")),
+            "published_at": str(state_metadata.get("published_at", "")),
+            "duration_seconds": str(state_metadata.get("duration_seconds", "")),
+            "url": str(state_metadata.get("url", "")),
+        }
     video = (root / relative_video).resolve()
     return {
         "relative_video_path": Path(relative_video).as_posix(),
@@ -184,6 +196,18 @@ def source_context(root: Path, relative_video: str) -> dict[str, str]:
         "parent_folder": video.parent.name,
         "embedded_creation_time": probe_creation_time(video) if video.is_file() else "",
     }
+
+
+def load_authoring_source(root: Path, source_key: str) -> dict[str, Any] | None:
+    path = root / "watchcraft-authoring.json"
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    source = payload.get("sources", {}).get(source_key)
+    return source if isinstance(source, dict) else None
 
 
 def build_user_prompt(context: dict[str, str], transcript: str) -> str:
@@ -396,14 +420,28 @@ def analyze_state(
             f"Transcript is {len(transcript):,} characters, exceeding the configured "
             f"limit of {max_transcript_chars:,}; increase --max-transcript-chars"
         )
+    context = source_context(root, relative_video)
     generated = request_analysis(
         client,
         model=model,
-        context=source_context(root, relative_video),
+        context=context,
         transcript=transcript,
         retries=retries,
     )
     normalized = normalize_analysis(generated, relative_video, model)
+    published_at = context.get("published_at", "")
+    if context.get("source_type") == "youtube" and published_at:
+        try:
+            published = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+            normalized["date"] = {
+                "display": f"{published.strftime('%B')} {published.day}, {published.year}",
+                "iso": published.date().isoformat(),
+                "precision": "day",
+                "confidence": 1.0,
+                "basis": "YouTube publication date",
+            }
+        except ValueError:
+            pass
     atomic_write_text(
         output, json.dumps(normalized, ensure_ascii=False, indent=2) + "\n"
     )

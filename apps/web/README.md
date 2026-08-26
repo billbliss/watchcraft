@@ -17,3 +17,7 @@ HTTP server:
 
 Local filesystem collections are tested through the Tauri desktop adapter, not
 through a Python web server.
+
+Public YouTube items play through `youtube-nocookie.com`; chapter navigation uses
+the embedded-player command API. Local filesystem media remains a desktop-only
+capability.

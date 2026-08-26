@@ -27,6 +27,7 @@
         "connect-src": "ipc: http://ipc.localhost asset: http://asset.localhost",
         "img-src": "'self' asset: http://asset.localhost data:",
         "media-src": "'self' asset: http://asset.localhost stream: http://stream.localhost",
+        "frame-src": "https://www.youtube-nocookie.com https://www.youtube.com",
         "style-src": "'self' 'unsafe-inline'"
       },
       "devCsp": {
@@ -34,6 +35,7 @@
         "connect-src": "ipc: http://ipc.localhost http://127.0.0.1:1420 ws://127.0.0.1:1420 asset: http://asset.localhost",
         "img-src": "'self' asset: http://asset.localhost data:",
         "media-src": "'self' asset: http://asset.localhost stream: http://stream.localhost",
+        "frame-src": "https://www.youtube-nocookie.com https://www.youtube.com",
         "style-src": "'self' 'unsafe-inline'"
       },
       "assetProtocol": {

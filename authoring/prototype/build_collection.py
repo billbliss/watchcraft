@@ -12,7 +12,7 @@ import re
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from video_catalog import CATALOG_DIR_NAME, atomic_write_text, validated_root
+from video_catalog import atomic_write_text, catalog_root, validated_root
 
 
 TOKEN_ALIASES = {
@@ -178,7 +178,7 @@ def build_topic_chapter_map(analysis: dict, transcript_segments: list[dict]) -> 
 
 def load_topic_chapter_maps(root: Path, analyses: list[dict]) -> dict[str, dict[str, list[int]]]:
     maps = {}
-    transcript_root = root / CATALOG_DIR_NAME / "transcripts"
+    transcript_root = catalog_root(root) / "transcripts"
     for analysis in analyses:
         video = analysis.get("video", "")
         transcript_path = transcript_root / Path(video).with_suffix(".transcript.json")
@@ -191,7 +191,7 @@ def load_topic_chapter_maps(root: Path, analyses: list[dict]) -> dict[str, dict[
 
 
 def load_analyses(root: Path) -> list[dict]:
-    analysis_root = root / CATALOG_DIR_NAME / "analysis"
+    analysis_root = catalog_root(root) / "analysis"
     analyses = []
     if not analysis_root.exists():
         return analyses
@@ -202,6 +202,32 @@ def load_analyses(root: Path) -> list[dict]:
 
 
 COLLECTION_SCHEMA_VERSION = 4
+
+
+def validate_collection_manifest(manifest: dict) -> None:
+    try:
+        from jsonschema import Draft202012Validator
+    except ImportError as error:
+        raise RuntimeError(
+            "jsonschema is not installed. Install authoring/prototype/requirements.txt."
+        ) from error
+    schema_path = (
+        Path(__file__).resolve().parents[2]
+        / "packages"
+        / "catalog-schema"
+        / "collection.schema.json"
+    )
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    errors = sorted(
+        Draft202012Validator(schema).iter_errors(manifest),
+        key=lambda error: [str(part) for part in error.absolute_path],
+    )
+    if errors:
+        details = "; ".join(
+            f"{'/'.join(map(str, error.absolute_path)) or '<root>'}: {error.message}"
+            for error in errors[:5]
+        )
+        raise RuntimeError(f"Collection manifest failed schema validation: {details}")
 
 
 def stable_id(prefix: str, value: str) -> str:
@@ -223,7 +249,7 @@ def load_collection_manifest(path: Path) -> dict | None:
 
 
 def load_topic_normalization(root: Path) -> dict | None:
-    path = root / CATALOG_DIR_NAME / "topic-normalization.json"
+    path = catalog_root(root) / "topic-normalization.json"
     if not path.exists():
         return None
     try:
@@ -232,6 +258,19 @@ def load_topic_normalization(root: Path) -> dict | None:
         raise RuntimeError(f"Could not read topic normalization: {path}") from error
     if not isinstance(payload, dict) or payload.get("status") != "complete":
         return None
+    return payload
+
+
+def load_authoring_config(root: Path) -> dict:
+    path = root / "watchcraft-authoring.json"
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"Could not read authoring configuration: {path}") from error
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Authoring configuration is not an object: {path}")
     return payload
 
 
@@ -244,9 +283,18 @@ def build_collection_manifest(
 ) -> dict:
     """Build the Collection-scoped canonical index without rewriting resources."""
     previous = previous or {}
-    title = str(previous.get("title") or root.name or "Video Collection")
+    authoring = load_authoring_config(root)
+    collection_config = authoring.get("collection", {})
+    sources = authoring.get("sources", {})
+    title = str(
+        collection_config.get("title")
+        or previous.get("title")
+        or root.name
+        or "Video Collection"
+    )
     collection_id = str(
-        previous.get("collection_id")
+        collection_config.get("collection_id")
+        or previous.get("collection_id")
         or re.sub(r"[^a-z0-9]+", "-", title.casefold()).strip("-")
         or "video-collection"
     )
@@ -256,6 +304,8 @@ def build_collection_manifest(
         for media in item.get("media", []):
             if media.get("type") == "local-file" and media.get("relative_path"):
                 previous_items_by_path[media["relative_path"]] = item_id
+            elif media.get("type") == "youtube" and media.get("video_id"):
+                previous_items_by_path[f"{media['video_id']}.youtube"] = item_id
 
     normalization = normalization or {}
     assignments = normalization.get("assignments", {})
@@ -358,6 +408,7 @@ def build_collection_manifest(
     item_ids_by_video = {}
     for analysis in sorted(analyses, key=lambda item: item.get("video", "").casefold()):
         video = analysis.get("video", "")
+        source = sources.get(video, {}) if isinstance(sources, dict) else {}
         item_id = previous_items_by_path.get(video) or stable_id(
             "video", f"{collection_id}:{video}"
         )
@@ -386,11 +437,17 @@ def build_collection_manifest(
         topic_sections = {
             topic_id: sorted(indexes) for topic_id, indexes in section_sets.items()
         }
-        items[item_id] = {
-            "item_id": item_id,
-            "title": analysis.get("title") or relative.stem,
-            "media": [{"type": "local-file", "relative_path": video}],
-            "transcript": {
+        if source.get("type") == "youtube":
+            media = [{
+                "type": "youtube",
+                "video_id": source["video_id"],
+                "url": source.get("url")
+                or f"https://www.youtube.com/watch?v={source['video_id']}",
+            }]
+            transcript = {}
+        else:
+            media = [{"type": "local-file", "relative_path": video}]
+            transcript = {
                 "subtitles": (
                     Path("transcripts") / relative.with_suffix(".srt")
                 ).as_posix(),
@@ -400,7 +457,12 @@ def build_collection_manifest(
                 "segments": (
                     Path("transcripts") / relative.with_suffix(".transcript.json")
                 ).as_posix(),
-            },
+            }
+        items[item_id] = {
+            "item_id": item_id,
+            "title": analysis.get("title") or relative.stem,
+            "media": media,
+            "transcript": transcript,
             "analysis": {
                 "path": (
                     Path("analysis") / relative.with_suffix(".analysis.json")
@@ -447,7 +509,6 @@ def build_collection_manifest(
         "schema_version": COLLECTION_SCHEMA_VERSION,
         "collection_id": collection_id,
         "title": title,
-        "media_root_hint": "..",
         "topic_scope": "collection",
         "topic_normalization": {
             "schema_version": normalization.get("schema_version"),
@@ -465,8 +526,19 @@ def build_collection_manifest(
             "topic_family_count": len(families),
         },
     }
+    if any(
+        media.get("type") == "local-file"
+        for item in items.values()
+        for media in item.get("media", [])
+    ):
+        manifest_body["media_root_hint"] = str(
+            collection_config.get("media_root_hint") or ".."
+        )
     for field in ("description", "publisher", "metadata_url", "license", "source"):
-        if field in previous:
+        if field in collection_config:
+            manifest_body[field] = collection_config[field]
+    for field in ("description", "publisher", "metadata_url", "license", "source"):
+        if field not in manifest_body and field in previous:
             manifest_body[field] = previous[field]
     content_hash = hashlib.sha256(
         json.dumps(manifest_body, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -498,6 +570,8 @@ def render_csv(analyses: list[dict], collection_manifest: dict | None = None) ->
             if not media:
                 continue
             video = media[0].get("relative_path")
+            if media[0].get("type") == "youtube" and media[0].get("video_id"):
+                video = f"{media[0]['video_id']}.youtube"
             item_topics_by_video[video] = [
                 topic_registry[topic_id]["label"]
                 for topic_id in item.get("topic_ids", [])
@@ -538,20 +612,21 @@ def render_csv(analyses: list[dict], collection_manifest: dict | None = None) ->
 def write_collection(root: Path) -> dict:
     analyses = load_analyses(root)
     topic_chapter_maps = load_topic_chapter_maps(root, analyses)
-    catalog_root = root / CATALOG_DIR_NAME
-    previous_manifest = load_collection_manifest(catalog_root / "collection.json")
+    metadata_root = catalog_root(root)
+    previous_manifest = load_collection_manifest(metadata_root / "collection.json")
     normalization = load_topic_normalization(root)
     collection_manifest = build_collection_manifest(
         root, analyses, topic_chapter_maps, previous_manifest, normalization
     )
+    validate_collection_manifest(collection_manifest)
     atomic_write_text(
-        catalog_root / "collection.json",
+        metadata_root / "collection.json",
         json.dumps(collection_manifest, ensure_ascii=False, indent=2) + "\n",
     )
     atomic_write_text(
-        catalog_root / "catalog.csv", render_csv(analyses, collection_manifest)
+        metadata_root / "catalog.csv", render_csv(analyses, collection_manifest)
     )
-    (catalog_root / "catalog.html").unlink(missing_ok=True)
+    (metadata_root / "catalog.html").unlink(missing_ok=True)
     print(
         f"built {collection_manifest['title']} revision "
         f"{collection_manifest['revision']} for {len(analyses)} videos"

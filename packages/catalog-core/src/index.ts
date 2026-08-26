@@ -46,6 +46,20 @@ export interface YouTubeMediaReference {
   url?: string;
 }
 
+export function youtubeEmbedUrl(videoId: string, clientOrigin?: string): string {
+  const encoded = encodeURIComponent(videoId);
+  const parameters = new URLSearchParams({
+    enablejsapi: "1",
+    playsinline: "1",
+    rel: "0",
+  });
+  if (clientOrigin) {
+    parameters.set("origin", clientOrigin);
+    parameters.set("widget_referrer", clientOrigin);
+  }
+  return `https://www.youtube-nocookie.com/embed/${encoded}?${parameters}`;
+}
+
 export interface HttpVideoMediaReference {
   type: "http-video";
   url: string;

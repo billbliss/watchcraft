@@ -4,6 +4,7 @@ import {
   clockSeconds,
   displayClock,
   inferTimelineClockMode,
+  youtubeEmbedUrl,
   type AnalysisSection,
 } from "./index.ts";
 
@@ -21,6 +22,13 @@ test("detects minute-second timelines stored in three clock fields", () => {
   assert.equal(mode, "minutes-seconds-fraction");
   assert.equal(clockSeconds("23:22:00", mode), 1402);
   assert.equal(displayClock("23:22:00", mode), "23:22");
+});
+
+test("creates a privacy-enhanced controllable YouTube embed URL", () => {
+  assert.equal(
+    youtubeEmbedUrl("PjObX9XQvgI", "https://watchcraft.example"),
+    "https://www.youtube-nocookie.com/embed/PjObX9XQvgI?enablejsapi=1&playsinline=1&rel=0&origin=https%3A%2F%2Fwatchcraft.example&widget_referrer=https%3A%2F%2Fwatchcraft.example",
+  );
 });
 
 test("keeps valid hour-minute-second timelines", () => {
