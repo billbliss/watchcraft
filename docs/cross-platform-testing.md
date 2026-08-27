@@ -10,7 +10,8 @@ to the app.
 Open **Actions → Desktop installers → Run workflow** in GitHub. When the three jobs
 finish, download these workflow artifacts:
 
-- `watchcraft-beta-windows-x64`: NSIS `.exe` and MSI `.msi` installers;
+- `watchcraft-beta-windows-x64`: NSIS `.exe` installer (stable Windows builds
+  also include MSI);
 - `watchcraft-beta-linux-x64`: Debian `.deb` and portable `.AppImage` packages;
 - `watchcraft-beta-macos-arm64`: Apple Silicon `.dmg` package.
 

@@ -39,21 +39,18 @@ jobs:
           - name: Windows x64
             os: windows-latest
             artifact-suffix: windows-x64
-            bundles: nsis,msi
             artifact-path: |
               apps/desktop/src-tauri/target/release/bundle/msi/*.msi
               apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
           - name: Linux x64
             os: ubuntu-22.04
             artifact-suffix: linux-x64
-            bundles: deb,appimage
             artifact-path: |
               apps/desktop/src-tauri/target/release/bundle/deb/*.deb
               apps/desktop/src-tauri/target/release/bundle/appimage/*.AppImage
           - name: macOS Apple Silicon
             os: macos-14
             artifact-suffix: macos-arm64
-            bundles: dmg
             artifact-path: apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg
 
     steps:
@@ -93,7 +90,7 @@ jobs:
         run: npm test
 
       - name: Build native installer
-        run: npm exec --workspace @watchcraft/desktop -- tauri build --config src-tauri/tauri.workflow.conf.json --bundles ${{ matrix.bundles }}
+        run: npm exec --workspace @watchcraft/desktop -- tauri build --config src-tauri/tauri.workflow.conf.json --bundles ${{ steps.release.outputs.bundles }}
 
       - name: Remove the extra DMG volume icon
         if: runner.os == 'macOS'

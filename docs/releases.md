@@ -24,6 +24,9 @@ The `Desktop installers` workflow builds Windows x64, Linux x64, and macOS
 Apple Silicon packages. After every platform succeeds, it creates a GitHub
 prerelease and attaches the installers. The public Watchcraft site discovers
 the prerelease through the GitHub API, so no download links need to be edited.
+Windows beta builds publish the NSIS `.exe` installer only because MSI does not
+accept named semantic-version prerelease identifiers such as `beta.1`. Stable
+Windows releases publish both `.exe` and `.msi` installers.
 
 Increment only the beta suffix for another candidate:
 

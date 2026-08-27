@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { releaseMetadata, tauriChannelConfig } from "./release-metadata.mjs";
+import { installerBundles, releaseMetadata, tauriChannelConfig } from "./release-metadata.mjs";
 
 test("prerelease tags produce beta builds", () => {
   assert.deepEqual(releaseMetadata({ refType: "tag", refName: "v0.2.0-beta.3" }), {
@@ -36,4 +36,17 @@ test("release builds preserve the production identity", () => {
   assert.deepEqual(tauriChannelConfig({ channel: "release", version: "1.0.0" }), {
     version: "1.0.0",
   });
+});
+
+test("Windows beta builds use NSIS without the MSI prerelease restriction", () => {
+  assert.equal(installerBundles({ runnerOs: "Windows", channel: "beta" }), "nsis");
+});
+
+test("Windows stable builds retain both installer formats", () => {
+  assert.equal(installerBundles({ runnerOs: "Windows", channel: "release" }), "nsis,msi");
+});
+
+test("Linux and macOS installer formats do not vary by channel", () => {
+  assert.equal(installerBundles({ runnerOs: "Linux", channel: "beta" }), "deb,appimage");
+  assert.equal(installerBundles({ runnerOs: "macOS", channel: "release" }), "dmg");
 });

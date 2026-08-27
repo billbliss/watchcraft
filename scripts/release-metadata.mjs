@@ -41,6 +41,15 @@ export function tauriChannelConfig(metadata) {
     : { version: metadata.version };
 }
 
+export function installerBundles({ runnerOs, channel }) {
+  if (runnerOs === "Windows") {
+    return channel === "beta" ? "nsis" : "nsis,msi";
+  }
+  if (runnerOs === "Linux") return "deb,appimage";
+  if (runnerOs === "macOS") return "dmg";
+  throw new Error(`Unsupported runner operating system: ${runnerOs || "unknown"}.`);
+}
+
 function run() {
   const outputPath = process.argv[2];
   if (!outputPath) {
@@ -56,9 +65,13 @@ function run() {
   writeFileSync(outputPath, `${JSON.stringify(tauriChannelConfig(metadata), null, 2)}\n`);
 
   if (process.env.GITHUB_OUTPUT) {
+    const bundles = installerBundles({
+      runnerOs: process.env.RUNNER_OS,
+      channel: metadata.channel,
+    });
     appendFileSync(
       process.env.GITHUB_OUTPUT,
-      `channel=${metadata.channel}\nprerelease=${metadata.prerelease}\nversion=${metadata.version}\n`,
+      `channel=${metadata.channel}\nprerelease=${metadata.prerelease}\nversion=${metadata.version}\nbundles=${bundles}\n`,
     );
   }
   process.stdout.write(
