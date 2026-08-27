@@ -16,6 +16,7 @@ dist/
 out/
 coverage/
 *.log
+apps/desktop/src-tauri/tauri.workflow.conf.json
 
 # Watchcraft-generated and local-only state
 Video Catalog/
@@ -34,4 +35,3 @@ tmp/
 *.mp3
 *.m4a
 *.wav
-

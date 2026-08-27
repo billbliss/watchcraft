@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Download Watchcraft and discover instructional video collections.">
+    <title>Watchcraft — Learn a craft by watching</title>
+    <link rel="icon" href="assets/watchcraft.png">
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --background: #09100c;
+        --surface: #111a15;
+        --surface-raised: #16231b;
+        --border: #2f4b3a;
+        --text: #edf5ef;
+        --muted: #9baca1;
+        --accent: #9be6b2;
+        --accent-strong: #72cf91;
+        --warning: #f4d59b;
+      }
+      * { box-sizing: border-box; }
+      html { scroll-behavior: smooth; }
+      body { margin: 0; background: radial-gradient(circle at 85% 0%, #18291f 0, transparent 34rem), var(--background); color: var(--text); }
+      a { color: inherit; }
+      .shell { width: min(72rem, calc(100% - 2rem)); margin: 0 auto; }
+      nav { display: flex; align-items: center; justify-content: space-between; min-height: 4.5rem; gap: 1rem; }
+      .brand { display: flex; align-items: center; gap: .7rem; font-weight: 750; text-decoration: none; }
+      .brand img { width: 2rem; height: 2rem; border-radius: .55rem; }
+      .nav-links { display: flex; gap: 1.2rem; color: var(--muted); font-size: .92rem; }
+      .nav-links a { text-decoration: none; }
+      .nav-links a:hover { color: var(--text); }
+      .hero { padding: clamp(4rem, 10vw, 8rem) 0 5rem; max-width: 52rem; }
+      .eyebrow { margin: 0 0 1rem; color: var(--accent); font-size: .78rem; font-weight: 800; letter-spacing: .13em; text-transform: uppercase; }
+      h1 { margin: 0; font-size: clamp(3rem, 9vw, 6.6rem); line-height: .94; letter-spacing: -.055em; }
+      .lede { margin: 1.6rem 0 0; max-width: 42rem; color: var(--muted); font-size: clamp(1.15rem, 2.2vw, 1.45rem); line-height: 1.55; }
+      section { padding: 4.5rem 0; border-top: 1px solid var(--border); }
+      .section-heading { display: grid; grid-template-columns: minmax(0, 1fr) minmax(16rem, 30rem); gap: 2rem; align-items: end; margin-bottom: 2rem; }
+      h2 { margin: 0; font-size: clamp(2rem, 4vw, 3.2rem); letter-spacing: -.035em; }
+      .section-heading p, .fine-print { margin: 0; color: var(--muted); line-height: 1.6; }
+      .release-grid, .collection-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+      .panel, .collection-card { padding: 1.5rem; border: 1px solid var(--border); border-radius: 1.25rem; background: color-mix(in srgb, var(--surface) 92%, transparent); }
+      .panel h3, .collection-card h3 { margin: 0; font-size: 1.25rem; }
+      .release-meta, .collection-card p { color: var(--muted); line-height: 1.55; }
+      .badge { display: inline-flex; margin-left: .5rem; padding: .22rem .52rem; border-radius: 999px; background: #254b32; color: var(--accent); font-size: .7rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; vertical-align: .16rem; }
+      .badge.stable { background: #2c493f; }
+      .asset-list { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: 1.2rem; }
+      .button { display: inline-flex; align-items: center; justify-content: center; min-height: 2.65rem; padding: .65rem .9rem; border: 1px solid #4c725c; border-radius: .72rem; background: #203d2a; color: var(--text); font: inherit; font-weight: 700; text-decoration: none; cursor: pointer; }
+      .button:hover { border-color: var(--accent-strong); background: #294d35; }
+      .button.secondary { background: transparent; border-color: var(--border); }
+      .button.secondary:hover { border-color: #557562; background: #15221a; }
+      .button[disabled] { opacity: .55; cursor: default; }
+      .platform-note { margin-top: 1rem; color: var(--warning); font-size: .88rem; line-height: 1.5; }
+      .collection-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .collection-card { display: flex; flex-direction: column; min-height: 15rem; }
+      .mode { color: var(--accent); font-size: .78rem; font-weight: 750; text-transform: uppercase; letter-spacing: .07em; }
+      .collection-actions { display: flex; flex-wrap: wrap; gap: .55rem; margin-top: auto; padding-top: 1rem; }
+      .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; counter-reset: steps; }
+      .step { padding: 1.25rem; border-left: 2px solid var(--border); color: var(--muted); line-height: 1.55; }
+      .step::before { counter-increment: steps; content: counter(steps); display: block; margin-bottom: .65rem; color: var(--accent); font-weight: 800; }
+      footer { display: flex; justify-content: space-between; gap: 1rem; padding: 2.2rem 0 3rem; border-top: 1px solid var(--border); color: var(--muted); font-size: .88rem; }
+      footer p { margin: 0; }
+      footer a:hover { color: var(--text); }
+      @media (max-width: 760px) {
+        .section-heading, .release-grid, .collection-grid, .steps { grid-template-columns: 1fr; }
+        .nav-links { gap: .7rem; font-size: .82rem; }
+        .hero { padding-top: 3rem; }
+        .collection-card { min-height: auto; }
+        footer { flex-direction: column; }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="shell">
+      <nav aria-label="Primary navigation">
+        <a class="brand" href="#top"><img src="assets/watchcraft.png" alt="">Watchcraft</a>
+        <div class="nav-links">
+          <a href="#download">Download</a>
+          <a href="#collections">Collections</a>
+          <a href="https://github.com/billbliss/watchcraft">Source</a>
+        </div>
+      </nav>
+      <div class="hero" id="top">
+        <p class="eyebrow">Watchcraft</p>
+        <h1>Learn a craft by watching.</h1>
+        <p class="lede">Find the exact lesson where a technique is taught, move directly to its chapter, and turn a folder—or a public video course—into a searchable learning library.</p>
+      </div>
+    </header>
+
+    <main class="shell">
+      <section id="download">
+        <div class="section-heading">
+          <h2>Download Watchcraft</h2>
+          <p>Beta and stable builds use separate storage, so you can test new versions without disturbing a production library.</p>
+        </div>
+        <div class="release-grid">
+          <article class="panel">
+            <h3>Latest beta <span class="badge">Beta</span></h3>
+            <p class="release-meta" id="beta-meta">Checking for a published beta…</p>
+            <div class="asset-list" id="beta-assets" aria-live="polite"></div>
+            <p class="platform-note">Early builds are unsigned. macOS Gatekeeper and Windows SmartScreen may ask you to confirm installation.</p>
+          </article>
+          <article class="panel">
+            <h3>Stable release <span class="badge stable">Release</span></h3>
+            <p class="release-meta" id="stable-meta">No stable release has been published yet.</p>
+            <div class="asset-list" id="stable-assets" aria-live="polite"></div>
+          </article>
+        </div>
+        <p class="fine-print" style="margin-top: 1rem">All published versions remain available on <a href="https://github.com/billbliss/watchcraft/releases">GitHub Releases</a>.</p>
+      </section>
+
+      <section id="collections">
+        <div class="section-heading">
+          <h2>Available collections</h2>
+          <p>This is a friendly directory, not a gatekeeper. Watchcraft can install any compatible collection published at any accessible URL.</p>
+        </div>
+        <div class="collection-grid" id="collection-grid" aria-live="polite">
+          <article class="collection-card"><p>Loading available collections…</p></article>
+        </div>
+      </section>
+
+      <section id="getting-started">
+        <div class="section-heading">
+          <h2>Getting started</h2>
+          <p>A collection can carry a small managed video, refer to videos already on your computer, or play remote sources such as YouTube.</p>
+        </div>
+        <div class="steps">
+          <div class="step">Download the Watchcraft build for your operating system and install it.</div>
+          <div class="step">Choose a collection below. Copy its URL, or download its local package when instructed.</div>
+          <div class="step">Open Settings in Watchcraft, add the collection, and begin with any chapter or topic.</div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="shell">
+      <p>Watchcraft is an open-source project.</p>
+      <p><a href="https://github.com/billbliss/watchcraft">Application source</a> · <a href="https://github.com/billbliss/watchcraft-collections">Collection source</a></p>
+    </footer>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

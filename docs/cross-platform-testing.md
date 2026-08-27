@@ -1,20 +1,24 @@
 # Cross-platform desktop testing
 
 Watchcraft's native installers must be built on their target operating systems.
-The `Desktop installers` GitHub Actions workflow builds unsigned Windows x64 and
-Linux x64 packages without adding any runtime services to the app.
+The `Desktop installers` GitHub Actions workflow builds unsigned Windows x64,
+Linux x64, and macOS Apple Silicon packages without adding any runtime services
+to the app.
 
 ## Automated builds
 
-Open **Actions → Desktop installers → Run workflow** in GitHub. When the two jobs
+Open **Actions → Desktop installers → Run workflow** in GitHub. When the three jobs
 finish, download these workflow artifacts:
 
-- `watchcraft-windows-x64`: NSIS `.exe` and MSI `.msi` installers;
-- `watchcraft-linux-x64`: Debian `.deb` and portable `.AppImage` packages.
+- `watchcraft-beta-windows-x64`: NSIS `.exe` and MSI `.msi` installers;
+- `watchcraft-beta-linux-x64`: Debian `.deb` and portable `.AppImage` packages;
+- `watchcraft-beta-macos-arm64`: Apple Silicon `.dmg` package.
 
-Pushing a version tag such as `v0.1.0-beta.1` runs the same workflow. The
-artifacts are retained by GitHub Actions; the workflow does not create a public
-release or require signing credentials.
+Pushing a prerelease tag such as `v0.1.0-beta.1` runs the same workflow and
+creates a permanent GitHub prerelease with all installers attached. A stable tag
+such as `v0.1.0` creates a normal GitHub Release. See [the release
+guide](releases.md) for the channel rules. No signing credentials are currently
+required.
 
 Unsigned Windows builds will trigger a SmartScreen warning when downloaded.
 Signing is a release concern, not a requirement for this compatibility pass.

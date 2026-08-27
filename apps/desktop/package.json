@@ -7,6 +7,7 @@
     "dev": "tauri dev --config src-tauri/tauri.dev.conf.json",
     "dev:smoke": "tauri dev --config src-tauri/tauri.smoke.conf.json",
     "build": "tauri build && node ../../scripts/remove-dmg-volume-icon.mjs",
+    "build:beta": "tauri build --config src-tauri/tauri.beta.conf.json && node ../../scripts/remove-dmg-volume-icon.mjs",
     "test": "node --experimental-strip-types --test src/*.test.ts",
     "web:dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
     "web:smoke": "vite --host 127.0.0.1 --port 1421 --strictPort",

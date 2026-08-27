@@ -34,3 +34,16 @@ storage; referenced files remain in place and their binding is stored privately.
 development build is titled **Watchcraft Dev** and uses a separate app identity
 from bundled builds, so it will ask for the library once even if Watchcraft was
 configured previously.
+
+## Build channels
+
+- **Watchcraft Dev** is the local development app and has its own identity and
+  private settings.
+- **Watchcraft Beta** is produced by prerelease tags such as
+  `v0.1.0-beta.1`. It can be installed alongside the stable app and keeps a
+  separate collection registry.
+- **Watchcraft** is produced by stable tags such as `v0.1.0` and uses the
+  production identity and settings.
+
+To build the beta identity locally, run `npm run desktop:build:beta` from the
+repository root. See `docs/releases.md` for the tag-driven release process.
