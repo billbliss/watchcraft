@@ -48,6 +48,17 @@ export interface YouTubeMediaReference {
   url?: string;
 }
 
+export const DEFAULT_YOUTUBE_BRIDGE_URL = "https://watchcraft.stream/youtube-player/";
+
+export function youtubeBridgeUrl(
+  videoId: string,
+  bridgeUrl = DEFAULT_YOUTUBE_BRIDGE_URL,
+): string {
+  const url = new URL(bridgeUrl);
+  url.searchParams.set("video", videoId);
+  return url.toString();
+}
+
 export function youtubeEmbedUrl(videoId: string, clientOrigin?: string): string {
   const encoded = encodeURIComponent(videoId);
   const parameters = new URLSearchParams({

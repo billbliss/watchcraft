@@ -29,6 +29,7 @@ jobs:
         run: |
           mkdir -p _site/assets
           cp site/index.html site/app.js _site/
+          cp -R site/youtube-player _site/youtube-player
           cp apps/desktop/src-tauri/icons/128x128.png _site/assets/watchcraft.png
           touch _site/.nojekyll
       - name: Configure GitHub Pages

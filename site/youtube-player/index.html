@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
+    <title>Watchcraft YouTube player</title>
+    <style>
+      html,
+      body,
+      iframe {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        border: 0;
+        background: #000;
+      }
+
+      body {
+        overflow: hidden;
+      }
+
+      .error {
+        box-sizing: border-box;
+        display: grid;
+        place-items: center;
+        min-height: 100%;
+        padding: 2rem;
+        color: #eef5f0;
+        font: 600 1rem/1.5 system-ui, sans-serif;
+        text-align: center;
+      }
+    </style>
+  </head>
+  <body>
+    <script type="module" src="./player-bridge.mjs"></script>
+  </body>
+</html>

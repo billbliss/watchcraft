@@ -1,5 +1,8 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { youtubeEmbedUrl } from "@watchcraft/catalog-core";
+import {
+  DEFAULT_YOUTUBE_BRIDGE_URL,
+  youtubeBridgeUrl,
+} from "@watchcraft/catalog-core";
 import type {
   CatalogItem,
   CatalogRepository,
@@ -50,11 +53,11 @@ async function fetchLocalJson<T>(path: string): Promise<T> {
 export class DesktopCatalogRepository implements CatalogRepository {
   readonly canOpenInDefaultPlayer = true;
   readonly location: DesktopLibraryLocation;
-  readonly youtubeClientOrigin: string;
+  readonly youtubeBridgeBaseUrl: string;
 
-  constructor(location: DesktopLibraryLocation, youtubeClientOrigin = window.location.origin) {
+  constructor(location: DesktopLibraryLocation, youtubeBridgeBaseUrl?: string) {
     this.location = location;
-    this.youtubeClientOrigin = youtubeClientOrigin;
+    this.youtubeBridgeBaseUrl = youtubeBridgeBaseUrl ?? DEFAULT_YOUTUBE_BRIDGE_URL;
   }
 
   get manifestLocation(): string {
@@ -76,7 +79,7 @@ export class DesktopCatalogRepository implements CatalogRepository {
     if (!media) return null;
     if (media.type === "http-video") return media.url;
     if (media.type === "youtube") {
-      return youtubeEmbedUrl(media.video_id, this.youtubeClientOrigin);
+      return youtubeBridgeUrl(media.video_id, this.youtubeBridgeBaseUrl);
     }
     const root = localMediaRoot(this.location, media.delivery);
     if (!root) return null;

@@ -431,7 +431,7 @@ export function App({ onCollectionLoaded, repository, sidebarFooter }: AppProps)
       const target = youtubePlayerRef.current.contentWindow;
       const send = (func: string, args: unknown[]) => target.postMessage(
         JSON.stringify({ event: "command", func, args }),
-        "https://www.youtube-nocookie.com",
+        new URL(mediaUrl ?? "https://www.youtube-nocookie.com").origin,
       );
       send("seekTo", [seconds, true]);
       send("playVideo", []);

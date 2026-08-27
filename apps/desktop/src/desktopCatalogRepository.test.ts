@@ -39,7 +39,7 @@ test("selects the correct local root for each delivery mode", () => {
   assert.equal(localMediaRoot(localLocation), "/user/course");
 });
 
-test("identifies the actual desktop page origin to the YouTube API", () => {
+test("routes desktop YouTube playback through the HTTPS player bridge", () => {
   const location: DesktopLibraryLocation = {
     selectedRoot: "/collection",
     collectionId: "youtube-pilot",
@@ -51,7 +51,10 @@ test("identifies the actual desktop page origin to the YouTube API", () => {
     mediaFound: 0,
     mediaExtra: 0,
   };
-  const repository = new DesktopCatalogRepository(location, "http://127.0.0.1:1420");
+  const repository = new DesktopCatalogRepository(
+    location,
+    "https://watchcraft.stream/youtube-player/",
+  );
   const mediaUrl = repository.mediaUrl({
     item_id: "video",
     title: "YouTube lesson",
@@ -66,5 +69,8 @@ test("identifies the actual desktop page origin to the YouTube API", () => {
     chapter_count: 0,
   });
 
-  assert.match(mediaUrl ?? "", /origin=http%3A%2F%2F127\.0\.0\.1%3A1420/);
+  assert.equal(
+    mediaUrl,
+    "https://watchcraft.stream/youtube-player/?video=PjObX9XQvgI",
+  );
 });

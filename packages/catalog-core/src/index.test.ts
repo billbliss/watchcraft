@@ -5,6 +5,7 @@ import {
   displayClock,
   inferTimelineClockMode,
   topicPassesFrequencyFilter,
+  youtubeBridgeUrl,
   youtubeEmbedUrl,
   type AnalysisSection,
 } from "./index.ts";
@@ -29,6 +30,13 @@ test("creates a privacy-enhanced controllable YouTube embed URL", () => {
   assert.equal(
     youtubeEmbedUrl("PjObX9XQvgI", "https://watchcraft.example"),
     "https://www.youtube-nocookie.com/embed/PjObX9XQvgI?enablejsapi=1&playsinline=1&rel=0&origin=https%3A%2F%2Fwatchcraft.example&widget_referrer=https%3A%2F%2Fwatchcraft.example",
+  );
+});
+
+test("creates a Watchcraft HTTPS bridge URL for desktop YouTube playback", () => {
+  assert.equal(
+    youtubeBridgeUrl("PjObX9XQvgI"),
+    "https://watchcraft.stream/youtube-player/?video=PjObX9XQvgI",
   );
 });
 
