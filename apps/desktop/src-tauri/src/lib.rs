@@ -47,6 +47,22 @@ fn is_within_approved_roots(roots: &[PathBuf], path: &Path) -> bool {
     roots.iter().any(|root| path.starts_with(root))
 }
 
+fn canonical_video_roots<'a>(
+    roots: impl IntoIterator<Item = &'a Path>,
+) -> Result<Vec<PathBuf>, String> {
+    roots
+        .into_iter()
+        .map(|root| {
+            root.canonicalize().map_err(|error| {
+                format!(
+                    "Could not resolve an approved video folder {}: {error}",
+                    root.display()
+                )
+            })
+        })
+        .collect()
+}
+
 fn validated_video_path<R: Runtime>(
     app: &tauri::AppHandle<R>,
     requested_path: &str,
@@ -95,13 +111,14 @@ fn approve_library_location<R: Runtime>(
             .allow_directory(managed_media_root, true)
             .map_err(|error| format!("Could not allow managed media access: {error}"))?;
     }
-    let mut roots = Vec::new();
-    if let Some(root) = &location.media_root {
-        roots.push(root.clone());
-    }
-    if let Some(root) = &location.managed_media_root {
-        roots.push(root.clone());
-    }
+    let roots = canonical_video_roots(
+        [
+            location.media_root.as_deref(),
+            location.managed_media_root.as_deref(),
+        ]
+        .into_iter()
+        .flatten(),
+    )?;
     let approved_roots = app.state::<ApprovedLibraryRoots>();
     *approved_roots
         .0
@@ -516,8 +533,12 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_video_path, is_within_approved_roots, video_content_type};
+    use super::{
+        canonical_video_roots, is_video_path, is_within_approved_roots, video_content_type,
+    };
+    use std::fs;
     use std::path::Path;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[cfg(target_os = "macos")]
     use super::{macos_application_name, macos_handler_for_content_type};
@@ -550,6 +571,30 @@ mod tests {
             &roots,
             Path::new("/library/other/video.mp4")
         ));
+    }
+
+    #[test]
+    fn canonicalizes_approved_roots_before_comparing_video_paths() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "watchcraft-approved-root-{}-{nonce}",
+            std::process::id()
+        ));
+        let video = root.join("lesson.mp4");
+        fs::create_dir_all(&root).expect("create temporary approved root");
+        fs::write(&video, b"fixture").expect("create temporary video");
+
+        let roots = canonical_video_roots([root.as_path()]).expect("canonical approved root");
+        let canonical_video = video.canonicalize().expect("canonical video path");
+        assert!(is_within_approved_roots(&roots, &canonical_video));
+
+        #[cfg(target_os = "windows")]
+        assert!(roots[0].to_string_lossy().starts_with(r"\\?\"));
+
+        fs::remove_dir_all(root).expect("remove temporary approved root");
     }
 
     #[test]

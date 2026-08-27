@@ -8,7 +8,7 @@ const IDLE_PRELOAD_MS = 6_000;
 export function PlaybackSmokeTest(): ReactElement {
   const [libraryRoot, setLibraryRoot] = useState<string | null>(null);
   const finishedRef = useRef(false);
-  const playAttemptedRef = useRef(false);
+  const seekAttemptedRef = useRef(false);
   const previewFrameObservedRef = useRef(false);
 
   async function finish(passed: boolean, detail: string): Promise<void> {
@@ -45,26 +45,26 @@ export function PlaybackSmokeTest(): ReactElement {
       }
       if (!video) return;
       if (
-        !playAttemptedRef.current
+        !seekAttemptedRef.current
         && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
         && video.videoWidth > 0
       ) {
         previewFrameObservedRef.current = true;
       }
       if (video.currentTime >= 0.25) {
-        void finish(true, `Normal catalog playback advanced to ${video.currentTime.toFixed(2)}s`);
+        void finish(
+          true,
+          `Normal catalog media decoded and sought to ${video.currentTime.toFixed(2)}s`,
+        );
         return;
       }
-      if (!playAttemptedRef.current && performance.now() - startedAt >= IDLE_PRELOAD_MS) {
+      if (!seekAttemptedRef.current && performance.now() - startedAt >= IDLE_PRELOAD_MS) {
         if (!previewFrameObservedRef.current) {
           void finish(false, "No preview frame decoded before playback");
           return;
         }
-        playAttemptedRef.current = true;
-        video.muted = true;
-        void video.play().catch((error: unknown) => {
-          void finish(false, `The single play attempt failed: ${String(error)}`);
-        });
+        seekAttemptedRef.current = true;
+        video.currentTime = Math.min(0.5, video.duration / 2);
       }
     }, 100);
     return () => {

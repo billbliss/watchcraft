@@ -6,7 +6,11 @@ import { spawnSync } from "node:child_process";
 const repositoryRoot = resolve(import.meta.dirname, "..");
 const temporaryRoot = mkdtempSync(join(tmpdir(), "watchcraft-playback-smoke-"));
 const providedVideo = process.env.WATCHCRAFT_SMOKE_VIDEO?.trim();
-const videoPath = providedVideo ? resolve(providedVideo) : join(temporaryRoot, "fixture.mp4");
+const deliveryArgument = process.argv.find((argument) => argument.startsWith("--delivery="));
+const delivery = deliveryArgument?.slice("--delivery=".length) ?? "referenced-local";
+if (delivery !== "referenced-local" && delivery !== "managed-local") {
+  throw new Error(`Unsupported smoke-test delivery mode: ${delivery}`);
+}
 
 function findLibraryRoot(path) {
   let candidate = resolve(path, "..");
@@ -47,7 +51,14 @@ function findCatalogRoot(selectedRoot) {
   return candidates.length === 1 ? candidates[0] : null;
 }
 
-const libraryRoot = providedVideo ? findLibraryRoot(videoPath) : temporaryRoot;
+const providedVideoPath = providedVideo ? resolve(providedVideo) : null;
+const libraryRoot = providedVideoPath ? findLibraryRoot(providedVideoPath) : temporaryRoot;
+const catalogRoot = join(libraryRoot, "Course Metadata");
+const relativeVideoPath = delivery === "managed-local" ? "media/fixture.mp4" : "fixture.mp4";
+const videoPath = providedVideoPath
+  ?? (delivery === "managed-local"
+    ? join(catalogRoot, relativeVideoPath)
+    : join(libraryRoot, relativeVideoPath));
 
 function smokeAppDataDirectory() {
   if (process.platform === "darwin") {
@@ -73,7 +84,7 @@ function run(command, args, options = {}) {
 }
 
 function runDesktopPhase(name, primeScope, selectedLibraryRoot = libraryRoot) {
-  process.stdout.write(`\nWatchcraft playback smoke: ${name}\n`);
+  process.stdout.write(`\nWatchcraft playback smoke (${delivery}): ${name}\n`);
   const result = run(
     "npm",
     [
@@ -105,6 +116,7 @@ const appDataDirectory = smokeAppDataDirectory();
 try {
   rmSync(appDataDirectory, { recursive: true, force: true });
   if (!providedVideo) {
+    mkdirSync(resolve(videoPath, ".."), { recursive: true });
     const ffmpegResult = run("ffmpeg", [
       "-hide_banner",
       "-loglevel",
@@ -131,7 +143,6 @@ try {
     ]);
     if ((ffmpegResult.status ?? 1) !== 0) throw new Error("Could not generate the playback fixture");
 
-    const catalogRoot = join(libraryRoot, "Course Metadata");
     mkdirSync(join(catalogRoot, "analysis"), { recursive: true });
     writeFileSync(join(catalogRoot, "playback-smoke.watchcraft"), JSON.stringify({
       kind: "watchcraft.collection",
@@ -139,7 +150,7 @@ try {
       collection_id: "playback-smoke",
       title: "Playback Smoke Test",
       topic_scope: "collection",
-      media_root_hint: "..",
+      media_root_hint: delivery === "managed-local" ? "." : "..",
       root: {
         type: "group",
         group_id: "root",
@@ -152,7 +163,7 @@ try {
         fixture: {
           item_id: "fixture",
           title: "Native playback fixture",
-          media: [{ type: "local-file", delivery: "referenced-local", relative_path: "fixture.mp4" }],
+          media: [{ type: "local-file", delivery, relative_path: relativeVideoPath }],
           transcript: {},
           analysis: { path: "analysis/fixture.analysis.json", schema_version: 2 },
           summary: "A generated video used by the native playback regression test.",
@@ -200,7 +211,7 @@ try {
     throw new Error("Native playback failed when the metadata folder was selected");
   }
 
-  process.stdout.write("\nWatchcraft playback smoke passed.\n");
+  process.stdout.write(`\nWatchcraft playback smoke passed (${delivery}).\n`);
   exitCode = 0;
 } catch (error) {
   console.error(`\nWatchcraft playback smoke failed: ${error instanceof Error ? error.message : String(error)}`);

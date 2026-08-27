@@ -100,23 +100,27 @@ Before merging desktop playback changes, run the native smoke test:
 npm run desktop:smoke
 ```
 
+This checks both referenced local videos and videos copied into Watchcraft-managed storage.
+
 It generates a complete one-video schema-v4 collection with an arbitrarily
 named manifest and a small H.264/AAC fixture,
 launches the normal catalog and player UI in an isolated Watchcraft profile,
-verifies that playback advances, then restarts the profile and verifies playback
-again using restored read-only folder access. The runner fails unless the app
-itself reports a playback pass. The command requires `ffmpeg` and does not read
-or modify the user's configured library.
+verifies that the player decodes a preview frame and seeks through the stream,
+then restarts the profile and repeats the check using restored read-only folder
+access. The runner fails unless the app itself reports a playback pass. The
+command requires `ffmpeg` and does not read or modify the user's configured
+library.
 
 ## Desktop installers and releases
 
 The `Desktop installers` GitHub Actions workflow builds unsigned Windows x64
-(`.exe` and `.msi`), Linux x64 (`.deb` and `.AppImage`), and macOS Apple Silicon
-(`.dmg`) packages. Prerelease tags publish **Watchcraft Beta** with a separate
-application identity and private data directory; stable tags publish the
-production identity. See the [release guide](docs/releases.md) for the exact tag
-conventions and the [cross-platform testing guide](docs/cross-platform-testing.md)
-for the compatibility smoke checklist.
+(`.exe` for betas; `.exe` and `.msi` for stable releases), Linux x64 (`.deb` and
+`.AppImage`), and macOS Apple Silicon (`.dmg`) packages. Prerelease tags publish
+**Watchcraft Beta** with a separate application identity and private data
+directory; stable tags publish the production identity. See the
+[release guide](docs/releases.md) for the exact tag conventions and the
+[cross-platform testing guide](docs/cross-platform-testing.md) for the
+compatibility smoke checklist.
 
 The public landing page is deployed from `site/` to
 <https://billbliss.github.io/watchcraft/>. It discovers permanent installer
