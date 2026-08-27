@@ -425,6 +425,14 @@ export function App({ onCollectionLoaded, repository, sidebarFooter }: AppProps)
     window.setTimeout(() => setOpenStatus("idle"), 1800);
   }
 
+  async function openExternalMedia(): Promise<void> {
+    if (!selectedItem || !repository.openExternalMedia || openStatus === "opening") return;
+    setOpenStatus("opening");
+    const opened = await repository.openExternalMedia(selectedItem);
+    setOpenStatus(opened ? "opened" : "error");
+    window.setTimeout(() => setOpenStatus("idle"), 1800);
+  }
+
   function seek(start: string): void {
     const seconds = clockSeconds(start, timelineClockMode);
     if (youtubeMedia && youtubePlayerRef.current?.contentWindow) {
@@ -738,25 +746,39 @@ export function App({ onCollectionLoaded, repository, sidebarFooter }: AppProps)
                     <div className="no-media">No playable media source is available.</div>
                   )}
                 </div>
-                {hasLocalMedia && repository.canOpenInDefaultPlayer !== false && (
+                {((hasLocalMedia && repository.canOpenInDefaultPlayer !== false) || youtubeMedia) && (
                   <div className="player-footer">
-                    <button
-                      className="action primary player-action"
-                      disabled={openStatus === "opening"}
-                      onClick={() => void openInDefaultPlayer()}
-                      type="button"
-                    >
-                      {openStatus === "opening" && "Opening…"}
-                      {openStatus === "opened" && (defaultPlayerName
-                        ? `Opened in ${defaultPlayerName}`
-                        : "Opened in default player")}
-                      {openStatus === "error" && "Could not open video"}
-                      {openStatus === "idle" && (defaultPlayerName
-                        ? `Open in ${defaultPlayerName}`
-                        : defaultPlayerName === undefined
-                          ? "Open video"
-                          : "Open in default player")}
-                    </button>
+                    {youtubeMedia ? (
+                      <button
+                        className="action primary player-action"
+                        disabled={openStatus === "opening" || !repository.openExternalMedia}
+                        onClick={() => void openExternalMedia()}
+                        type="button"
+                      >
+                        {openStatus === "opening" && "Opening YouTube…"}
+                        {openStatus === "opened" && "Opened YouTube"}
+                        {openStatus === "error" && "Could not open YouTube"}
+                        {openStatus === "idle" && "Watch on YouTube"}
+                      </button>
+                    ) : (
+                      <button
+                        className="action primary player-action"
+                        disabled={openStatus === "opening"}
+                        onClick={() => void openInDefaultPlayer()}
+                        type="button"
+                      >
+                        {openStatus === "opening" && "Opening…"}
+                        {openStatus === "opened" && (defaultPlayerName
+                          ? `Opened in ${defaultPlayerName}`
+                          : "Opened in default player")}
+                        {openStatus === "error" && "Could not open video"}
+                        {openStatus === "idle" && (defaultPlayerName
+                          ? `Open in ${defaultPlayerName}`
+                          : defaultPlayerName === undefined
+                            ? "Open video"
+                            : "Open in default player")}
+                      </button>
+                    )}
                   </div>
                 )}
               </div>

@@ -1,3 +1,4 @@
+import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useMemo, useState, type ReactElement } from "react";
 import { App } from "../../web/src/App";
@@ -29,6 +30,7 @@ function SettingsIcon(): ReactElement {
 }
 
 export function DesktopApp(): ReactElement {
+  const [appVersion, setAppVersion] = useState<string | null>(null);
   const [libraryRoot, setLibraryRoot] = useState<string | null>(null);
   const [scopeStatus, setScopeStatus] = useState<ScopeStatus>("checking");
   const [libraryLocation, setLibraryLocation] = useState<DesktopLibraryLocation | null>(null);
@@ -53,6 +55,10 @@ export function DesktopApp(): ReactElement {
     if (location.selectedRoot) setLibraryRoot(location.selectedRoot);
     setScopeStatus("ready");
     setLibraryError(null);
+  }, []);
+
+  useEffect(() => {
+    void getVersion().then(setAppVersion).catch(() => setAppVersion(null));
   }, []);
 
   useEffect(() => {
@@ -181,6 +187,7 @@ export function DesktopApp(): ReactElement {
 
   const settings = settingsOpen ? (
     <CollectionSettings
+      appVersion={appVersion}
       busy={busy}
       collections={collections}
       error={settingsError}

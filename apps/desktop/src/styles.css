@@ -134,6 +134,18 @@
   font-size: 1.5rem;
 }
 
+.settings-header-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.settings-version {
+  color: var(--muted);
+  font-size: .72rem;
+  white-space: nowrap;
+}
+
 .settings-dialog .settings-close {
   display: grid;
   width: 30px;

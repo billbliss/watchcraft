@@ -320,8 +320,9 @@ button { color: inherit; }
   height: auto;
 }
 .player-shell iframe {
-  width: 100%;
+  width: auto;
   height: 100%;
+  aspect-ratio: 16 / 9;
 }
 .media-error {
   z-index: 2;

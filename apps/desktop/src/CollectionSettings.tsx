@@ -21,6 +21,7 @@ const MEDIA_MODE_LABELS = {
 } as const;
 
 interface CollectionSettingsProps {
+  appVersion: string | null;
   busy: boolean;
   collections: RegisteredCollection[];
   error: string | null;
@@ -39,6 +40,7 @@ function mediaSummary(collection: RegisteredCollection): string | null {
 }
 
 export function CollectionSettings({
+  appVersion,
   busy,
   collections,
   error,
@@ -79,7 +81,10 @@ export function CollectionSettings({
             <span className="eyebrow">Watchcraft</span>
             <h2 id="settings-title">Settings</h2>
           </div>
-          <button aria-label="Close settings" className="settings-close" disabled={busy} onClick={onClose} type="button">×</button>
+          <div className="settings-header-actions">
+            <span className="settings-version">Version {appVersion ?? "…"}</span>
+            <button aria-label="Close settings" className="settings-close" disabled={busy} onClick={onClose} type="button">×</button>
+          </div>
         </header>
 
         <div className="settings-content">

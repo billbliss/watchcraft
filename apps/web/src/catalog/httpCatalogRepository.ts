@@ -1,4 +1,4 @@
-import { youtubeEmbedUrl } from "@watchcraft/catalog-core";
+import { youtubeEmbedUrl, youtubeWatchUrl } from "@watchcraft/catalog-core";
 import type {
   CatalogItem,
   CatalogRepository,
@@ -74,6 +74,16 @@ export class HttpCatalogRepository implements CatalogRepository {
     } catch {
       return false;
     }
+  }
+
+  async openExternalMedia(item: CatalogItem): Promise<boolean> {
+    const media = item.media.find((candidate) => candidate.type === "youtube");
+    if (!media) return false;
+    return window.open(
+      youtubeWatchUrl(media.video_id),
+      "_blank",
+      "noopener,noreferrer",
+    ) !== null;
   }
 }
 

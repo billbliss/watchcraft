@@ -11,6 +11,7 @@ use std::process::Command;
 use std::sync::RwLock;
 use tauri::{Manager, Runtime};
 use tauri_plugin_dialog::DialogExt;
+use url::Url;
 
 mod library;
 
@@ -18,6 +19,8 @@ use library::{LibraryLocation, RegisteredCollection};
 
 const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "webm", "mkv"];
 const MAX_STREAM_CHUNK: u64 = 2 * 1024 * 1024;
+#[cfg(target_os = "linux")]
+const WATCHCRAFT_WEB_ORIGIN: &str = "https://watchcraft.stream/";
 
 #[derive(Default)]
 struct ApprovedLibraryRoots(RwLock<Vec<PathBuf>>);
@@ -61,6 +64,36 @@ fn canonical_video_roots<'a>(
             })
         })
         .collect()
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn is_youtube_request_url(requested_url: &str) -> bool {
+    Url::parse(requested_url)
+        .ok()
+        .filter(|url| url.scheme() == "https")
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|host| {
+            host == "youtube.com"
+                || host.ends_with(".youtube.com")
+                || host == "youtube-nocookie.com"
+                || host.ends_with(".youtube-nocookie.com")
+        })
+}
+
+fn validated_external_url(requested_url: &str) -> Result<Url, String> {
+    let url = Url::parse(requested_url)
+        .map_err(|_| "The requested external URL is invalid.".to_string())?;
+    if url.scheme() != "https" {
+        return Err("Only secure external URLs can be opened.".into());
+    }
+    let host = url
+        .host_str()
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| "The requested external URL has no host.".to_string())?;
+    if host != "youtube.com" && !host.ends_with(".youtube.com") && host != "youtu.be" {
+        return Err("Only YouTube links can be opened externally.".into());
+    }
+    Ok(url)
 }
 
 fn validated_video_path<R: Runtime>(
@@ -386,6 +419,32 @@ fn open_video(app: tauri::AppHandle, path: String) -> Result<bool, String> {
 }
 
 #[tauri::command]
+fn open_external_url(url: String) -> Result<bool, String> {
+    let url = validated_external_url(&url)?;
+
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut command = Command::new("explorer");
+    #[cfg(all(
+        unix,
+        not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+    ))]
+    let mut command = Command::new("xdg-open");
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    return Err("Opening a browser is not supported on this platform yet.".into());
+
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        command
+            .arg(url.as_str())
+            .spawn()
+            .map(|_| true)
+            .map_err(|error| format!("Could not open the browser: {error}"))
+    }
+}
+
+#[tauri::command]
 fn default_video_player(app: tauri::AppHandle, path: String) -> Result<Option<String>, String> {
     let path = validated_video_path(&app, &path)?;
     Ok(default_player_name(&path))
@@ -515,8 +574,32 @@ pub fn run() {
                 });
             responder.respond(response);
         })
+        .setup(|_app| {
+            #[cfg(target_os = "linux")]
+            if let Some(main_window) = _app.get_webview_window("main") {
+                main_window.with_webview(|platform_webview| {
+                    use webkit2gtk::prelude::*;
+
+                    platform_webview
+                        .inner()
+                        .connect_resource_load_started(|_, _, request| {
+                            let Some(uri) = request.uri() else {
+                                return;
+                            };
+                            if !is_youtube_request_url(uri.as_str()) {
+                                return;
+                            }
+                            if let Some(headers) = request.http_headers() {
+                                headers.replace("Referer", WATCHCRAFT_WEB_ORIGIN);
+                            }
+                        });
+                })?;
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             open_video,
+            open_external_url,
             default_video_player,
             load_current_collection,
             list_registered_collections,
@@ -534,7 +617,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_video_roots, is_video_path, is_within_approved_roots, video_content_type,
+        canonical_video_roots, is_video_path, is_within_approved_roots, is_youtube_request_url,
+        validated_external_url, video_content_type,
     };
     use std::fs;
     use std::path::Path;
@@ -553,6 +637,28 @@ mod tests {
     fn rejects_non_video_paths() {
         assert!(!is_video_path(Path::new("lesson.txt")));
         assert!(!is_video_path(Path::new("lesson")));
+    }
+
+    #[test]
+    fn identifies_only_secure_youtube_webview_requests() {
+        assert!(is_youtube_request_url(
+            "https://www.youtube-nocookie.com/embed/PjObX9XQvgI"
+        ));
+        assert!(is_youtube_request_url("https://www.youtube.com/player.js"));
+        assert!(!is_youtube_request_url(
+            "http://www.youtube.com/embed/video"
+        ));
+        assert!(!is_youtube_request_url(
+            "https://youtube.example/embed/video"
+        ));
+    }
+
+    #[test]
+    fn allows_only_secure_youtube_external_links() {
+        assert!(validated_external_url("https://www.youtube.com/watch?v=PjObX9XQvgI").is_ok());
+        assert!(validated_external_url("https://youtu.be/PjObX9XQvgI").is_ok());
+        assert!(validated_external_url("http://www.youtube.com/watch?v=PjObX9XQvgI").is_err());
+        assert!(validated_external_url("https://example.com/watch?v=PjObX9XQvgI").is_err());
     }
 
     #[test]

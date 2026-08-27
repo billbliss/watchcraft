@@ -7,6 +7,7 @@ import {
   topicPassesFrequencyFilter,
   youtubeBridgeUrl,
   youtubeEmbedUrl,
+  youtubeWatchUrl,
   type AnalysisSection,
 } from "./index.ts";
 
@@ -37,6 +38,13 @@ test("creates a Watchcraft HTTPS bridge URL for desktop YouTube playback", () =>
   assert.equal(
     youtubeBridgeUrl("PjObX9XQvgI"),
     "https://watchcraft.stream/youtube-player/?video=PjObX9XQvgI",
+  );
+});
+
+test("creates a canonical YouTube watch URL", () => {
+  assert.equal(
+    youtubeWatchUrl("PjObX9XQvgI"),
+    "https://www.youtube.com/watch?v=PjObX9XQvgI",
   );
 });
 

@@ -2,6 +2,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import {
   DEFAULT_YOUTUBE_BRIDGE_URL,
   youtubeBridgeUrl,
+  youtubeWatchUrl,
 } from "@watchcraft/catalog-core";
 import type {
   CatalogItem,
@@ -106,6 +107,18 @@ export class DesktopCatalogRepository implements CatalogRepository {
     try {
       return await invoke<boolean>("open_video", {
         path: joinLocalPath(root, media.relative_path),
+      });
+    } catch {
+      return false;
+    }
+  }
+
+  async openExternalMedia(item: CatalogItem): Promise<boolean> {
+    const media = item.media.find((candidate) => candidate.type === "youtube");
+    if (!media) return false;
+    try {
+      return await invoke<boolean>("open_external_url", {
+        url: youtubeWatchUrl(media.video_id),
       });
     } catch {
       return false;

@@ -73,6 +73,12 @@ export function youtubeEmbedUrl(videoId: string, clientOrigin?: string): string 
   return `https://www.youtube-nocookie.com/embed/${encoded}?${parameters}`;
 }
 
+export function youtubeWatchUrl(videoId: string): string {
+  const url = new URL("https://www.youtube.com/watch");
+  url.searchParams.set("v", videoId);
+  return url.toString();
+}
+
 export function topicPassesFrequencyFilter(
   topicVideoCount: number,
   collectionVideoCount: number,
@@ -174,6 +180,7 @@ export interface CatalogRepository {
   mediaUrl(item: CatalogItem): string | null;
   defaultPlayerName?(item: CatalogItem): Promise<string | null>;
   openInDefaultPlayer(item: CatalogItem): Promise<boolean>;
+  openExternalMedia?(item: CatalogItem): Promise<boolean>;
 }
 
 export interface OrderedCatalogItem {
