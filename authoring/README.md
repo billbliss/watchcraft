@@ -4,7 +4,7 @@ Watchcraft authoring is a Python toolchain that turns source media, transcripts,
 and analysis into versioned collection packages. Authors may clone this repository
 and run the tools locally; authoring is not required by the reader application.
 
-`prototype/` contains the current command-line implementation. Its collection
+This directory contains the current command-line implementation. Its collection
 compiler writes the portable collection manifest and an optional CSV export;
 all presentation and local-library access belong to the React readers and the
 Tauri desktop adapter.
@@ -20,13 +20,13 @@ application repository. A source-neutral workspace is identified by
 into that directory, while retrieved captions remain private authoring inputs.
 
 ```bash
-python prototype/watchcraft_author.py youtube add \
+python watchcraft_author.py youtube add \
   --workspace ~/dev/watchcraft-collections/collections/premiere-pro-ai-tools \
   --collection-title "Premiere Pro AI Tools" \
   --position 1 \
   "https://www.youtube.com/watch?v=PjObX9XQvgI"
 
-python prototype/watchcraft_author.py process \
+python watchcraft_author.py process \
   --workspace ~/dev/watchcraft-collections/collections/premiere-pro-ai-tools
 ```
 

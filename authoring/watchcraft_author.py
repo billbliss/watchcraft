@@ -145,7 +145,7 @@ def youtube_transcript(video_id: str, language: str) -> tuple[list[dict[str, Any
         from youtube_transcript_api import YouTubeTranscriptApi
     except ImportError as error:
         raise RuntimeError(
-            "youtube-transcript-api is not installed. Install authoring/prototype/requirements.txt."
+            "youtube-transcript-api is not installed. Install authoring/requirements.txt."
         ) from error
     try:
         transcript_list = YouTubeTranscriptApi().list(video_id)

@@ -5,8 +5,8 @@
 
 ## Context
 
-The prototype authors catalogs and emits the entire browser UI from Python. That
-was useful while discovering the product, but it couples analysis, storage,
+The original Python implementation authored catalogs and emitted the entire browser
+UI. That was useful while discovering the product, but it coupled analysis, storage,
 navigation, and presentation. Watchcraft must support a regular web reader, a
 desktop application with local-file access, multiple independently updated
 collections, and possible future mobile clients.

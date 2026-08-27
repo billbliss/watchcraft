@@ -32,7 +32,7 @@ for the boundary and update model.
 ## Python authoring
 
 ```sh
-cd authoring/prototype
+cd authoring
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt

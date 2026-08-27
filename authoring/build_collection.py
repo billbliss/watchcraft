@@ -209,10 +209,10 @@ def validate_collection_manifest(manifest: dict) -> None:
         from jsonschema import Draft202012Validator
     except ImportError as error:
         raise RuntimeError(
-            "jsonschema is not installed. Install authoring/prototype/requirements.txt."
+            "jsonschema is not installed. Install authoring/requirements.txt."
         ) from error
     schema_path = (
-        Path(__file__).resolve().parents[2]
+        Path(__file__).resolve().parents[1]
         / "packages"
         / "catalog-schema"
         / "collection.schema.json"
