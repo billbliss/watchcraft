@@ -32,7 +32,13 @@ export function youtubePlayerUrl(videoId, bridgeOrigin) {
   return `${youtubeOrigin}/embed/${encodeURIComponent(videoId)}?${embedParameters}`;
 }
 
-function startBridge() {
+export function youtubePlayerFrameUrl(videoId, bridgeUrl) {
+  const url = new URL("./player-frame.html", bridgeUrl);
+  url.searchParams.set("video", videoId);
+  return url.toString();
+}
+
+export function startBridge() {
   const parameters = new URLSearchParams(window.location.search);
   const videoId = parameters.get("video") ?? "";
 
@@ -49,7 +55,10 @@ function startBridge() {
     "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share";
   player.allowFullscreen = true;
   player.referrerPolicy = "strict-origin-when-cross-origin";
-  player.src = youtubePlayerUrl(videoId, window.location.origin);
+  // WebKitGTK can omit Referer when a custom-protocol app creates a remote
+  // iframe directly. Stage the player through a same-origin HTTPS document so
+  // its navigation to YouTube carries Watchcraft's web origin on Linux too.
+  player.src = youtubePlayerFrameUrl(videoId, window.location.href);
   player.title = "YouTube video player";
   document.body.append(player);
 
@@ -75,6 +84,10 @@ function startBridge() {
   });
 }
 
-if (typeof window !== "undefined" && typeof document !== "undefined") {
+if (
+  typeof window !== "undefined"
+  && typeof document !== "undefined"
+  && document.documentElement.hasAttribute("data-youtube-player-bridge")
+) {
   startBridge();
 }

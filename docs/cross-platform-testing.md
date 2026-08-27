@@ -66,6 +66,7 @@ Test all three media delivery modes on each OS:
    OS default player. Remove the collection and verify its extracted video still exists.
 5. Install the remote-media manifest URL:
    `https://billbliss.github.io/watchcraft-collections/collections/premiere-pro-ai-tools/collection.json`.
-   Play and seek a YouTube video.
+   Play and seek a YouTube video. On Linux, confirm the player does not report
+   configuration error 153 when opened or after seeking.
 6. Confirm Settings identifies the three modes as **Managed local media**,
    **Referenced local media**, and **Remote media**.

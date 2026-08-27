@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   isAllowedPlayerCommand,
   isValidVideoId,
+  youtubePlayerFrameUrl,
   youtubePlayerUrl,
 } from "../site/youtube-player/player-bridge.mjs";
 
@@ -10,6 +11,16 @@ test("builds the nested YouTube URL with the HTTPS bridge as its origin", () => 
   assert.equal(
     youtubePlayerUrl("PjObX9XQvgI", "https://watchcraft.stream"),
     "https://www.youtube-nocookie.com/embed/PjObX9XQvgI?enablejsapi=1&origin=https%3A%2F%2Fwatchcraft.stream&playsinline=1&rel=0&widget_referrer=https%3A%2F%2Fwatchcraft.stream",
+  );
+});
+
+test("stages the YouTube player through the HTTPS bridge origin", () => {
+  assert.equal(
+    youtubePlayerFrameUrl(
+      "PjObX9XQvgI",
+      "https://watchcraft.stream/youtube-player/?video=PjObX9XQvgI",
+    ),
+    "https://watchcraft.stream/youtube-player/player-frame.html?video=PjObX9XQvgI",
   );
 });
 
