@@ -105,3 +105,11 @@ verifies that playback advances, then restarts the profile and verifies playback
 again using restored read-only folder access. The runner fails unless the app
 itself reports a playback pass. The command requires `ffmpeg` and does not read
 or modify the user's configured library.
+
+## Windows and Linux installers
+
+The `Desktop installers` GitHub Actions workflow builds unsigned Windows x64
+(`.exe` and `.msi`) and Linux x64 (`.deb` and `.AppImage`) packages. It can be
+run manually from the Actions tab and also runs for version tags. See the
+[cross-platform testing guide](docs/cross-platform-testing.md) for local build
+commands and the compatibility smoke checklist.

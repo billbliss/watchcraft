@@ -131,17 +131,17 @@ export function CollectionSettings({
             <div className="settings-section-heading">
               <div>
                 <h3>Add a collection</h3>
-                <p>Install from a folder on this computer or from a collection manifest URL.</p>
+                <p>Install from a folder on this computer or from a video collection URL.</p>
               </div>
             </div>
             <div className="add-collection-row">
               <button className="primary-action compact-action" disabled={busy} onClick={() => void onAddFolder(openAfter)} type="button">
-                Choose folder…
+                Choose folder containing local videos…
               </button>
               <span className="inline-or">or</span>
               <form className="collection-url-form" onSubmit={submitUrl}>
                 <input
-                  aria-label="Collection URL"
+                  aria-label="Web video collection URL"
                   autoCapitalize="none"
                   autoCorrect="off"
                   disabled={busy}

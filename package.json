@@ -9,6 +9,8 @@
   "scripts": {
     "build": "npm run build --workspace @watchcraft/web",
     "desktop:build": "npm run build --workspace @watchcraft/desktop",
+    "desktop:build:linux": "npm exec --workspace @watchcraft/desktop -- tauri build --bundles deb,appimage",
+    "desktop:build:windows": "npm exec --workspace @watchcraft/desktop -- tauri build --bundles nsis,msi",
     "desktop:dev": "npm run dev --workspace @watchcraft/desktop",
     "desktop:smoke": "node scripts/desktop-playback-smoke.mjs",
     "dev": "npm run dev --workspace @watchcraft/web",
