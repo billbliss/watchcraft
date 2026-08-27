@@ -173,6 +173,7 @@
           "required": ["type", "relative_path"],
           "properties": {
             "type": { "const": "local-file" },
+            "delivery": { "enum": ["managed-local", "referenced-local"] },
             "relative_path": { "$ref": "#/$defs/path" }
           },
           "additionalProperties": false
@@ -182,6 +183,7 @@
           "required": ["type", "video_id"],
           "properties": {
             "type": { "const": "youtube" },
+            "delivery": { "const": "remote" },
             "video_id": { "type": "string", "minLength": 1 },
             "url": { "type": "string", "format": "uri" }
           },
@@ -192,6 +194,7 @@
           "required": ["type", "url"],
           "properties": {
             "type": { "const": "http-video" },
+            "delivery": { "const": "remote" },
             "url": { "type": "string", "format": "uri", "pattern": "^https?://" }
           },
           "additionalProperties": false

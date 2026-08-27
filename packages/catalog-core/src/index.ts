@@ -37,11 +37,13 @@ export interface TopicFamily {
 
 export interface LocalFileMediaReference {
   type: "local-file";
+  delivery?: "managed-local" | "referenced-local";
   relative_path: string;
 }
 
 export interface YouTubeMediaReference {
   type: "youtube";
+  delivery?: "remote";
   video_id: string;
   url?: string;
 }
@@ -72,6 +74,7 @@ export function topicPassesFrequencyFilter(
 
 export interface HttpVideoMediaReference {
   type: "http-video";
+  delivery?: "remote";
   url: string;
 }
 

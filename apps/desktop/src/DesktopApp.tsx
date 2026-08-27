@@ -157,8 +157,11 @@ export function DesktopApp(): ReactElement {
   }
 
   async function removeCollection(collection: RegisteredCollection): Promise<void> {
+    const removesManagedMedia = collection.mediaModes.includes("managed-local");
     const confirmed = window.confirm(
-      `Remove “${collection.title}” from Watchcraft?\n\nIts original collection files and videos will not be deleted.`,
+      removesManagedMedia
+        ? `Remove “${collection.title}” from Watchcraft?\n\nMedia managed by Watchcraft will be deleted. User-owned files will not be touched.`
+        : `Remove “${collection.title}” from Watchcraft?\n\nIts original collection files and videos will not be deleted.`,
     );
     if (!confirmed) return;
     setBusy(true);

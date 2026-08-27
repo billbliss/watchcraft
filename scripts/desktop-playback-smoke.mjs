@@ -152,7 +152,7 @@ try {
         fixture: {
           item_id: "fixture",
           title: "Native playback fixture",
-          media: [{ type: "local-file", relative_path: "fixture.mp4" }],
+          media: [{ type: "local-file", delivery: "referenced-local", relative_path: "fixture.mp4" }],
           transcript: {},
           analysis: { path: "analysis/fixture.analysis.json", schema_version: 2 },
           summary: "A generated video used by the native playback regression test.",

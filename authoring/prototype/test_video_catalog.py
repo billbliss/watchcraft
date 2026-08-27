@@ -198,6 +198,7 @@ class FormattingTests(unittest.TestCase):
                 item["media"],
                 [{
                     "type": "youtube",
+                    "delivery": "remote",
                     "video_id": "PjObX9XQvgI",
                     "url": "https://www.youtube.com/watch?v=PjObX9XQvgI",
                 }],
@@ -415,6 +416,7 @@ class FormattingTests(unittest.TestCase):
             == "Course A/Module 1/Lesson One.mp4"
         )
         lesson_one = manifest["items"][lesson_one_id]
+        self.assertEqual(lesson_one["media"][0]["delivery"], "referenced-local")
         self.assertEqual(
             lesson_one["transcript"]["text"],
             "transcripts/Course A/Module 1/Lesson One.transcript.txt",

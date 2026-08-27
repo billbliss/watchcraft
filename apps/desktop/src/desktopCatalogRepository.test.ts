@@ -3,8 +3,21 @@ import test from "node:test";
 import {
   DesktopCatalogRepository,
   joinLocalPath,
+  localMediaRoot,
   type DesktopLibraryLocation,
 } from "./desktopCatalogRepository.ts";
+
+const localLocation: DesktopLibraryLocation = {
+  selectedRoot: "/user/course",
+  collectionId: "mixed-media",
+  manifestPath: "/private/collection.json",
+  metadataRoot: "/private",
+  mediaRoot: "/user/course",
+  managedMediaRoot: "/private/managed-media",
+  mediaExpected: 2,
+  mediaFound: 2,
+  mediaExtra: 0,
+};
 
 test("joins portable catalog paths on macOS", () => {
   assert.equal(
@@ -20,6 +33,12 @@ test("joins portable catalog paths on Windows", () => {
   );
 });
 
+test("selects the correct local root for each delivery mode", () => {
+  assert.equal(localMediaRoot(localLocation, "managed-local"), "/private/managed-media");
+  assert.equal(localMediaRoot(localLocation, "referenced-local"), "/user/course");
+  assert.equal(localMediaRoot(localLocation), "/user/course");
+});
+
 test("identifies the actual desktop page origin to the YouTube API", () => {
   const location: DesktopLibraryLocation = {
     selectedRoot: "/collection",
@@ -27,6 +46,7 @@ test("identifies the actual desktop page origin to the YouTube API", () => {
     manifestPath: "/collection/collection.json",
     metadataRoot: "/collection",
     mediaRoot: null,
+    managedMediaRoot: null,
     mediaExpected: 0,
     mediaFound: 0,
     mediaExtra: 0,

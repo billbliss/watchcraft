@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent, type MouseEvent, type ReactElement } from "react";
+import { displayCollectionSource } from "./collectionSource";
 
 export interface RegisteredCollection {
   collectionId: string;
@@ -10,7 +11,14 @@ export interface RegisteredCollection {
   mediaExpected: number;
   mediaFound: number;
   mediaExtra: number;
+  mediaModes: Array<"managed-local" | "referenced-local" | "remote">;
 }
+
+const MEDIA_MODE_LABELS = {
+  "managed-local": "Managed local media",
+  "referenced-local": "Referenced local media",
+  remote: "Remote media",
+} as const;
 
 interface CollectionSettingsProps {
   busy: boolean;
@@ -86,6 +94,7 @@ export function CollectionSettings({
             <div className="collection-registry">
               {collections.map((collection) => {
                 const media = mediaSummary(collection);
+                const sourceLabel = displayCollectionSource(collection);
                 return (
                   <article
                     className={`collection-entry ${collection.active ? "active" : ""}`}
@@ -102,9 +111,12 @@ export function CollectionSettings({
                         <strong>{collection.title}</strong>
                         {collection.active ? <span className="active-badge">Open</span> : null}
                       </div>
-                      <span className="collection-source" title={collection.sourceLabel}>
-                        {collection.sourceType === "url" ? "URL" : "Folder"} · {collection.sourceLabel}
+                      <span className="collection-source" title={sourceLabel}>
+                        {collection.sourceType === "url" ? "URL" : "Folder"} · {sourceLabel}
                       </span>
+                      {collection.mediaModes.length > 0 ? (
+                        <small>{collection.mediaModes.map((mode) => MEDIA_MODE_LABELS[mode]).join(" · ")}</small>
+                      ) : null}
                       {media ? <small>{media}</small> : null}
                     </div>
                     <div className="collection-actions">

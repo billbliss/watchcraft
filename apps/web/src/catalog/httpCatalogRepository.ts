@@ -56,6 +56,7 @@ export class HttpCatalogRepository implements CatalogRepository {
     if (media.type === "youtube") {
       return youtubeEmbedUrl(media.video_id, window.location.origin);
     }
+    if (media.delivery === "referenced-local" && !this.configuredMediaRootUrl) return null;
     if (!this.mediaRootUrl) return null;
     return new URL(media.relative_path, this.mediaRootUrl).href;
   }

@@ -48,13 +48,19 @@ npm run desktop:build:linux
 
 ## Manual smoke pass
 
-Test both the local-media and YouTube examples from
-`watchcraft-collections` on each OS:
+Test all three media delivery modes on each OS:
 
-1. Install the local Hello World folder and play the video.
-2. Click each chapter and confirm the color changes at the expected timestamp.
-3. Confirm **Open in …** launches the OS default video player.
-4. Install the Premiere Pro manifest URL and play and seek a YouTube video.
-5. Quit and reopen Watchcraft; confirm both collections remain registered.
-6. Remove and re-add each collection in Settings.
-
+1. Install the managed-local manifest URL:
+   `https://billbliss.github.io/watchcraft-collections/collections/hello-world-managed/collection.json`.
+2. Play it, seek through all three color chapters, restart Watchcraft, and
+   confirm it still plays from private application storage.
+3. Download and extract the referenced-local package:
+   `https://billbliss.github.io/watchcraft-collections/downloads/hello-world-referenced.zip`.
+   Choose the extracted folder in Watchcraft.
+4. Play and seek the referenced video, then confirm **Open in …** launches the
+   OS default player. Remove the collection and verify its extracted video still exists.
+5. Install the remote-media manifest URL:
+   `https://billbliss.github.io/watchcraft-collections/collections/premiere-pro-ai-tools/collection.json`.
+   Play and seek a YouTube video.
+6. Confirm Settings identifies the three modes as **Managed local media**,
+   **Referenced local media**, and **Remote media**.

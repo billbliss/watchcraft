@@ -20,7 +20,7 @@ const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "webm", "mkv"];
 const MAX_STREAM_CHUNK: u64 = 2 * 1024 * 1024;
 
 #[derive(Default)]
-struct ApprovedLibraryRoot(RwLock<Option<PathBuf>>);
+struct ApprovedLibraryRoots(RwLock<Vec<PathBuf>>);
 
 fn is_video_path(path: &Path) -> bool {
     path.extension()
@@ -43,8 +43,8 @@ fn video_content_type(path: &Path) -> &'static str {
     }
 }
 
-fn is_within_approved_root(root: &Path, path: &Path) -> bool {
-    path.starts_with(root)
+fn is_within_approved_roots(roots: &[PathBuf], path: &Path) -> bool {
+    roots.iter().any(|root| path.starts_with(root))
 }
 
 fn validated_video_path<R: Runtime>(
@@ -58,15 +58,15 @@ fn validated_video_path<R: Runtime>(
     let canonical_path = path
         .canonicalize()
         .map_err(|error| format!("Could not resolve the requested video: {error}"))?;
-    let approved_root = app.state::<ApprovedLibraryRoot>();
-    let approved_root = approved_root
+    let approved_roots = app.state::<ApprovedLibraryRoots>();
+    let approved_roots = approved_roots
         .0
         .read()
         .map_err(|_| "The selected library state is unavailable.")?;
-    let Some(root) = approved_root.as_ref() else {
+    if approved_roots.is_empty() {
         return Err("No library folder has been approved for this session.".into());
-    };
-    if !is_within_approved_root(root, &canonical_path) {
+    }
+    if !is_within_approved_roots(&approved_roots, &canonical_path) {
         return Err("The requested video is outside the selected library.".into());
     }
     Ok(canonical_path)
@@ -90,11 +90,23 @@ fn approve_library_location<R: Runtime>(
             .allow_directory(media_root, true)
             .map_err(|error| format!("Could not allow media access: {error}"))?;
     }
-    let approved_root = app.state::<ApprovedLibraryRoot>();
-    *approved_root
+    if let Some(managed_media_root) = &location.managed_media_root {
+        app.asset_protocol_scope()
+            .allow_directory(managed_media_root, true)
+            .map_err(|error| format!("Could not allow managed media access: {error}"))?;
+    }
+    let mut roots = Vec::new();
+    if let Some(root) = &location.media_root {
+        roots.push(root.clone());
+    }
+    if let Some(root) = &location.managed_media_root {
+        roots.push(root.clone());
+    }
+    let approved_roots = app.state::<ApprovedLibraryRoots>();
+    *approved_roots
         .0
         .write()
-        .map_err(|_| "The selected library state is unavailable.")? = location.media_root.clone();
+        .map_err(|_| "The selected library state is unavailable.")? = roots;
     Ok(location)
 }
 
@@ -471,7 +483,7 @@ fn finish_playback_smoke(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .manage(ApprovedLibraryRoot::default())
+        .manage(ApprovedLibraryRoots::default())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_persisted_scope::init())
         .plugin(tauri_plugin_dialog::init())
@@ -504,7 +516,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_video_path, is_within_approved_root, video_content_type};
+    use super::{is_video_path, is_within_approved_roots, video_content_type};
     use std::path::Path;
 
     #[cfg(target_os = "macos")]
@@ -525,16 +537,17 @@ mod tests {
     #[test]
     fn confines_video_paths_to_the_approved_library() {
         let root = Path::new("/library/courses");
-        assert!(is_within_approved_root(
-            root,
+        let roots = vec![root.to_path_buf()];
+        assert!(is_within_approved_roots(
+            &roots,
             Path::new("/library/courses/lesson/video.mp4")
         ));
-        assert!(!is_within_approved_root(
-            root,
+        assert!(!is_within_approved_roots(
+            &roots,
             Path::new("/library/courses-private/video.mp4")
         ));
-        assert!(!is_within_approved_root(
-            root,
+        assert!(!is_within_approved_roots(
+            &roots,
             Path::new("/library/other/video.mp4")
         ));
     }

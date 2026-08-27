@@ -456,13 +456,18 @@ def build_collection_manifest(
         if source.get("type") == "youtube":
             media = [{
                 "type": "youtube",
+                "delivery": "remote",
                 "video_id": source["video_id"],
                 "url": source.get("url")
                 or f"https://www.youtube.com/watch?v={source['video_id']}",
             }]
             transcript = {}
         else:
-            media = [{"type": "local-file", "relative_path": video}]
+            media = [{
+                "type": "local-file",
+                "delivery": "referenced-local",
+                "relative_path": video,
+            }]
             transcript = {
                 "subtitles": (
                     Path("transcripts") / relative.with_suffix(".srt")

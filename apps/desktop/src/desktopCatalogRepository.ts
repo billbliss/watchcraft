@@ -26,9 +26,17 @@ export interface DesktopLibraryLocation {
   manifestPath: string;
   metadataRoot: string;
   mediaRoot: string | null;
+  managedMediaRoot: string | null;
   mediaExpected: number;
   mediaFound: number;
   mediaExtra: number;
+}
+
+export function localMediaRoot(
+  location: DesktopLibraryLocation,
+  delivery?: "managed-local" | "referenced-local",
+): string | null {
+  return delivery === "managed-local" ? location.managedMediaRoot : location.mediaRoot;
 }
 
 async function fetchLocalJson<T>(path: string): Promise<T> {
@@ -70,16 +78,18 @@ export class DesktopCatalogRepository implements CatalogRepository {
     if (media.type === "youtube") {
       return youtubeEmbedUrl(media.video_id, this.youtubeClientOrigin);
     }
-    if (!this.location.mediaRoot) return null;
-    return convertFileSrc(joinLocalPath(this.location.mediaRoot, media.relative_path), "stream");
+    const root = localMediaRoot(this.location, media.delivery);
+    if (!root) return null;
+    return convertFileSrc(joinLocalPath(root, media.relative_path), "stream");
   }
 
   async defaultPlayerName(item: CatalogItem): Promise<string | null> {
     const media = item.media.find((candidate) => candidate.type === "local-file");
-    if (!media || !this.location.mediaRoot) return null;
+    const root = media && localMediaRoot(this.location, media.delivery);
+    if (!media || !root) return null;
     try {
       return await invoke<string | null>("default_video_player", {
-        path: joinLocalPath(this.location.mediaRoot, media.relative_path),
+        path: joinLocalPath(root, media.relative_path),
       });
     } catch {
       return null;
@@ -88,10 +98,11 @@ export class DesktopCatalogRepository implements CatalogRepository {
 
   async openInDefaultPlayer(item: CatalogItem): Promise<boolean> {
     const media = item.media.find((candidate) => candidate.type === "local-file");
-    if (!media || !this.location.mediaRoot) return false;
+    const root = media && localMediaRoot(this.location, media.delivery);
+    if (!media || !root) return false;
     try {
       return await invoke<boolean>("open_video", {
-        path: joinLocalPath(this.location.mediaRoot, media.relative_path),
+        path: joinLocalPath(root, media.relative_path),
       });
     } catch {
       return false;

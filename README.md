@@ -61,7 +61,8 @@ http://127.0.0.1:5173/?catalog=https://example.com/courses/collection.json
 The query parameter is an adapter setting, not catalog content. The React reader
 only uses the shared `CatalogRepository` contract.
 
-Collection items may reference local files, HTTP video, or public YouTube videos.
+Collection items may use managed local media, referenced local media, HTTP
+video, or public YouTube videos.
 YouTube playback uses a privacy-enhanced embed and does not require a local media
 binding.
 
@@ -73,7 +74,8 @@ read-only asset-protocol access to the chosen library, restoration of that
 user-approved scope, and a command that opens a supported video in the OS
 default player. That command accepts only existing video files already covered
 by the user-approved asset scope. The renderer has no arbitrary filesystem,
-shell, write, download, SQLite, or authoring capability.
+shell, arbitrary write/download, SQLite, or authoring capability. Collection
+installation can download only manifest-declared resources into private storage.
 
 After installing the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/):
 
@@ -84,10 +86,10 @@ npm run desktop:dev
 
 The first launch asks for a collection folder or its parent. A collection
 manifest is identified by `kind: "watchcraft.collection"`; its filename and
-folder name are not significant. Watchcraft copies the manifest and referenced
-metadata into its private app-data directory, while local videos remain in place
-and are connected through a private directory binding. An optional
-`media_root_hint` helps establish that binding during installation but is not
+folder name are not significant. Watchcraft copies the manifest, referenced
+metadata, and managed local media into its private app-data directory.
+Referenced local videos remain in place and are connected through a private
+directory binding. An optional `media_root_hint` helps establish that binding but is not
 used as runtime authority. Development runs as **Watchcraft Dev** with its own app identity, so
 an installed or previously bundled Watchcraft copy cannot be mistaken for the
 freshly launched development build.

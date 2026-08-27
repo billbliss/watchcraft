@@ -22,14 +22,27 @@ may contain three explicit media reference types:
 - `youtube`, with a video ID and optional canonical URL;
 - `http-video`, with a directly playable URL.
 
-`media_root_hint` is optional installation guidance for local-file collections.
+Each media reference also describes its delivery and ownership mode:
+
+- `managed-local`: Watchcraft copies or downloads a `local-file` into private
+  application storage and owns that installed copy;
+- `referenced-local`: Watchcraft records a binding to a user-owned folder and
+  never moves or deletes its videos;
+- `remote`: Watchcraft streams a `youtube` or `http-video` reference.
+
+Delivery is a media-reference property, not a collection type, so a collection
+may mix modes. A legacy `local-file` without `delivery` is treated as
+`referenced-local`.
+
+`media_root_hint` is optional installation guidance for referenced-local media.
 It is never runtime authority and may be omitted by publishers.
 
-The desktop app copies the manifest and its referenced analysis/transcript
-resources into versioned storage under Watchcraft's private app-data directory.
+The desktop app copies the manifest, its referenced analysis/transcript
+resources, and managed-local media into versioned storage under Watchcraft's
+private app-data directory.
 It records installed collections, the current collection, original source, and
-device-local media binding in a private `library.json`. Local videos remain in
-place. Hosted URLs remain authored in the portable manifest.
+device-local media binding in a private `library.json`. Referenced local videos
+remain in place. Hosted URLs remain authored in the portable manifest.
 
 Installation succeeds for exact, partial, and superset local folders. Missing
 videos remain unavailable until a suitable binding is supplied; unreferenced

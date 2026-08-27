@@ -22,6 +22,7 @@ pub(crate) struct LibraryLocation {
     pub(crate) manifest_path: PathBuf,
     pub(crate) metadata_root: PathBuf,
     pub(crate) media_root: Option<PathBuf>,
+    pub(crate) managed_media_root: Option<PathBuf>,
     pub(crate) media_expected: usize,
     pub(crate) media_found: usize,
     pub(crate) media_extra: usize,
@@ -39,6 +40,7 @@ pub(crate) struct RegisteredCollection {
     pub(crate) media_expected: usize,
     pub(crate) media_found: usize,
     pub(crate) media_extra: usize,
+    pub(crate) media_modes: Vec<String>,
 }
 
 #[allow(dead_code)]
@@ -83,15 +85,40 @@ struct CollectionItem {
 #[serde(tag = "type")]
 enum MediaReference {
     #[serde(rename = "local-file")]
-    LocalFile { relative_path: PathBuf },
+    LocalFile {
+        #[serde(default)]
+        delivery: Option<MediaDelivery>,
+        relative_path: PathBuf,
+    },
     #[serde(rename = "youtube")]
     YouTube {
+        #[serde(default)]
+        delivery: Option<MediaDelivery>,
         video_id: String,
         #[serde(default)]
         url: Option<String>,
     },
     #[serde(rename = "http-video")]
-    HttpVideo { url: String },
+    HttpVideo {
+        #[serde(default)]
+        delivery: Option<MediaDelivery>,
+        url: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum MediaDelivery {
+    ManagedLocal,
+    ReferencedLocal,
+    Remote,
+}
+
+#[derive(Debug, Default)]
+struct MediaInventory {
+    managed_local: Vec<PathBuf>,
+    referenced_local: Vec<PathBuf>,
+    remote_count: usize,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -172,15 +199,13 @@ pub(crate) fn install_from_folder_with_activation(
         .ok_or("The collection manifest has no parent folder.")?
         .canonicalize()
         .map_err(|error| format!("Could not resolve the collection folder: {error}"))?;
-    let local_paths = local_media_paths(&manifest)?;
+    let media = media_inventory(&manifest)?;
     let media_root = resolve_media_root(
         &selected_root,
         &metadata_source_root,
         manifest.media_root_hint.as_deref(),
-        &local_paths,
+        &media.referenced_local,
     )?;
-    let (media_expected, media_found, media_extra) =
-        media_stats(media_root.as_deref(), &local_paths);
 
     let safe_id = safe_component(&manifest.collection_id)?;
     let revision_root = app_data_root
@@ -189,7 +214,7 @@ pub(crate) fn install_from_folder_with_activation(
         .join("revisions")
         .join(manifest.revision.to_string());
     let private_manifest_path = revision_root.join("manifest.json");
-    if !private_manifest_path.is_file() {
+    if !installed_revision_is_complete(&revision_root, &manifest, &media) {
         install_metadata_revision(
             &metadata_source_root,
             &manifest_path,
@@ -197,6 +222,16 @@ pub(crate) fn install_from_folder_with_activation(
             &revision_root,
         )?;
     }
+    let managed_media_root = revision_root.join("managed-media");
+    let managed_found = media
+        .managed_local
+        .iter()
+        .filter(|relative| managed_media_root.join(relative).is_file())
+        .count();
+    let (_, referenced_found, media_extra) =
+        media_stats(media_root.as_deref(), &media.referenced_local);
+    let media_expected = media.managed_local.len() + media.referenced_local.len();
+    let media_found = managed_found + referenced_found;
 
     let mut registry = read_registry(app_data_root)?;
     let relative_revision = revision_root
@@ -257,7 +292,7 @@ pub(crate) fn install_from_url(
         "collection manifest",
     )?;
     let manifest = parse_manifest(&manifest_bytes, resolved_url.as_str())?;
-    local_media_paths(&manifest)?;
+    let media = media_inventory(&manifest)?;
 
     let safe_id = safe_component(&manifest.collection_id)?;
     let revision_root = app_data_root
@@ -266,7 +301,7 @@ pub(crate) fn install_from_url(
         .join("revisions")
         .join(manifest.revision.to_string());
     let private_manifest_path = revision_root.join("manifest.json");
-    if !private_manifest_path.is_file() {
+    if !installed_revision_is_complete(&revision_root, &manifest, &media) {
         install_remote_metadata_revision(
             &client,
             &resolved_url,
@@ -286,7 +321,13 @@ pub(crate) fn install_from_url(
         .map_err(|_| "Private manifest storage is outside the Watchcraft data folder.")?
         .to_path_buf();
     let collection_id = manifest.collection_id.clone();
-    let media_expected = local_media_paths(&manifest)?.len();
+    let managed_media_root = revision_root.join("managed-media");
+    let managed_found = media
+        .managed_local
+        .iter()
+        .filter(|relative| managed_media_root.join(relative).is_file())
+        .count();
+    let media_expected = media.managed_local.len() + media.referenced_local.len();
     let installed = InstalledCollection {
         collection_id: collection_id.clone(),
         title: manifest.title,
@@ -298,7 +339,7 @@ pub(crate) fn install_from_url(
         },
         media_binding: None,
         media_expected,
-        media_found: 0,
+        media_found: managed_found,
         media_extra: 0,
         enabled: true,
     };
@@ -333,6 +374,11 @@ pub(crate) fn list_collections(app_data_root: &Path) -> Result<Vec<RegisteredCol
                 ),
                 CollectionSource::RemoteManifest { url } => ("url".to_string(), url.clone()),
             };
+            let manifest_path = app_data_root.join(&installed.manifest_path);
+            let media_modes = read_manifest(&manifest_path)
+                .and_then(|manifest| media_inventory(&manifest))
+                .map(|media| media.mode_names())
+                .unwrap_or_default();
             RegisteredCollection {
                 collection_id: installed.collection_id.clone(),
                 title: installed.title.clone(),
@@ -343,6 +389,7 @@ pub(crate) fn list_collections(app_data_root: &Path) -> Result<Vec<RegisteredCol
                 media_expected: installed.media_expected,
                 media_found: installed.media_found,
                 media_extra: installed.media_extra,
+                media_modes,
             }
         })
         .collect::<Vec<_>>();
@@ -419,6 +466,10 @@ fn location_for_id(
     if !manifest_path.is_file() || !metadata_root.is_dir() {
         return None;
     }
+    let managed_media_root = {
+        let path = metadata_root.join("managed-media");
+        path.is_dir().then_some(path)
+    };
     Some(LibraryLocation {
         selected_root: match &installed.source {
             CollectionSource::LocalManifest { selected_root, .. } => Some(selected_root.clone()),
@@ -432,6 +483,7 @@ fn location_for_id(
             .as_ref()
             .map(|binding| binding.path.clone())
             .filter(|path| path.is_dir()),
+        managed_media_root,
         media_expected: installed.media_expected,
         media_found: installed.media_found,
         media_extra: installed.media_extra,
@@ -586,8 +638,26 @@ fn download_remote_file(
     Ok((bytes, resolved_url))
 }
 
-fn local_media_paths(manifest: &CollectionManifest) -> Result<Vec<PathBuf>, String> {
-    let mut paths = BTreeSet::new();
+impl MediaInventory {
+    fn mode_names(&self) -> Vec<String> {
+        let mut modes = Vec::new();
+        if !self.managed_local.is_empty() {
+            modes.push("managed-local".into());
+        }
+        if !self.referenced_local.is_empty() {
+            modes.push("referenced-local".into());
+        }
+        if self.remote_count > 0 {
+            modes.push("remote".into());
+        }
+        modes
+    }
+}
+
+fn media_inventory(manifest: &CollectionManifest) -> Result<MediaInventory, String> {
+    let mut managed_local = BTreeSet::new();
+    let mut referenced_local = BTreeSet::new();
+    let mut remote_count = 0;
     for (item_id, item) in &manifest.items {
         if item.item_id != *item_id || item.title.trim().is_empty() || item.media.is_empty() {
             return Err(
@@ -596,28 +666,71 @@ fn local_media_paths(manifest: &CollectionManifest) -> Result<Vec<PathBuf>, Stri
         }
         for media in &item.media {
             match media {
-                MediaReference::LocalFile { relative_path } => {
+                MediaReference::LocalFile {
+                    delivery,
+                    relative_path,
+                } => {
                     validate_relative_path(relative_path, "local media")?;
-                    paths.insert(relative_path.clone());
+                    match delivery.unwrap_or(MediaDelivery::ReferencedLocal) {
+                        MediaDelivery::ManagedLocal => {
+                            managed_local.insert(relative_path.clone());
+                        }
+                        MediaDelivery::ReferencedLocal => {
+                            referenced_local.insert(relative_path.clone());
+                        }
+                        MediaDelivery::Remote => {
+                            return Err(
+                                "A local-file media reference cannot use remote delivery.".into()
+                            );
+                        }
+                    }
                 }
-                MediaReference::YouTube { video_id, url } => {
+                MediaReference::YouTube {
+                    delivery,
+                    video_id,
+                    url,
+                } => {
                     if video_id.trim().is_empty()
+                        || delivery.is_some_and(|value| value != MediaDelivery::Remote)
                         || url
                             .as_ref()
                             .is_some_and(|value| !value.starts_with("https://"))
                     {
                         return Err("A YouTube media reference is invalid.".into());
                     }
+                    remote_count += 1;
                 }
-                MediaReference::HttpVideo { url } => {
-                    if !url.starts_with("https://") && !url.starts_with("http://") {
+                MediaReference::HttpVideo { delivery, url } => {
+                    if delivery.is_some_and(|value| value != MediaDelivery::Remote)
+                        || (!url.starts_with("https://") && !url.starts_with("http://"))
+                    {
                         return Err("An HTTP video reference must use an HTTP(S) URL.".into());
                     }
+                    remote_count += 1;
                 }
             }
         }
     }
-    Ok(paths.into_iter().collect())
+    Ok(MediaInventory {
+        managed_local: managed_local.into_iter().collect(),
+        referenced_local: referenced_local.into_iter().collect(),
+        remote_count,
+    })
+}
+
+fn installed_revision_is_complete(
+    revision_root: &Path,
+    manifest: &CollectionManifest,
+    media: &MediaInventory,
+) -> bool {
+    revision_root.join("manifest.json").is_file()
+        && referenced_metadata_paths(manifest)
+            .iter()
+            .all(|relative| revision_root.join(relative).is_file())
+        && media
+            .managed_local
+            .iter()
+            .all(|relative| revision_root.join("managed-media").join(relative).is_file())
 }
 
 fn resolve_media_root(
@@ -744,14 +857,27 @@ fn install_metadata_revision(
         copy_file(&canonical_source, &staging.join(&relative))?;
     }
 
-    if target_root.exists() {
-        fs::remove_dir_all(&staging)
-            .map_err(|error| format!("Could not clear private install staging: {error}"))?;
-    } else {
-        fs::rename(&staging, target_root)
-            .map_err(|error| format!("Could not finalize private collection metadata: {error}"))?;
+    for relative in media_inventory(manifest)?.managed_local {
+        let source = source_root.join(&relative);
+        let canonical_source = source.canonicalize().map_err(|error| {
+            format!(
+                "Could not resolve managed media {}: {error}",
+                source.display()
+            )
+        })?;
+        if !canonical_source.starts_with(source_root) || !canonical_source.is_file() {
+            return Err(format!(
+                "Managed media is outside the collection folder: {}",
+                relative.display()
+            ));
+        }
+        copy_file(
+            &canonical_source,
+            &staging.join("managed-media").join(&relative),
+        )?;
     }
-    Ok(())
+
+    finalize_staged_revision(&staging, target_root)
 }
 
 fn install_remote_metadata_revision(
@@ -805,13 +931,62 @@ fn install_remote_metadata_revision(
         })?;
     }
 
-    if target_root.exists() {
-        fs::remove_dir_all(&staging)
-            .map_err(|error| format!("Could not clear private install staging: {error}"))?;
-    } else {
-        fs::rename(&staging, target_root)
-            .map_err(|error| format!("Could not finalize private collection metadata: {error}"))?;
+    for relative in media_inventory(manifest)?.managed_local {
+        let relative_url = relative
+            .to_str()
+            .ok_or("A managed media path contains unsupported characters.")?
+            .replace('\\', "/");
+        let url = manifest_url
+            .join(&relative_url)
+            .map_err(|error| format!("Could not resolve managed media {relative_url}: {error}"))?;
+        let (bytes, _) = download_remote_file(client, url, REMOTE_FILE_LIMIT, "managed media")?;
+        downloaded = downloaded.saturating_add(bytes.len());
+        if downloaded > REMOTE_TOTAL_LIMIT {
+            let _ = fs::remove_dir_all(&staging);
+            return Err("The collection download is larger than Watchcraft permits.".into());
+        }
+        let target = staging.join("managed-media").join(&relative);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("Could not create managed media folder: {error}"))?;
+        }
+        fs::write(&target, bytes).map_err(|error| {
+            format!("Could not store downloaded managed media {relative_url}: {error}")
+        })?;
     }
+
+    finalize_staged_revision(&staging, target_root)
+}
+
+fn finalize_staged_revision(staging: &Path, target_root: &Path) -> Result<(), String> {
+    if !target_root.exists() {
+        return fs::rename(staging, target_root)
+            .map_err(|error| format!("Could not finalize private collection metadata: {error}"));
+    }
+
+    let parent = target_root
+        .parent()
+        .ok_or("Private revision storage has no parent folder.")?;
+    let revision_name = target_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("Private revision storage has an invalid name.")?;
+    let backup = parent.join(format!(".{revision_name}-{}-backup", std::process::id()));
+    if backup.exists() {
+        fs::remove_dir_all(&backup)
+            .map_err(|error| format!("Could not clear private install backup: {error}"))?;
+    }
+    fs::rename(target_root, &backup)
+        .map_err(|error| format!("Could not prepare the collection repair: {error}"))?;
+    if let Err(error) = fs::rename(staging, target_root) {
+        let _ = fs::rename(&backup, target_root);
+        let _ = fs::remove_dir_all(staging);
+        return Err(format!(
+            "Could not finalize repaired collection metadata: {error}"
+        ));
+    }
+    fs::remove_dir_all(&backup)
+        .map_err(|error| format!("Could not clear the replaced collection revision: {error}"))?;
     Ok(())
 }
 
@@ -1025,6 +1200,33 @@ mod tests {
     }
 
     #[test]
+    fn copies_managed_local_media_into_private_storage() {
+        let root = temporary_root("managed-folder");
+        let app_data = root.join("private");
+        let collection = root.join("Managed Course");
+        fs::create_dir_all(collection.join("analysis")).unwrap();
+        fs::create_dir_all(collection.join("media")).unwrap();
+        fs::write(collection.join("analysis/lesson.json"), "{}").unwrap();
+        fs::write(collection.join("media/lesson.mp4"), "managed video").unwrap();
+        write_managed_fixture(&collection.join("collection.json"), "managed-folder", 1);
+
+        let installed = install_from_folder_with_activation(&app_data, &collection, true).unwrap();
+        let managed_root = installed.managed_media_root.unwrap();
+        assert_eq!(
+            fs::read_to_string(managed_root.join("media/lesson.mp4")).unwrap(),
+            "managed video"
+        );
+        assert_eq!((installed.media_expected, installed.media_found), (1, 1));
+        assert_eq!(installed.media_root, None);
+        assert_eq!(
+            list_collections(&app_data).unwrap()[0].media_modes,
+            ["managed-local"]
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn allows_partial_local_collections_and_ignores_extra_videos() {
         let root = temporary_root("partial");
         let app_data = root.join("private");
@@ -1178,6 +1380,72 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn downloads_managed_local_media_from_a_remote_collection() {
+        let manifest = r#"{
+          "kind":"watchcraft.collection",
+          "schema_version":4,
+          "collection_id":"remote-managed",
+          "title":"Remote Managed",
+          "revision":1,
+          "topic_scope":"collection",
+          "root":{"type":"group","group_id":"root","title":"Remote Managed","children":[]},
+          "topics":{},
+          "topic_families":{},
+          "items":{"lesson":{"item_id":"lesson","title":"Lesson","media":[{"type":"local-file","delivery":"managed-local","relative_path":"media/lesson.mp4"}],"transcript":{},"analysis":{"path":"analysis/lesson.json"},"summary":"Lesson","locations":[],"topic_ids":[],"family_ids":[],"topic_sections":{},"chapter_count":1}},
+          "stats":{"video_count":1,"topic_count":0,"topic_family_count":0},
+          "content_hash":"0000000000000000000000000000000000000000000000000000000000000000"
+        }"#;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for _ in 0..6 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 2048];
+                let length = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..length]);
+                let (content_type, body): (&str, &[u8]) =
+                    if request.starts_with("GET /collection.json ") {
+                        ("application/json", manifest.as_bytes())
+                    } else if request.starts_with("GET /media/lesson.mp4 ") {
+                        ("video/mp4", b"downloaded video")
+                    } else {
+                        ("application/json", b"{}")
+                    };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(body).unwrap();
+            }
+        });
+
+        let root = temporary_root("remote-managed");
+        let installed =
+            install_from_url(&root, &format!("http://{address}/collection.json"), true).unwrap();
+        let managed_root = installed.managed_media_root.unwrap();
+        assert_eq!(
+            fs::read(managed_root.join("media/lesson.mp4")).unwrap(),
+            b"downloaded video"
+        );
+        assert_eq!((installed.media_expected, installed.media_found), (1, 1));
+        assert_eq!(installed.media_root, None);
+
+        fs::remove_file(managed_root.join("media/lesson.mp4")).unwrap();
+        let repaired =
+            install_from_url(&root, &format!("http://{address}/collection.json"), true).unwrap();
+        let repaired_root = repaired.managed_media_root.unwrap();
+        assert_eq!(
+            fs::read(repaired_root.join("media/lesson.mp4")).unwrap(),
+            b"downloaded video"
+        );
+        assert_eq!((repaired.media_expected, repaired.media_found), (1, 1));
+        server.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn write_fixture(path: &std::path::Path, id: &str, revision: u64, hint: &str) {
         let json = format!(
             r#"{{
@@ -1206,6 +1474,26 @@ mod tests {
                   "chapter_count":1
                 }}
               }},
+              "stats":{{"video_count":1,"topic_count":0,"topic_family_count":0}},
+              "content_hash":"0000000000000000000000000000000000000000000000000000000000000000"
+            }}"#
+        );
+        fs::write(path, json).unwrap();
+    }
+
+    fn write_managed_fixture(path: &std::path::Path, id: &str, revision: u64) {
+        let json = format!(
+            r#"{{
+              "kind":"watchcraft.collection",
+              "schema_version":4,
+              "collection_id":"{id}",
+              "title":"Managed Demo",
+              "revision":{revision},
+              "topic_scope":"collection",
+              "root":{{"type":"group","group_id":"root","title":"Managed Demo","children":[]}},
+              "topics":{{}},
+              "topic_families":{{}},
+              "items":{{"lesson":{{"item_id":"lesson","title":"Lesson","media":[{{"type":"local-file","delivery":"managed-local","relative_path":"media/lesson.mp4"}}],"transcript":{{}},"analysis":{{"path":"analysis/lesson.json"}},"summary":"Lesson","locations":[],"topic_ids":[],"family_ids":[],"topic_sections":{{}},"chapter_count":1}}}},
               "stats":{{"video_count":1,"topic_count":0,"topic_family_count":0}},
               "content_hash":"0000000000000000000000000000000000000000000000000000000000000000"
             }}"#
