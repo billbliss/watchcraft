@@ -337,6 +337,7 @@
 }
 
 .settings-error {
+  margin: 0 0 12px;
   color: #ffb4a8;
   background: #3a201d;
 }

@@ -61,7 +61,15 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+          sudo apt-get install -y \
+            gstreamer1.0-libav \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-good \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            xdg-utils
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -92,9 +100,77 @@ jobs:
       - name: Build native installer
         run: npm exec --workspace @watchcraft/desktop -- tauri build --config src-tauri/tauri.workflow.conf.json --bundles ${{ steps.release.outputs.bundles }}
 
+      - name: Verify Linux media packaging
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          appimage_path="$(find apps/desktop/src-tauri/target/release/bundle/appimage -type f -name '*.AppImage' -print -quit)"
+          deb_path="$(find apps/desktop/src-tauri/target/release/bundle/deb -type f -name '*.deb' -print -quit)"
+          if [[ -z "$appimage_path" || -z "$deb_path" ]]; then
+            echo "The Linux build did not produce both an AppImage and a Debian package." >&2
+            exit 1
+          fi
+
+          extract_dir="$(mktemp -d)"
+          cleanup() {
+            rm -rf "$extract_dir"
+          }
+          trap cleanup EXIT
+
+          chmod +x "$appimage_path"
+          appimage_path="$(realpath "$appimage_path")"
+          (
+            cd "$extract_dir"
+            "$appimage_path" --appimage-extract >/dev/null
+          )
+
+          plugin_dir="$(find "$extract_dir/squashfs-root/usr/lib" -type d -name 'gstreamer-1.0' -print -quit)"
+          if [[ -z "$plugin_dir" ]] || ! find "$plugin_dir" -type f -print -quit | grep -q .; then
+            echo "The AppImage does not contain the GStreamer media plugins required by WebKitGTK." >&2
+            exit 1
+          fi
+
+          deb_dependencies="$(dpkg-deb -f "$deb_path" Depends)"
+          for dependency in gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav; do
+            if [[ "$deb_dependencies" != *"$dependency"* ]]; then
+              echo "The Debian package is missing its $dependency dependency." >&2
+              exit 1
+            fi
+          done
+
       - name: Remove the extra DMG volume icon
         if: runner.os == 'macOS'
         run: node scripts/remove-dmg-volume-icon.mjs
+
+      - name: Verify the packaged macOS app signature
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dmg_path="$(find apps/desktop/src-tauri/target/release/bundle/dmg -type f -name '*.dmg' -print -quit)"
+          if [[ -z "$dmg_path" ]]; then
+            echo "No macOS disk image was produced." >&2
+            exit 1
+          fi
+
+          mount_dir="$(mktemp -d)"
+          cleanup() {
+            hdiutil detach "$mount_dir" >/dev/null 2>&1 || true
+            rmdir "$mount_dir" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          hdiutil attach "$dmg_path" -readonly -nobrowse -mountpoint "$mount_dir"
+          app_path="$(find "$mount_dir" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          if [[ -z "$app_path" ]]; then
+            echo "No application bundle was found in $dmg_path." >&2
+            exit 1
+          fi
+
+          codesign --verify --deep --strict --verbose=2 "$app_path"
 
       - name: Upload installer
         uses: actions/upload-artifact@v7

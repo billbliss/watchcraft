@@ -146,6 +146,7 @@ export function CollectionSettings({
                 <p>Install from a folder on this computer or from a video collection URL.</p>
               </div>
             </div>
+            {error ? <p className="settings-error" role="alert">{error}</p> : null}
             <div className="add-collection-row">
               <button className="primary-action compact-action" disabled={busy} onClick={() => void onAddFolder(openAfter)} type="button">
                 Choose folder containing local videos…
@@ -173,7 +174,6 @@ export function CollectionSettings({
             </label>
           </section>
 
-          {error ? <p className="settings-error" role="alert">{error}</p> : null}
           {busy ? <p className="settings-progress" role="status">Working…</p> : null}
         </div>
       </section>

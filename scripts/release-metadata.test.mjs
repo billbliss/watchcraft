@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { installerBundles, releaseMetadata, tauriChannelConfig } from "./release-metadata.mjs";
+
+const tauriConfig = JSON.parse(
+  readFileSync(new URL("../apps/desktop/src-tauri/tauri.conf.json", import.meta.url), "utf8"),
+);
 
 test("prerelease tags produce beta builds", () => {
   assert.deepEqual(releaseMetadata({ refType: "tag", refName: "v0.2.0-beta.3" }), {
@@ -49,4 +54,13 @@ test("Windows stable builds retain both installer formats", () => {
 test("Linux and macOS installer formats do not vary by channel", () => {
   assert.equal(installerBundles({ runnerOs: "Linux", channel: "beta" }), "deb,appimage");
   assert.equal(installerBundles({ runnerOs: "macOS", channel: "release" }), "dmg");
+});
+
+test("Linux packages retain the media runtime required for embedded playback", () => {
+  assert.equal(tauriConfig.bundle.linux.appimage.bundleMediaFramework, true);
+  assert.deepEqual(tauriConfig.bundle.linux.deb.depends, [
+    "gstreamer1.0-plugins-good",
+    "gstreamer1.0-plugins-bad",
+    "gstreamer1.0-libav",
+  ]);
 });
