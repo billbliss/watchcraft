@@ -25,10 +25,15 @@ from build_collection import (
 )
 from chunked_download import chunk_plan
 from normalize_topics import (
+    DisplayLabelBatchError,
+    DisplayLabelDecision,
+    GeneratedDisplayLabels,
     alias_candidates,
     build_parser as build_normalization_parser,
+    deterministic_display_label,
     display_label_error,
     finalize_canonical_assignments,
+    label_batch,
     load_state,
     make_related_symmetric,
     mechanically_equivalent,
@@ -36,17 +41,119 @@ from normalize_topics import (
 )
 from process_catalog import select_work
 from watchcraft_author import (
+    YouTubeIpBlocked,
     build_parser as build_authoring_parser,
+    create_playlist_collection,
     import_youtube,
     import_youtube_playlist,
+    process_and_normalize_collection,
     youtube_description_chapters,
     youtube_playlist,
     youtube_playlist_id,
+    youtube_transcript,
+    youtube_transcript_client,
     youtube_video_id,
 )
 
 
 class FormattingTests(unittest.TestCase):
+    def test_collection_create_command_parses_generation_options(self):
+        args = build_authoring_parser().parse_args(
+            [
+                "collection",
+                "create",
+                "--from-youtube-playlist",
+                "https://www.youtube.com/playlist?list=PL1234567890_example",
+                "--collections-repo",
+                "/tmp/watchcraft-collections",
+                "--slug",
+                "useful-lessons",
+                "--exclude",
+                "PjObX9XQvgI",
+                "--import-only",
+            ]
+        )
+        self.assertEqual(args.command, "collection")
+        self.assertEqual(args.collection_command, "create")
+        self.assertEqual(args.slug, "useful-lessons")
+        self.assertEqual(args.exclude, ["PjObX9XQvgI"])
+        self.assertTrue(args.import_only)
+        self.assertEqual(args.normalization_batch_size, 40)
+
+    @patch("watchcraft_author.run_topic_normalization", return_value=0)
+    @patch("watchcraft_author.process_workspace", return_value=0)
+    def test_collection_pipeline_normalizes_after_resumable_analysis(
+        self, process_workspace_mock, normalize_mock
+    ):
+        args = build_authoring_parser().parse_args(
+            [
+                "collection",
+                "create",
+                "--from-youtube-playlist",
+                "https://www.youtube.com/playlist?list=PL1234567890_example",
+                "--collections-repo",
+                "/tmp/watchcraft-collections",
+            ]
+        )
+        workspace = Path("/tmp/watchcraft-collections/collections/useful-lessons")
+
+        self.assertEqual(process_and_normalize_collection(workspace, args), 0)
+
+        process_args = process_workspace_mock.call_args.args[0]
+        normalization_args = normalize_mock.call_args.args[0]
+        self.assertEqual(process_args.workspace, workspace)
+        self.assertTrue(process_args.defer_build)
+        self.assertEqual(normalization_args.root, workspace)
+        self.assertFalse(normalization_args.force)
+        self.assertFalse(normalization_args.no_rebuild)
+
+    @patch("watchcraft_author.process_and_normalize_collection")
+    @patch("watchcraft_author.import_youtube_playlist")
+    @patch("watchcraft_author.youtube_playlist")
+    def test_collection_create_fails_closed_after_partial_import(
+        self, playlist_mock, import_mock, process_mock
+    ):
+        playlist = {
+            "playlist_id": "PL1234567890_example",
+            "url": "https://www.youtube.com/playlist?list=PL1234567890_example",
+            "title": "Useful Lessons",
+            "video_ids": ["PjObX9XQvgI", "abcdefghijk"],
+            "duplicate_count": 0,
+        }
+        playlist_mock.return_value = playlist
+        import_mock.return_value = {
+            **playlist,
+            "imported_count": 1,
+            "completed_count": 1,
+            "added_count": 1,
+            "cached_count": 0,
+            "failures": [
+                {"video_id": "abcdefghijk", "error": "no English captions"}
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            collections_repo = Path(directory)
+            (collections_repo / "collections").mkdir()
+            args = build_authoring_parser().parse_args(
+                [
+                    "collection",
+                    "create",
+                    "--from-youtube-playlist",
+                    playlist["url"],
+                    "--collections-repo",
+                    str(collections_repo),
+                ]
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError, "Collection import is incomplete.*abcdefghijk"
+            ):
+                create_playlist_collection(args)
+
+            workspace = collections_repo / "collections" / "useful-lessons"
+            self.assertTrue((workspace / "watchcraft-authoring.json").is_file())
+            process_mock.assert_not_called()
+
     def test_youtube_video_id_accepts_watch_and_short_urls(self):
         self.assertEqual(
             youtube_video_id(
@@ -174,6 +281,8 @@ class FormattingTests(unittest.TestCase):
                 )
 
             self.assertEqual(result["imported_count"], 1)
+            self.assertEqual(result["added_count"], 1)
+            self.assertEqual(result["cached_count"], 0)
             self.assertEqual(result["failures"][0]["video_id"], "abcdefghijk")
             self.assertEqual(
                 [call.kwargs["position"] for call in import_one.call_args_list],
@@ -188,6 +297,71 @@ class FormattingTests(unittest.TestCase):
                     "playlist_id": "PL1234567890_example",
                     "url": playlist["url"],
                 },
+            )
+
+    def test_youtube_playlist_import_stops_after_a_global_ip_block(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            playlist = {
+                "playlist_id": "PL1234567890_example",
+                "url": "https://www.youtube.com/playlist?list=PL1234567890_example",
+                "title": "Editing Lessons",
+                "video_ids": ["PjObX9XQvgI", "abcdefghijk"],
+                "duplicate_count": 0,
+            }
+            with patch(
+                "watchcraft_author.youtube_transcript_client",
+                return_value=object(),
+            ), patch(
+                "watchcraft_author.import_youtube",
+                side_effect=YouTubeIpBlocked("blocked"),
+            ) as import_one:
+                with self.assertRaisesRegex(YouTubeIpBlocked, "blocked"):
+                    import_youtube_playlist(
+                        root,
+                        playlist["url"],
+                        collection_title=None,
+                        language="en",
+                        force=False,
+                        playlist_data=playlist,
+                    )
+
+            self.assertEqual(import_one.call_count, 1)
+
+    def test_youtube_transcript_client_uses_environment_proxy_without_persisting_it(self):
+        proxy_url = "http://user:secret@proxy.example:8080"
+        with patch.dict(
+            "watchcraft_author.os.environ",
+            {"WATCHCRAFT_YOUTUBE_PROXY_URL": proxy_url},
+            clear=True,
+        ), patch("youtube_transcript_api.YouTubeTranscriptApi") as api:
+            youtube_transcript_client()
+
+        proxy_config = api.call_args.kwargs["proxy_config"]
+        self.assertEqual(
+            proxy_config.to_requests_dict(),
+            {"http": proxy_url, "https": proxy_url},
+        )
+
+    def test_youtube_transcript_client_requires_both_webshare_credentials(self):
+        with patch.dict(
+            "watchcraft_author.os.environ",
+            {"WATCHCRAFT_YOUTUBE_WEBSHARE_USERNAME": "only-a-username"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "Set both"):
+                youtube_transcript_client()
+
+    def test_youtube_transcript_maps_library_ip_block_to_global_failure(self):
+        from youtube_transcript_api import IpBlocked
+
+        class BlockedClient:
+            def list(self, video_id):
+                raise IpBlocked(video_id)
+
+        with self.assertRaisesRegex(YouTubeIpBlocked, "blocked caption requests"):
+            youtube_transcript(
+                "PjObX9XQvgI", "en", transcript_api=BlockedClient()
             )
 
     def test_resumed_playlist_import_refreshes_positions_without_renaming_collection(self):
@@ -214,7 +388,18 @@ class FormattingTests(unittest.TestCase):
             )
             state = root / "transcripts" / f"{video_id}.transcript.json"
             state.parent.mkdir()
-            state.write_text("{}", encoding="utf-8")
+            state.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "video": f"{video_id}.youtube",
+                        "segments": [
+                            {"start": 0, "end": 1, "text": "Instruction"}
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
             playlist = {
                 "playlist_id": "PL1234567890_example",
                 "url": "https://www.youtube.com/playlist?list=PL1234567890_example",
@@ -226,7 +411,7 @@ class FormattingTests(unittest.TestCase):
             with patch(
                 "watchcraft_author.youtube_playlist", return_value=playlist
             ):
-                import_youtube_playlist(
+                result = import_youtube_playlist(
                     root,
                     playlist["url"],
                     collection_title=None,
@@ -236,6 +421,8 @@ class FormattingTests(unittest.TestCase):
                 )
 
             config = json.loads((root / "watchcraft-authoring.json").read_text())
+            self.assertEqual(result["added_count"], 0)
+            self.assertEqual(result["cached_count"], 1)
             self.assertEqual(config["collection"]["title"], "My Existing Course")
             self.assertEqual(
                 config["sources"][f"{video_id}.youtube"]["position"], 2
@@ -289,6 +476,88 @@ class FormattingTests(unittest.TestCase):
             "duplicates",
             display_label_error("Essential Sound", {"essential sound"}),
         )
+        self.assertEqual(
+            deterministic_display_label(
+                "Fermentation timing and dough rest", set()
+            ),
+            "Fermentation timing & dough rest",
+        )
+        self.assertEqual(
+            deterministic_display_label(
+                "Mediterranean braised green beans (Andrew Janjigian)",
+                {"braised green beans"},
+            ),
+            "Mediterranean braised beans",
+        )
+        self.assertEqual(
+            deterministic_display_label(
+                "pan materials: cast iron, carbon steel, non-stick",
+                {"pan material comparison"},
+            ),
+            "pan materials",
+        )
+
+    def test_display_label_failure_preserves_valid_partial_results(self):
+        valid = "valid topic"
+        invalid = "verbose topic"
+        long_label = "An excessively verbose label without useful shortening"
+
+        class FakeResponses:
+            def __init__(self):
+                self.calls = 0
+
+            def parse(self, **_kwargs):
+                if self.calls == 0:
+                    generated = GeneratedDisplayLabels(
+                        labels=[
+                            DisplayLabelDecision(
+                                source_id="D001", label="Useful Topic"
+                            ),
+                            DisplayLabelDecision(
+                                source_id="D002", label=long_label
+                            ),
+                        ]
+                    )
+                else:
+                    generated = GeneratedDisplayLabels(
+                        labels=[
+                            DisplayLabelDecision(
+                                source_id="D001", label=long_label
+                            )
+                        ]
+                    )
+                self.calls += 1
+                return type("Response", (), {"output_parsed": generated})()
+
+        client = type("Client", (), {"responses": FakeResponses()})()
+        canonical = {
+            valid: {
+                "label": "Valid topic",
+                "family_ids": [],
+                "contexts": set(),
+            },
+            invalid: {
+                "label": long_label,
+                "family_ids": [],
+                "contexts": set(),
+            },
+        }
+        with patch(
+            "normalize_topics.deterministic_display_label", return_value=None
+        ), self.assertRaises(DisplayLabelBatchError) as raised:
+            label_batch(
+                client,
+                model="test-model",
+                keys=[valid, invalid],
+                canonical=canonical,
+                families={},
+                reserved_labels=[],
+                retries=0,
+            )
+
+        self.assertEqual(raised.exception.completed, {valid: "Useful Topic"})
+        self.assertEqual(raised.exception.remaining, [invalid])
+        self.assertIn("characters", raised.exception.rejected[invalid])
 
     def test_publisher_chapters_replace_ai_boundaries_but_keep_enrichment(self):
         with tempfile.TemporaryDirectory() as directory:

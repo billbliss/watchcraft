@@ -42,6 +42,22 @@ python -m unittest -v
 The authoring tools generate versioned collection metadata and CSV exports. They
 do not generate or serve reader UI.
 
+From the repository root, generate a collection from a public YouTube playlist:
+
+```sh
+./authoring/watchcraft-author collection create \
+  --from-youtube-playlist "https://www.youtube.com/playlist?list=PLAYLIST_ID" \
+  --collections-repo ../watchcraft-collections
+```
+
+Generation and Git publication are deliberately separate operations.
+The command is resumable; rerunning it reuses completed import, analysis, and
+topic-normalization work.
+
+See the [authoring guide](authoring/README.md) for operation and recovery, and
+[ADR 0003](docs/architecture/0003-resumable-fail-closed-authoring.md) for the
+pipeline's checkpoint, failure, and publishability guarantees.
+
 ## Web reader
 
 The first wrapper-free reader milestone lives in `apps/web`. Its default fixture

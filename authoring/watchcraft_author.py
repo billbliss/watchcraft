@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import os
 import re
 import sys
 import urllib.error
@@ -13,6 +14,11 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+from dotenv import load_dotenv
+
+# Load local authoring credentials while preserving explicit shell overrides.
+load_dotenv(Path(__file__).resolve().parents[1] / ".env.local")
 
 from analyze_catalog import (
     analysis_with_publisher_chapters,
@@ -23,6 +29,11 @@ from analyze_catalog import (
     load_transcript_state,
 )
 from build_collection import write_collection
+from normalize_topics import (
+    DEFAULT_BATCH_SIZE as DEFAULT_NORMALIZATION_BATCH_SIZE,
+    default_normalization_model,
+    run as run_topic_normalization,
+)
 from repair_timelines import repair_one
 from video_catalog import (
     AUTHORING_CONFIG_NAME,
@@ -35,6 +46,13 @@ from video_catalog import (
 AUTHORING_SCHEMA_VERSION = 1
 MIN_USEFUL_TIMELINE_SECTIONS = 3
 USER_AGENT = "Mozilla/5.0 (compatible; WatchcraftAuthor/0.1; +https://watchcraft.dev)"
+YOUTUBE_PROXY_URL_ENV = "WATCHCRAFT_YOUTUBE_PROXY_URL"
+YOUTUBE_WEBSHARE_USERNAME_ENV = "WATCHCRAFT_YOUTUBE_WEBSHARE_USERNAME"
+YOUTUBE_WEBSHARE_PASSWORD_ENV = "WATCHCRAFT_YOUTUBE_WEBSHARE_PASSWORD"
+
+
+class YouTubeIpBlocked(RuntimeError):
+    """YouTube rejected caption traffic from the current egress IP."""
 
 
 def workspace_path(value: str) -> Path:
@@ -334,17 +352,73 @@ def youtube_metadata(video_id: str) -> dict[str, Any]:
     }
 
 
-def youtube_transcript(video_id: str, language: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def youtube_transcript_client() -> Any:
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
+        from youtube_transcript_api.proxies import (
+            GenericProxyConfig,
+            WebshareProxyConfig,
+        )
+    except ImportError as error:
+        raise RuntimeError(
+            "youtube-transcript-api is not installed. Install authoring/requirements.txt."
+        ) from error
+    proxy_url = os.environ.get(YOUTUBE_PROXY_URL_ENV, "").strip()
+    webshare_username = os.environ.get(YOUTUBE_WEBSHARE_USERNAME_ENV, "").strip()
+    webshare_password = os.environ.get(YOUTUBE_WEBSHARE_PASSWORD_ENV, "")
+    if bool(webshare_username) != bool(webshare_password):
+        raise ValueError(
+            f"Set both {YOUTUBE_WEBSHARE_USERNAME_ENV} and "
+            f"{YOUTUBE_WEBSHARE_PASSWORD_ENV}"
+        )
+    if proxy_url and webshare_username:
+        raise ValueError(
+            f"Use either {YOUTUBE_PROXY_URL_ENV} or the Webshare credentials, not both"
+        )
+    if webshare_username:
+        print("YouTube captions: using rotating residential proxies", flush=True)
+        return YouTubeTranscriptApi(
+            proxy_config=WebshareProxyConfig(
+                proxy_username=webshare_username,
+                proxy_password=webshare_password,
+                filter_ip_locations=["us"],
+            )
+        )
+    if proxy_url:
+        print("YouTube captions: using configured proxy", flush=True)
+        return YouTubeTranscriptApi(
+            proxy_config=GenericProxyConfig(
+                http_url=proxy_url,
+                https_url=proxy_url,
+            )
+        )
+    return YouTubeTranscriptApi()
+
+
+def youtube_transcript(
+    video_id: str,
+    language: str,
+    *,
+    transcript_api: Any | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    try:
+        from youtube_transcript_api import IpBlocked, RequestBlocked
     except ImportError as error:
         raise RuntimeError(
             "youtube-transcript-api is not installed. Install authoring/requirements.txt."
         ) from error
     try:
-        transcript_list = YouTubeTranscriptApi().list(video_id)
+        client = transcript_api or youtube_transcript_client()
+        transcript_list = client.list(video_id)
         transcript = transcript_list.find_transcript([language])
         fetched = transcript.fetch()
+    except (IpBlocked, RequestBlocked) as error:
+        raise YouTubeIpBlocked(
+            "YouTube blocked caption requests from this IP. Retry from another "
+            f"network, set {YOUTUBE_PROXY_URL_ENV}, or set the two "
+            "WATCHCRAFT_YOUTUBE_WEBSHARE_* credentials for rotating residential "
+            "proxies. The import is resumable."
+        ) from error
     except Exception as error:
         raise RuntimeError(f"Could not retrieve YouTube captions: {error}") from error
     segments = [
@@ -389,6 +463,43 @@ def write_authoring_config(workspace: Path, config: dict[str, Any]) -> None:
     )
 
 
+def slugify(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", value.casefold()).strip("-")
+
+
+def collection_workspace_path(collections_repo: Path, slug: str) -> Path:
+    collections_root = collections_repo.expanduser().resolve() / "collections"
+    if not collections_root.is_dir():
+        raise ValueError(
+            f"Collections repository has no collections/ directory: {collections_repo}"
+        )
+    if slugify(slug) != slug or not slug:
+        raise ValueError(f"Collection slug must be lowercase kebab-case: {slug}")
+    return collections_root / slug
+
+
+def render_collection_readme(
+    playlist: dict[str, Any],
+    collection_title: str,
+    publisher: str,
+    publisher_url: str,
+    video_count: int,
+) -> str:
+    publisher_label = publisher or "YouTube"
+    if publisher_url:
+        publisher_label = f"[{publisher_label}]({publisher_url})"
+    return (
+        f"# {collection_title}\n\n"
+        "A Watchcraft collection generated from a public YouTube playlist.\n\n"
+        f"- Source: [{collection_title}]({playlist['url']})\n"
+        f"- Publisher: {publisher_label}\n"
+        f"- Videos: {video_count}\n\n"
+        "The published collection contains YouTube references, generated summaries, "
+        "topics, and navigable chapters. Retrieved captions remain private authoring "
+        "inputs and are intentionally excluded from Git.\n"
+    )
+
+
 def import_youtube(
     workspace: Path,
     url: str,
@@ -397,19 +508,22 @@ def import_youtube(
     language: str,
     force: bool,
     position: int | None = None,
+    transcript_api: Any | None = None,
 ) -> dict[str, Any]:
     video_id = youtube_video_id(url)
     key = f"{video_id}.youtube"
     config = load_authoring_config(workspace)
     state_path = workspace / "transcripts" / f"{video_id}.transcript.json"
-    if key in config.get("sources", {}) and state_path.is_file() and not force:
+    if not force and youtube_import_is_complete(workspace, video_id):
         return config["sources"][key]
     metadata = youtube_metadata(video_id)
     if position is not None:
         if position < 1:
             raise ValueError("YouTube source position must be at least 1")
         metadata["position"] = position
-    segments, caption_metadata = youtube_transcript(video_id, language)
+    segments, caption_metadata = youtube_transcript(
+        video_id, language, transcript_api=transcript_api
+    )
     if not segments:
         raise RuntimeError("YouTube returned an empty transcript")
     config.setdefault("collection", {})
@@ -453,6 +567,83 @@ def import_youtube(
     return metadata
 
 
+def youtube_import_is_complete(workspace: Path, video_id: str) -> bool:
+    key = f"{video_id}.youtube"
+    config = load_authoring_config(workspace)
+    source = config.get("sources", {}).get(key)
+    state_path = workspace / "transcripts" / f"{video_id}.transcript.json"
+    if not isinstance(source, dict) or not state_path.is_file():
+        return False
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(state, dict) and state.get("video") == key
+
+
+def playlist_completion_issues(
+    workspace: Path,
+    video_ids: list[str],
+    *,
+    require_analysis: bool,
+) -> list[str]:
+    config = load_authoring_config(workspace)
+    sources = config.get("sources", {})
+    issues = []
+    for video_id in video_ids:
+        key = f"{video_id}.youtube"
+        source = sources.get(key) if isinstance(sources, dict) else None
+        if not isinstance(source, dict):
+            issues.append(f"{video_id}: missing source metadata")
+            continue
+        state_path = workspace / "transcripts" / f"{video_id}.transcript.json"
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            issues.append(f"{video_id}: missing transcript")
+            continue
+        except (OSError, json.JSONDecodeError):
+            issues.append(f"{video_id}: invalid transcript state")
+            continue
+        if not isinstance(state, dict) or state.get("video") != key:
+            issues.append(f"{video_id}: transcript belongs to another source")
+            continue
+        if not require_analysis:
+            continue
+        output = analysis_path(workspace, key)
+        try:
+            analysis = json.loads(output.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            issues.append(f"{video_id}: missing analysis")
+            continue
+        except (OSError, json.JSONDecodeError):
+            issues.append(f"{video_id}: invalid analysis")
+            continue
+        if not isinstance(analysis, dict) or analysis.get("video") != key:
+            issues.append(f"{video_id}: analysis belongs to another source")
+    return issues
+
+
+def require_playlist_complete(
+    workspace: Path,
+    video_ids: list[str],
+    *,
+    require_analysis: bool,
+) -> None:
+    issues = playlist_completion_issues(
+        workspace, video_ids, require_analysis=require_analysis
+    )
+    if not issues:
+        return
+    preview = "; ".join(issues[:5])
+    suffix = f"; and {len(issues) - 5} more" if len(issues) > 5 else ""
+    phase = "analysis" if require_analysis else "import"
+    raise RuntimeError(
+        f"Collection {phase} is incomplete: {preview}{suffix}. "
+        "Rerun the same command to resume; completed work was preserved."
+    )
+
+
 def import_youtube_playlist(
     workspace: Path,
     value: str,
@@ -461,10 +652,11 @@ def import_youtube_playlist(
     language: str,
     force: bool,
     start_position: int = 1,
+    playlist_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if start_position < 1:
         raise ValueError("YouTube playlist start position must be at least 1")
-    playlist = youtube_playlist(value)
+    playlist = playlist_data or youtube_playlist(value)
     config = load_authoring_config(workspace)
     collection = config.setdefault("collection", {})
     if collection_title:
@@ -485,12 +677,16 @@ def import_youtube_playlist(
     }
     write_authoring_config(workspace, config)
 
-    imported = 0
+    completed = 0
+    added = 0
+    cached = 0
     failures = []
     video_ids = playlist["video_ids"]
+    transcript_api = youtube_transcript_client()
     for offset, video_id in enumerate(video_ids):
         position = start_position + offset
         print(f"[{offset + 1}/{len(video_ids)}] {video_id}", flush=True)
+        was_cached = not force and youtube_import_is_complete(workspace, video_id)
         try:
             metadata = import_youtube(
                 workspace,
@@ -499,24 +695,189 @@ def import_youtube_playlist(
                 language=language,
                 force=force,
                 position=position,
+                transcript_api=transcript_api,
             )
             latest_config = load_authoring_config(workspace)
             source = latest_config.get("sources", {}).get(f"{video_id}.youtube")
             if isinstance(source, dict) and source.get("position") != position:
                 source["position"] = position
                 write_authoring_config(workspace, latest_config)
-            print(f"  added {metadata['title']}", flush=True)
-            imported += 1
+            outcome = "cached" if was_cached else "added"
+            print(f"  {outcome} {metadata['title']}", flush=True)
+            completed += 1
+            if was_cached:
+                cached += 1
+            else:
+                added += 1
+        except YouTubeIpBlocked:
+            raise
         except (RuntimeError, ValueError) as error:
             failures.append({"video_id": video_id, "error": str(error)})
             print(f"  skipped: {error}", file=sys.stderr, flush=True)
-    if not imported:
+    if not completed:
         raise RuntimeError("No videos from the YouTube playlist could be imported")
     return {
         **playlist,
-        "imported_count": imported,
+        "imported_count": completed,
+        "completed_count": completed,
+        "added_count": added,
+        "cached_count": cached,
         "failures": failures,
     }
+
+
+def process_and_normalize_collection(
+    workspace: Path,
+    args: argparse.Namespace,
+    *,
+    expected_video_ids: list[str] | None = None,
+) -> int:
+    process_args = argparse.Namespace(
+        workspace=workspace,
+        analysis_model=args.analysis_model,
+        retries=args.retries,
+        timeout=args.timeout,
+        max_transcript_chars=args.max_transcript_chars,
+        force=args.force,
+        dry_run=False,
+        defer_build=True,
+    )
+    process_status = process_workspace(process_args)
+    if process_status:
+        return process_status
+    if expected_video_ids is not None:
+        require_playlist_complete(
+            workspace, expected_video_ids, require_analysis=True
+        )
+    print("Normalizing collection topics…", flush=True)
+    normalization_args = argparse.Namespace(
+        root=workspace,
+        normalization_model=args.normalization_model,
+        limit=None,
+        batch_size=args.normalization_batch_size,
+        retries=args.retries,
+        timeout=args.timeout,
+        force=args.force,
+        rebuild_related=False,
+        rebuild_display_labels=False,
+        dry_run=False,
+        no_rebuild=False,
+    )
+    return run_topic_normalization(normalization_args)
+
+
+def create_playlist_collection(args: argparse.Namespace) -> int:
+    playlist = youtube_playlist(args.from_youtube_playlist)
+    collection_title = " ".join(
+        str(args.collection_title or playlist["title"]).split()
+    )
+    collection_slug = args.slug or slugify(collection_title)
+    if not collection_slug:
+        raise ValueError("Could not derive a collection slug; pass --slug")
+    excluded_video_ids = []
+    for value in args.exclude:
+        video_id = youtube_video_id(value)
+        if video_id not in excluded_video_ids:
+            excluded_video_ids.append(video_id)
+    excluded = set(excluded_video_ids)
+    selected_video_ids = [
+        video_id for video_id in playlist["video_ids"] if video_id not in excluded
+    ]
+    if args.limit is not None:
+        selected_video_ids = selected_video_ids[: args.limit]
+    if not selected_video_ids:
+        raise RuntimeError("No playlist videos remain to import")
+    playlist = {**playlist, "video_ids": selected_video_ids}
+    workspace = collection_workspace_path(args.collections_repo, collection_slug)
+    print(
+        f"{collection_title} | {len(selected_video_ids)} videos | {workspace}",
+        flush=True,
+    )
+    if args.dry_run:
+        for index, video_id in enumerate(selected_video_ids, start=1):
+            print(f"  {index:>3}. https://www.youtube.com/watch?v={video_id}")
+        return 0
+
+    config_path = workspace / AUTHORING_CONFIG_NAME
+    if workspace.is_dir() and any(workspace.iterdir()) and not config_path.is_file():
+        raise RuntimeError(
+            f"Refusing to write into a non-empty directory without "
+            f"{AUTHORING_CONFIG_NAME}: {workspace}"
+        )
+    workspace.mkdir(parents=True, exist_ok=True)
+    existing = load_authoring_config(workspace)
+    existing_source = existing.get("collection", {}).get("source", {})
+    existing_playlist_id = (
+        existing_source.get("playlist_id")
+        if isinstance(existing_source, dict)
+        else None
+    )
+    if existing_playlist_id and existing_playlist_id != playlist["playlist_id"]:
+        raise RuntimeError(
+            f"Workspace already belongs to YouTube playlist {existing_playlist_id}"
+        )
+    if existing.get("sources") and not existing_playlist_id:
+        raise RuntimeError(
+            "Workspace already contains non-playlist sources and cannot be repurposed"
+        )
+
+    result = import_youtube_playlist(
+        workspace,
+        playlist["url"],
+        collection_title=collection_title,
+        language=args.language,
+        force=args.force,
+        playlist_data=playlist,
+    )
+    config = load_authoring_config(workspace)
+    collection = config.setdefault("collection", {})
+    collection["collection_id"] = collection_slug
+    collection["description"] = (
+        f"A Watchcraft collection generated from the {collection_title} "
+        "YouTube playlist."
+    )
+    source = collection.setdefault("source", {})
+    source["excluded_video_ids"] = excluded_video_ids
+    first_source = next(iter(config.get("sources", {}).values()), {})
+    publisher = str(first_source.get("publisher") or "")
+    publisher_url = str(first_source.get("publisher_url") or "")
+    if publisher:
+        collection["publisher"] = publisher
+        source["publisher"] = publisher
+    if publisher_url:
+        source["publisher_url"] = publisher_url
+    write_authoring_config(workspace, config)
+    atomic_write_text(
+        workspace / "README.md",
+        render_collection_readme(
+            playlist,
+            collection_title,
+            publisher,
+            publisher_url,
+            result["imported_count"],
+        ),
+    )
+    if result["failures"]:
+        failures = result["failures"]
+        preview = "; ".join(
+            f"{failure['video_id']}: {failure['error']}"
+            for failure in failures[:5]
+        )
+        suffix = f"; and {len(failures) - 5} more" if len(failures) > 5 else ""
+        raise RuntimeError(
+            f"Collection import is incomplete: {len(failures)} of "
+            f"{len(selected_video_ids)} videos failed ({preview}{suffix}). "
+            "Rerun the same command to resume; completed imports were preserved."
+        )
+    require_playlist_complete(
+        workspace, selected_video_ids, require_analysis=False
+    )
+    if args.import_only:
+        print("import complete; analysis was skipped")
+        return 0
+    return process_and_normalize_collection(
+        workspace, args, expected_video_ids=selected_video_ids
+    )
 
 
 def process_workspace(args: argparse.Namespace) -> int:
@@ -597,7 +958,8 @@ def process_workspace(args: argparse.Namespace) -> int:
             max_transcript_chars=args.max_transcript_chars,
         )
         print(f"  timeline: {count} sections", flush=True)
-    write_collection(args.workspace)
+    if not getattr(args, "defer_build", False):
+        write_collection(args.workspace)
     return 0
 
 
@@ -624,6 +986,42 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help="One-based lesson position retained by future collection rebuilds",
     )
+
+    collection = commands.add_parser("collection", help="Create collection workspaces")
+    collection_commands = collection.add_subparsers(
+        dest="collection_command", required=True
+    )
+    create = collection_commands.add_parser(
+        "create", help="Generate a collection from a public source"
+    )
+    create.add_argument("--from-youtube-playlist", required=True)
+    create.add_argument("--collections-repo", required=True, type=Path)
+    create.add_argument("--slug")
+    create.add_argument("--collection-title")
+    create.add_argument("--language", default="en")
+    create.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="VIDEO",
+        help="Omit a video URL or ID; may be repeated",
+    )
+    create.add_argument("--limit", type=int)
+    create.add_argument("--import-only", action="store_true")
+    create.add_argument("--dry-run", action="store_true")
+    create.add_argument("--analysis-model", default=default_analysis_model())
+    create.add_argument(
+        "--normalization-model", default=default_normalization_model()
+    )
+    create.add_argument(
+        "--normalization-batch-size",
+        type=int,
+        default=DEFAULT_NORMALIZATION_BATCH_SIZE,
+    )
+    create.add_argument("--retries", type=int, default=5)
+    create.add_argument("--timeout", type=float, default=300)
+    create.add_argument("--max-transcript-chars", type=int, default=1_500_000)
+    create.add_argument("--force", action="store_true")
 
     process = commands.add_parser("process", help="Analyze pending sources and build collection")
     process.add_argument("--workspace", required=True, type=workspace_path)
@@ -662,7 +1060,9 @@ def main(argv: list[str] | None = None) -> int:
                 detail.append(f"{duplicates} duplicate entries ignored")
             suffix = f" ({', '.join(detail)})" if detail else ""
             print(
-                f"added {result['imported_count']} videos from {result['title']}{suffix}"
+                f"completed {result['completed_count']} videos from {result['title']} "
+                f"({result['added_count']} added, {result['cached_count']} cached)"
+                f"{suffix}"
             )
             return 0
         metadata = import_youtube(
@@ -677,6 +1077,12 @@ def main(argv: list[str] | None = None) -> int:
         duration_label = f"{duration // 60}:{duration % 60:02d}" if duration else "unknown"
         print(f"added {metadata['title']} ({duration_label})")
         return 0
+    if args.command == "collection" and args.collection_command == "create":
+        if args.limit is not None and args.limit < 1:
+            raise ValueError("--limit must be at least 1")
+        if args.normalization_batch_size < 1 or args.normalization_batch_size > 100:
+            raise ValueError("--normalization-batch-size must be between 1 and 100")
+        return create_playlist_collection(args)
     if args.command == "process":
         return process_workspace(args)
     if args.command == "build":
@@ -700,9 +1106,13 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
-if __name__ == "__main__":
+def entrypoint(argv: list[str] | None = None) -> int:
     try:
-        raise SystemExit(main())
+        return main(argv)
     except (RuntimeError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
-        raise SystemExit(1)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(entrypoint())

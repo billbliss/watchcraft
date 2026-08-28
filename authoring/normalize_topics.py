@@ -89,6 +89,24 @@ class GeneratedDisplayLabels(StrictModel):
     labels: list[DisplayLabelDecision]
 
 
+class DisplayLabelBatchError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        completed: dict[str, str],
+        remaining: list[str],
+        rejected: dict[str, str],
+    ) -> None:
+        self.completed = completed
+        self.remaining = remaining
+        self.rejected = rejected
+        details = "; ".join(
+            f"{key}: {rejected.get(key, 'model omitted topic')}"
+            for key in remaining
+        )
+        super().__init__(f"Display-label batch remained invalid: {details}")
+
+
 TAXONOMY_PROMPT = """You organize topics within one educational-video collection.
 Create 12-24 useful, broad topic families that help people browse this corpus.
 
@@ -629,6 +647,31 @@ def display_label_error(label: str, reserved_keys: set[str]) -> str | None:
     return None
 
 
+def deterministic_display_label(
+    label: str, reserved_keys: set[str]
+) -> str | None:
+    normalized = " ".join(label.split())
+    if ":" in normalized:
+        prefix = normalized.split(":", 1)[0].strip()
+        if display_label_error(prefix, reserved_keys) is None:
+            return prefix
+    candidate = re.sub(r"\([^)]*\)|\[[^]]*\]|\{[^}]*\}", " ", label)
+    candidate = re.sub(r"[,;:]", " ", candidate)
+    candidate = re.sub(r"\s+and\s+", " & ", " ".join(candidate.split()), flags=re.I)
+    if display_label_error(candidate, reserved_keys) is None:
+        return candidate
+    words = candidate.split()
+    if len(words) > MIN_DISPLAY_LABEL_WORDS:
+        removable = range(1, max(1, len(words) - 1))
+        index = min(removable, key=lambda value: (len(words[value]), value))
+        shortened = " ".join(
+            word for word_index, word in enumerate(words) if word_index != index
+        )
+        if display_label_error(shortened, reserved_keys) is None:
+            return shortened
+    return None
+
+
 def label_batch(
     client: Any,
     *,
@@ -687,6 +730,8 @@ def label_batch(
             results[key] = label
             reserved_keys.add(canonical_topic_key(label))
         remaining = [key for key in remaining if key not in results]
+        for key in remaining:
+            rejected.setdefault(key, "model omitted topic")
         if not remaining:
             return results
         print(
@@ -694,7 +739,22 @@ def label_batch(
             f"{repair_attempt + 1}/4",
             flush=True,
         )
-    raise RuntimeError(f"Display-label batch remained invalid: {remaining}")
+    unresolved = []
+    for key in remaining:
+        fallback = deterministic_display_label(canonical[key]["label"], reserved_keys)
+        if fallback is None:
+            unresolved.append(key)
+            continue
+        results[key] = fallback
+        reserved_keys.add(canonical_topic_key(fallback))
+        print(f"  using deterministic display label for {key}: {fallback}", flush=True)
+    if unresolved:
+        raise DisplayLabelBatchError(
+            completed=results,
+            remaining=unresolved,
+            rejected=rejected,
+        )
+    return results
 
 
 def related_candidates(canonical: dict[str, dict]) -> dict[str, list[str]]:
@@ -912,8 +972,8 @@ def run(args: argparse.Namespace) -> int:
             f"({len(keys)} canonical topics)…",
             flush=True,
         )
-        state["display_labels"].update(
-            label_batch(
+        try:
+            labels = label_batch(
                 client,
                 model=args.normalization_model,
                 keys=keys,
@@ -922,7 +982,18 @@ def run(args: argparse.Namespace) -> int:
                 reserved_labels=list(state["display_labels"].values()),
                 retries=args.retries,
             )
-        )
+        except DisplayLabelBatchError as error:
+            state["display_labels"].update(error.completed)
+            state["status"] = "labeling"
+            state["last_error"] = {
+                "phase": "display-labels",
+                "topics": error.remaining,
+                "rejections": error.rejected,
+            }
+            save_state(path, state)
+            raise
+        state["display_labels"].update(labels)
+        state.pop("last_error", None)
         state["status"] = "labeling"
         save_state(path, state)
     relation_candidates = related_candidates(canonical)
