@@ -121,7 +121,7 @@
     },
     "item": {
       "type": "object",
-      "required": ["item_id", "title", "media", "transcript", "analysis", "summary", "locations", "topic_ids", "family_ids", "topic_sections", "chapter_count"],
+      "required": ["item_id", "title", "media", "analysis", "summary", "locations", "topic_ids", "family_ids", "topic_sections", "chapter_count"],
       "properties": {
         "item_id": { "$ref": "#/$defs/id" },
         "title": { "type": "string", "minLength": 1 },
@@ -131,6 +131,8 @@
           "items": { "$ref": "#/$defs/mediaReference" }
         },
         "transcript": {
+          "deprecated": true,
+          "description": "Legacy schema-v4 field. New collections omit transcript references.",
           "type": "object",
           "properties": {
             "subtitles": { "$ref": "#/$defs/path" },

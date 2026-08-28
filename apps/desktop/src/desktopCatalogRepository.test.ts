@@ -59,7 +59,6 @@ test("routes desktop YouTube playback through the HTTPS player bridge", () => {
     item_id: "video",
     title: "YouTube lesson",
     media: [{ type: "youtube", video_id: "PjObX9XQvgI" }],
-    transcript: {},
     analysis: { path: "analysis/video.json" },
     summary: "",
     locations: [],

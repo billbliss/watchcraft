@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent, type MouseEvent, type ReactElement } from "react";
-import { displayCollectionSource } from "./collectionSource";
+import { displayCollectionSource, displayLocalPath } from "./collectionSource";
 
 export interface RegisteredCollection {
   collectionId: string;
@@ -9,6 +9,7 @@ export interface RegisteredCollection {
   sourceLabel: string;
   active: boolean;
   archived: boolean;
+  mediaRoot: string | null;
   mediaExpected: number;
   mediaFound: number;
   mediaExtra: number;
@@ -29,9 +30,11 @@ interface CollectionSettingsProps {
   onAddFolder: (openAfter: boolean) => Promise<boolean>;
   onAddUrl: (url: string, openAfter: boolean) => Promise<boolean>;
   onClose: () => void;
+  onLocateMedia: (collection: RegisteredCollection) => Promise<void>;
   onRemove: (collection: RegisteredCollection) => Promise<void>;
   onSetArchived: (collection: RegisteredCollection, archived: boolean) => Promise<void>;
   onSwitch: (collection: RegisteredCollection) => Promise<void>;
+  onUpdate: (collection: RegisteredCollection) => Promise<void>;
 }
 
 function mediaSummary(collection: RegisteredCollection): string | null {
@@ -49,9 +52,11 @@ export function CollectionSettings({
   onAddFolder,
   onAddUrl,
   onClose,
+  onLocateMedia,
   onRemove,
   onSetArchived,
   onSwitch,
+  onUpdate,
 }: CollectionSettingsProps): ReactElement {
   const [openAfter, setOpenAfter] = useState(true);
   const [showArchived, setShowArchived] = useState(false);
@@ -120,6 +125,8 @@ export function CollectionSettings({
               {displayedCollections.map((collection) => {
                 const media = mediaSummary(collection);
                 const sourceLabel = displayCollectionSource(collection);
+                const canLocateMedia = collection.sourceType === "url"
+                  && collection.mediaModes.includes("referenced-local");
                 const cannotRemove = collections.length === 1
                   || (collection.active && availableCollections.length === 1);
                 return (
@@ -142,14 +149,30 @@ export function CollectionSettings({
                       <span className="collection-source" title={sourceLabel}>
                         {collection.sourceType === "url" ? "URL" : "Folder"} · {sourceLabel}
                       </span>
-                      {collection.mediaModes.length > 0 ? (
-                        <small>{collection.mediaModes.map((mode) => MEDIA_MODE_LABELS[mode]).join(" · ")}</small>
+                      <small>
+                        Revision {collection.revision}
+                        {collection.mediaModes.length > 0
+                          ? ` · ${collection.mediaModes.map((mode) => MEDIA_MODE_LABELS[mode]).join(" · ")}`
+                          : ""}
+                      </small>
+                      {collection.mediaRoot ? (
+                        <small className="collection-media-root" title={collection.mediaRoot}>
+                          Local media · {displayLocalPath(collection.mediaRoot)}
+                        </small>
                       ) : null}
                       {media ? <small>{media}</small> : null}
                     </div>
                     <div className="collection-actions">
                       {!collection.active && !collection.archived ? (
                         <button disabled={busy} onClick={() => void onSwitch(collection)} type="button">Open</button>
+                      ) : null}
+                      {collection.sourceType === "url" && !collection.archived ? (
+                        <button disabled={busy} onClick={() => void onUpdate(collection)} type="button">Update</button>
+                      ) : null}
+                      {canLocateMedia && !collection.archived ? (
+                        <button disabled={busy} onClick={() => void onLocateMedia(collection)} type="button">
+                          {collection.mediaRoot ? "Change folder" : "Locate videos"}
+                        </button>
                       ) : null}
                       {collection.archived ? (
                         <button disabled={busy} onClick={() => void onSetArchived(collection, false)} type="button">Restore</button>

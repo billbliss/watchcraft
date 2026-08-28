@@ -461,29 +461,16 @@ def build_collection_manifest(
                 "url": source.get("url")
                 or f"https://www.youtube.com/watch?v={source['video_id']}",
             }]
-            transcript = {}
         else:
             media = [{
                 "type": "local-file",
                 "delivery": "referenced-local",
                 "relative_path": video,
             }]
-            transcript = {
-                "subtitles": (
-                    Path("transcripts") / relative.with_suffix(".srt")
-                ).as_posix(),
-                "text": (
-                    Path("transcripts") / relative.with_suffix(".transcript.txt")
-                ).as_posix(),
-                "segments": (
-                    Path("transcripts") / relative.with_suffix(".transcript.json")
-                ).as_posix(),
-            }
         items[item_id] = {
             "item_id": item_id,
             "title": analysis.get("title") or relative.stem,
             "media": media,
-            "transcript": transcript,
             "analysis": {
                 "path": (
                     Path("analysis") / relative.with_suffix(".analysis.json")

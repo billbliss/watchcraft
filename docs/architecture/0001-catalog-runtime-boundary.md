@@ -15,8 +15,9 @@ collections, and possible future mobile clients.
 
 The versioned collection package is the contract between authoring and reading.
 
-Python authoring tools produce a collection manifest plus transcript and analysis
-resources. They do not generate or import reader UI. The schema is maintained in
+Python authoring tools produce a collection manifest plus analysis resources.
+Transcripts are private authoring inputs and are not published with the collection.
+The tools do not generate or import reader UI. The schema is maintained in
 `packages/catalog-schema`; fixtures and compatibility tests are shared by both
 Python and TypeScript implementations.
 

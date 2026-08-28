@@ -89,10 +89,15 @@ manifest is identified by `kind: "watchcraft.collection"`; its filename and
 folder name are not significant. Watchcraft copies the manifest, referenced
 metadata, and managed local media into its private app-data directory.
 Referenced local videos remain in place and are connected through a private
-directory binding. An optional `media_root_hint` helps establish that binding but is not
-used as runtime authority. Development runs as **Watchcraft Dev** with its own app identity, so
-an installed or previously bundled Watchcraft copy cannot be mistaken for the
-freshly launched development build.
+directory binding. When a URL-installed collection references local videos,
+Watchcraft prompts for the folder containing them and stores that late binding
+only on the device. Settings can change the folder later. Updating the URL
+collection installs its newer revision while retaining both the media binding
+and earlier private revisions. An optional `media_root_hint` helps establish a
+folder-installed binding but is not used as runtime authority. Development runs
+as **Watchcraft Dev** with its own app identity, so an installed or previously
+bundled Watchcraft copy cannot be mistaken for the freshly launched development
+build.
 
 Before merging desktop playback changes, run the native smoke test:
 

@@ -67,7 +67,7 @@ mapping. Regenerate only these labels with
 `normalize_topics.py --rebuild-display-labels`.
 
 The content repository should ignore `**/transcripts/`, downloaded media, caches,
-credentials, and other private working material. YouTube collection items publish
-only their video ID/URL and analysis; their `transcript` reference is empty.
+credentials, and other private working material. Transcripts are private authoring
+inputs used to produce analysis; published collection items omit transcript references.
 
 Legacy local-media libraries continue to use the `Video Catalog/` metadata folder.

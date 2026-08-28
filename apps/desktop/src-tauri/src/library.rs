@@ -38,6 +38,7 @@ pub(crate) struct RegisteredCollection {
     pub(crate) source_label: String,
     pub(crate) active: bool,
     pub(crate) archived: bool,
+    pub(crate) media_root: Option<PathBuf>,
     pub(crate) media_expected: usize,
     pub(crate) media_found: usize,
     pub(crate) media_extra: usize,
@@ -70,8 +71,6 @@ struct CollectionItem {
     title: String,
     #[serde(default)]
     media: Vec<MediaReference>,
-    #[serde(default)]
-    transcript: TranscriptReference,
     analysis: AnalysisReference,
     summary: String,
     locations: Vec<serde_json::Value>,
@@ -120,13 +119,6 @@ struct MediaInventory {
     managed_local: Vec<PathBuf>,
     referenced_local: Vec<PathBuf>,
     remote_count: usize,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct TranscriptReference {
-    subtitles: Option<PathBuf>,
-    text: Option<PathBuf>,
-    segments: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -178,7 +170,7 @@ enum CollectionSource {
     RemoteManifest { url: String },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct DirectoryBinding {
     #[serde(rename = "type")]
     binding_type: String,
@@ -294,6 +286,27 @@ pub(crate) fn install_from_url(
     )?;
     let manifest = parse_manifest(&manifest_bytes, resolved_url.as_str())?;
     let media = media_inventory(&manifest)?;
+    let mut registry = read_registry(app_data_root)?;
+    let previous = registry.collections.get(&manifest.collection_id);
+    if let Some(previous) = previous {
+        if previous.revision > manifest.revision {
+            return Err(format!(
+                "The installed collection is revision {}; the URL provides older revision {}.",
+                previous.revision, manifest.revision
+            ));
+        }
+        if previous.revision == manifest.revision {
+            let previous_manifest = read_manifest(&app_data_root.join(&previous.manifest_path))?;
+            if previous_manifest.content_hash != manifest.content_hash {
+                return Err(format!(
+                    "Revision {} changed without a revision increase.",
+                    manifest.revision
+                ));
+            }
+        }
+    }
+    let previous_binding = previous.and_then(|installed| installed.media_binding.clone());
+    let enabled = activate || previous.map(|installed| installed.enabled).unwrap_or(true);
 
     let safe_id = safe_component(&manifest.collection_id)?;
     let revision_root = app_data_root
@@ -312,7 +325,6 @@ pub(crate) fn install_from_url(
         )?;
     }
 
-    let mut registry = read_registry(app_data_root)?;
     let relative_revision = revision_root
         .strip_prefix(app_data_root)
         .map_err(|_| "Private collection storage is outside the Watchcraft data folder.")?
@@ -328,6 +340,12 @@ pub(crate) fn install_from_url(
         .iter()
         .filter(|relative| managed_media_root.join(relative).is_file())
         .count();
+    let (_, referenced_found, media_extra) = media_stats(
+        previous_binding
+            .as_ref()
+            .map(|binding| binding.path.as_path()),
+        &media.referenced_local,
+    );
     let media_expected = media.managed_local.len() + media.referenced_local.len();
     let installed = InstalledCollection {
         collection_id: collection_id.clone(),
@@ -338,11 +356,11 @@ pub(crate) fn install_from_url(
         source: CollectionSource::RemoteManifest {
             url: resolved_url.to_string(),
         },
-        media_binding: None,
+        media_binding: previous_binding,
         media_expected,
-        media_found: managed_found,
-        media_extra: 0,
-        enabled: true,
+        media_found: managed_found + referenced_found,
+        media_extra,
+        enabled,
     };
     if activate || registry.current_collection_id.is_none() {
         registry.current_collection_id = Some(collection_id.clone());
@@ -387,6 +405,10 @@ pub(crate) fn list_collections(app_data_root: &Path) -> Result<Vec<RegisteredCol
                 source_label,
                 active: current == Some(installed.collection_id.as_str()),
                 archived: !installed.enabled,
+                media_root: installed
+                    .media_binding
+                    .as_ref()
+                    .map(|binding| binding.path.clone()),
                 media_expected: installed.media_expected,
                 media_found: installed.media_found,
                 media_extra: installed.media_extra,
@@ -402,6 +424,81 @@ pub(crate) fn list_collections(app_data_root: &Path) -> Result<Vec<RegisteredCol
             .then_with(|| left.title.to_lowercase().cmp(&right.title.to_lowercase()))
     });
     Ok(collections)
+}
+
+pub(crate) fn collection_media_binding(
+    app_data_root: &Path,
+    collection_id: &str,
+) -> Result<Option<PathBuf>, String> {
+    let registry = read_registry(app_data_root)?;
+    let installed = registry
+        .collections
+        .get(collection_id)
+        .ok_or("That collection is not registered with Watchcraft.")?;
+    Ok(installed
+        .media_binding
+        .as_ref()
+        .map(|binding| binding.path.clone()))
+}
+
+pub(crate) fn bind_collection_media(
+    app_data_root: &Path,
+    collection_id: &str,
+    selected_media_root: &Path,
+) -> Result<LibraryLocation, String> {
+    let media_root = selected_media_root
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve the selected media folder: {error}"))?;
+    if !media_root.is_dir() {
+        return Err("The selected media location is not a folder.".into());
+    }
+
+    let mut registry = read_registry(app_data_root)?;
+    let installed = registry
+        .collections
+        .get(collection_id)
+        .ok_or("That collection is not registered with Watchcraft.")?;
+    if !matches!(&installed.source, CollectionSource::RemoteManifest { .. }) {
+        return Err("Only URL-installed collections can attach a separate media folder.".into());
+    }
+    if !installed.enabled {
+        return Err("Restore this collection before locating its videos.".into());
+    }
+
+    let manifest_path = app_data_root.join(&installed.manifest_path);
+    let metadata_root = app_data_root.join(&installed.metadata_root);
+    let media = media_inventory(&read_manifest(&manifest_path)?)?;
+    if media.referenced_local.is_empty() {
+        return Err("This collection does not reference videos from a local folder.".into());
+    }
+    let (_, referenced_found, media_extra) =
+        media_stats(Some(&media_root), &media.referenced_local);
+    if referenced_found == 0 {
+        return Err(format!(
+            "None of the collection's {} expected videos were found in that folder.",
+            media.referenced_local.len()
+        ));
+    }
+    let managed_found = media
+        .managed_local
+        .iter()
+        .filter(|relative| metadata_root.join("managed-media").join(relative).is_file())
+        .count();
+
+    let installed = registry
+        .collections
+        .get_mut(collection_id)
+        .expect("registered collection checked above");
+    installed.media_binding = Some(DirectoryBinding {
+        binding_type: "directory".into(),
+        path: media_root,
+    });
+    installed.media_expected = media.managed_local.len() + media.referenced_local.len();
+    installed.media_found = managed_found + referenced_found;
+    installed.media_extra = media_extra;
+    write_registry(app_data_root, &registry)?;
+    location_for_id(app_data_root, &registry, collection_id)
+        .ok_or_else(|| "The collection could not be opened with its local videos.".into())
 }
 
 pub(crate) fn set_collection_archived(
@@ -1041,9 +1138,6 @@ fn referenced_metadata_paths(manifest: &CollectionManifest) -> BTreeSet<PathBuf>
     let mut paths = BTreeSet::new();
     for item in manifest.items.values() {
         paths.insert(item.analysis.path.clone());
-        paths.extend(item.transcript.subtitles.iter().cloned());
-        paths.extend(item.transcript.text.iter().cloned());
-        paths.extend(item.transcript.segments.iter().cloned());
     }
     paths
 }
@@ -1168,9 +1262,9 @@ fn replace_file(source: &Path, destination: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        activate_collection, discover_manifest, install_from_folder_with_activation,
-        install_from_url, list_collections, load_current, remove_collection,
-        set_collection_archived,
+        activate_collection, bind_collection_media, discover_manifest,
+        install_from_folder_with_activation, install_from_url, list_collections, load_current,
+        remove_collection, safe_component, set_collection_archived,
     };
     use std::fs;
     use std::io::{Read, Write};
@@ -1319,7 +1413,6 @@ mod tests {
                   "item_id":"lesson",
                   "title":"Lesson",
                   "media":[{"type":"youtube","video_id":"abc123"}],
-                  "transcript":{},
                   "analysis":{"path":"analysis/lesson.json"},
                   "summary":"Lesson",
                   "locations":[],
@@ -1430,7 +1523,7 @@ mod tests {
           "root":{"type":"group","group_id":"root","title":"Remote Demo","children":[]},
           "topics":{},
           "topic_families":{},
-          "items":{"lesson":{"item_id":"lesson","title":"Lesson","media":[{"type":"youtube","video_id":"abc123"}],"transcript":{},"analysis":{"path":"analysis/lesson.json"},"summary":"Lesson","locations":[],"topic_ids":[],"family_ids":[],"topic_sections":{},"chapter_count":1}},
+          "items":{"lesson":{"item_id":"lesson","title":"Lesson","media":[{"type":"youtube","video_id":"abc123"}],"transcript":{"text":"transcripts/private.txt","segments":"transcripts/private.json"},"analysis":{"path":"analysis/lesson.json"},"summary":"Lesson","locations":[],"topic_ids":[],"family_ids":[],"topic_sections":{},"chapter_count":1}},
           "stats":{"video_count":1,"topic_count":0,"topic_family_count":0},
           "content_hash":"0000000000000000000000000000000000000000000000000000000000000000"
         }"#;
@@ -1466,8 +1559,89 @@ mod tests {
             .metadata_root
             .join("analysis/lesson.json")
             .is_file());
+        assert!(!installed
+            .metadata_root
+            .join("transcripts/private.txt")
+            .exists());
         assert_eq!(list_collections(&root).unwrap()[0].source_type, "url");
         server.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn preserves_late_bound_media_across_remote_revisions() {
+        let first_manifest = remote_referenced_fixture(1, &["media/lesson.mp4"], '0');
+        let (first_address, first_server) = serve_remote_manifest(first_manifest, 2);
+        let root = temporary_root("remote-revisions");
+        let app_data = root.join("private");
+        let media_root = root.join("Adamus Videos");
+        fs::create_dir_all(media_root.join("media")).unwrap();
+        fs::write(media_root.join("media/lesson.mp4"), "video one").unwrap();
+        fs::write(media_root.join("media/second.mp4"), "video two").unwrap();
+        let media_root = media_root.canonicalize().unwrap();
+
+        let first = install_from_url(
+            &app_data,
+            &format!("http://{first_address}/collection.json"),
+            true,
+        )
+        .unwrap();
+        assert_eq!((first.media_expected, first.media_found), (1, 0));
+        let bound = bind_collection_media(&app_data, "remote-referenced", &media_root).unwrap();
+        assert_eq!(bound.media_root.as_deref(), Some(media_root.as_path()));
+        assert_eq!((bound.media_expected, bound.media_found), (1, 1));
+        first_server.join().unwrap();
+
+        let second_manifest =
+            remote_referenced_fixture(2, &["media/lesson.mp4", "media/second.mp4"], '1');
+        let (second_address, second_server) = serve_remote_manifest(second_manifest, 2);
+        let updated = install_from_url(
+            &app_data,
+            &format!("http://{second_address}/collection.json"),
+            true,
+        )
+        .unwrap();
+        assert_eq!(updated.media_root.as_deref(), Some(media_root.as_path()));
+        assert_eq!((updated.media_expected, updated.media_found), (2, 2));
+        let private_collection = app_data
+            .join("collections")
+            .join(safe_component("remote-referenced").unwrap());
+        assert!(private_collection
+            .join("revisions/1/manifest.json")
+            .is_file());
+        assert!(private_collection
+            .join("revisions/2/manifest.json")
+            .is_file());
+        let registered = list_collections(&app_data).unwrap();
+        assert_eq!(registered[0].revision, 2);
+        assert_eq!(
+            registered[0].media_root.as_deref(),
+            Some(media_root.as_path())
+        );
+        second_server.join().unwrap();
+
+        let changed_revision =
+            remote_referenced_fixture(2, &["media/lesson.mp4", "media/second.mp4"], '2');
+        let (changed_address, changed_server) = serve_remote_manifest(changed_revision, 1);
+        assert!(install_from_url(
+            &app_data,
+            &format!("http://{changed_address}/collection.json"),
+            true,
+        )
+        .unwrap_err()
+        .contains("without a revision increase"));
+        changed_server.join().unwrap();
+
+        let older_revision = remote_referenced_fixture(1, &["media/lesson.mp4"], '0');
+        let (older_address, older_server) = serve_remote_manifest(older_revision, 1);
+        assert!(install_from_url(
+            &app_data,
+            &format!("http://{older_address}/collection.json"),
+            true,
+        )
+        .unwrap_err()
+        .contains("older revision"));
+        older_server.join().unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1483,7 +1657,7 @@ mod tests {
           "root":{"type":"group","group_id":"root","title":"Remote Managed","children":[]},
           "topics":{},
           "topic_families":{},
-          "items":{"lesson":{"item_id":"lesson","title":"Lesson","media":[{"type":"local-file","delivery":"managed-local","relative_path":"media/lesson.mp4"}],"transcript":{},"analysis":{"path":"analysis/lesson.json"},"summary":"Lesson","locations":[],"topic_ids":[],"family_ids":[],"topic_sections":{},"chapter_count":1}},
+          "items":{"lesson":{"item_id":"lesson","title":"Lesson","media":[{"type":"local-file","delivery":"managed-local","relative_path":"media/lesson.mp4"}],"analysis":{"path":"analysis/lesson.json"},"summary":"Lesson","locations":[],"topic_ids":[],"family_ids":[],"topic_sections":{},"chapter_count":1}},
           "stats":{"video_count":1,"topic_count":0,"topic_family_count":0},
           "content_hash":"0000000000000000000000000000000000000000000000000000000000000000"
         }"#;
@@ -1555,7 +1729,6 @@ mod tests {
                   "item_id":"lesson",
                   "title":"Lesson",
                   "media":[{{"type":"local-file","relative_path":"media/lesson.mp4"}}],
-                  "transcript":{{}},
                   "analysis":{{"path":"analysis/lesson.json"}},
                   "summary":"Lesson",
                   "locations":[],
@@ -1584,12 +1757,71 @@ mod tests {
               "root":{{"type":"group","group_id":"root","title":"Managed Demo","children":[]}},
               "topics":{{}},
               "topic_families":{{}},
-              "items":{{"lesson":{{"item_id":"lesson","title":"Lesson","media":[{{"type":"local-file","delivery":"managed-local","relative_path":"media/lesson.mp4"}}],"transcript":{{}},"analysis":{{"path":"analysis/lesson.json"}},"summary":"Lesson","locations":[],"topic_ids":[],"family_ids":[],"topic_sections":{{}},"chapter_count":1}}}},
+              "items":{{"lesson":{{"item_id":"lesson","title":"Lesson","media":[{{"type":"local-file","delivery":"managed-local","relative_path":"media/lesson.mp4"}}],"analysis":{{"path":"analysis/lesson.json"}},"summary":"Lesson","locations":[],"topic_ids":[],"family_ids":[],"topic_sections":{{}},"chapter_count":1}}}},
               "stats":{{"video_count":1,"topic_count":0,"topic_family_count":0}},
               "content_hash":"0000000000000000000000000000000000000000000000000000000000000000"
             }}"#
         );
         fs::write(path, json).unwrap();
+    }
+
+    fn remote_referenced_fixture(revision: u64, media_paths: &[&str], hash_digit: char) -> String {
+        let media = media_paths
+            .iter()
+            .map(|path| {
+                format!(
+                    r#"{{"type":"local-file","delivery":"referenced-local","relative_path":"{path}"}}"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            r#"{{
+              "kind":"watchcraft.collection",
+              "schema_version":4,
+              "collection_id":"remote-referenced",
+              "title":"Remote Referenced",
+              "revision":{revision},
+              "topic_scope":"collection",
+              "root":{{"type":"group","group_id":"root","title":"Remote Referenced","children":[]}},
+              "topics":{{}},
+              "topic_families":{{}},
+              "items":{{"lesson":{{"item_id":"lesson","title":"Lesson","media":[{media}],"analysis":{{"path":"analysis/lesson.json"}},"summary":"Lesson","locations":[],"topic_ids":[],"family_ids":[],"topic_sections":{{}},"chapter_count":1}}}},
+              "stats":{{"video_count":{},"topic_count":0,"topic_family_count":0}},
+              "content_hash":"{}"
+            }}"#,
+            media_paths.len(),
+            hash_digit.to_string().repeat(64)
+        )
+    }
+
+    fn serve_remote_manifest(
+        manifest: String,
+        expected_requests: usize,
+    ) -> (std::net::SocketAddr, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for _ in 0..expected_requests {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 2048];
+                let length = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..length]);
+                let body = if request.starts_with("GET /collection.json ") {
+                    manifest.as_str()
+                } else {
+                    "{}"
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            }
+        });
+        (address, server)
     }
 
     fn temporary_root(suffix: &str) -> PathBuf {

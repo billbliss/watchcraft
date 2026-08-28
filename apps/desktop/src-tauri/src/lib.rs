@@ -625,11 +625,44 @@ async fn install_collection_url(
     open_after: bool,
 ) -> Result<Option<LibraryLocation>, String> {
     let data_root = app_data_root(&app)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        library::install_from_url(&data_root, &url, open_after)
+    let install_root = data_root.clone();
+    let location = tauri::async_runtime::spawn_blocking(move || {
+        library::install_from_url(&install_root, &url, open_after)
     })
     .await
     .map_err(|error| format!("The collection download could not finish: {error}"))??;
+    let is_current = library::load_current(&data_root)?
+        .is_some_and(|current| current.collection_id == location.collection_id);
+    if is_current {
+        approve_library_location(&app, location).map(Some)
+    } else {
+        Ok(Some(location))
+    }
+}
+
+#[tauri::command]
+async fn choose_collection_media_folder(
+    app: tauri::AppHandle,
+    collection_id: String,
+    default_path: Option<String>,
+) -> Result<Option<LibraryLocation>, String> {
+    let data_root = app_data_root(&app)?;
+    let existing_binding = library::collection_media_binding(&data_root, &collection_id)?;
+    let mut picker = app
+        .dialog()
+        .file()
+        .set_title("Choose the folder containing this collection's videos");
+    let suggested_path = existing_binding.or_else(|| default_path.map(PathBuf::from));
+    if let Some(path) = suggested_path.filter(|path| path.is_dir()) {
+        picker = picker.set_directory(path);
+    }
+    let Some(selected) = picker.blocking_pick_folder() else {
+        return Ok(None);
+    };
+    let selected = selected
+        .into_path()
+        .map_err(|error| format!("Could not read the selected folder: {error}"))?;
+    library::bind_collection_media(&data_root, &collection_id, &selected)?;
     load_current_library(&app)
 }
 
@@ -733,6 +766,7 @@ pub fn run() {
             list_registered_collections,
             choose_collection_folder,
             install_collection_url,
+            choose_collection_media_folder,
             activate_registered_collection,
             set_registered_collection_archived,
             remove_registered_collection,

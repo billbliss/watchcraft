@@ -61,9 +61,12 @@ Test all three media delivery modes on each OS:
    confirm it still plays from private application storage.
 3. Download and extract the referenced-local package:
    `https://billbliss.github.io/watchcraft-collections/downloads/hello-world-referenced.zip`.
-   Choose the extracted folder in Watchcraft.
+   Add its URL-installed manifest:
+   `https://billbliss.github.io/watchcraft-collections/collections/hello-world-referenced/collection.json`.
+   Confirm Watchcraft prompts for the videos, then choose the extracted folder.
 4. Play and seek the referenced video, then confirm **Open in …** launches the
-   OS default player. Remove the collection and verify its extracted video still exists.
+   OS default player. Use **Change folder** in Settings and bind the same folder
+   again. Remove the collection and verify its extracted video still exists.
 5. Install the remote-media manifest URL:
    `https://billbliss.github.io/watchcraft-collections/collections/premiere-pro-ai-tools/collection.json`.
    Play and seek a YouTube video. On Linux, confirm the player does not report

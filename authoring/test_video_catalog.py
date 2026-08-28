@@ -404,7 +404,7 @@ class FormattingTests(unittest.TestCase):
                     "url": "https://www.youtube.com/watch?v=PjObX9XQvgI",
                 }],
             )
-            self.assertEqual(item["transcript"], {})
+            self.assertNotIn("transcript", item)
             self.assertNotIn("media_root_hint", manifest)
             self.assertEqual(manifest["title"], "Editing Course")
             self.assertEqual(
@@ -618,10 +618,7 @@ class FormattingTests(unittest.TestCase):
         )
         lesson_one = manifest["items"][lesson_one_id]
         self.assertEqual(lesson_one["media"][0]["delivery"], "referenced-local")
-        self.assertEqual(
-            lesson_one["transcript"]["text"],
-            "transcripts/Course A/Module 1/Lesson One.transcript.txt",
-        )
+        self.assertNotIn("transcript", lesson_one)
         self.assertEqual(
             lesson_one["analysis"]["path"],
             "analysis/Course A/Module 1/Lesson One.analysis.json",

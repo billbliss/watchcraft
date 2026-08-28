@@ -19,7 +19,7 @@
     "dev": "npm run dev --workspace @watchcraft/web",
     "test": "npm run test --workspaces --if-present && npm run test:release && npm run test:site",
     "test:release": "node --test scripts/release-metadata.test.mjs",
-    "test:site": "node --test scripts/youtube-player-bridge.test.mjs",
+    "test:site": "node --test scripts/youtube-player-bridge.test.mjs scripts/site-directory.test.mjs",
     "typecheck": "npm run typecheck --workspace @watchcraft/web"
   },
   "engines": {

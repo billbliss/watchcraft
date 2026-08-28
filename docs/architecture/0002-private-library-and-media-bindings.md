@@ -37,8 +37,8 @@ may mix modes. A legacy `local-file` without `delivery` is treated as
 `media_root_hint` is optional installation guidance for referenced-local media.
 It is never runtime authority and may be omitted by publishers.
 
-The desktop app copies the manifest, its referenced analysis/transcript
-resources, and managed-local media into versioned storage under Watchcraft's
+The desktop app copies the manifest, its referenced analysis resources, and
+managed-local media into versioned storage under Watchcraft's
 private app-data directory.
 It records installed collections, the current collection, original source, and
 device-local media binding in a private `library.json`. Referenced local videos
@@ -46,18 +46,24 @@ remain in place. Hosted URLs remain authored in the portable manifest.
 
 Installation succeeds for exact, partial, and superset local folders. Missing
 videos remain unavailable until a suitable binding is supplied; unreferenced
-videos are ignored. Match counts are retained as local state so a future
-settings/install UI can explain the result without changing the collection.
+videos are ignored. A URL-installed collection containing `referenced-local`
+media prompts for a device-local folder after its metadata is installed.
+Settings can locate or change that folder later. Match counts are retained as
+local state without changing the portable collection.
 
-There is no central registry of approved collections. Future add flows may
-accept a URL, a manifest file, or a folder. Import validation and atomic private
-installation provide the trust boundary.
+Reinstalling or updating a URL collection accepts the same revision only when
+its content hash is unchanged, rejects revision downgrades, and installs newer
+revisions atomically. The device-local media binding survives an update, while
+earlier installed revisions remain in private storage.
+
+There is no central registry of approved collections. Add flows accept a URL or
+a folder. Import validation and atomic private installation provide the trust
+boundary.
 
 ## Consequences
 
 Portable manifests remain immutable authored content, while machine-specific
 state is mutable and private. Multiple collections can be installed without
 rewriting publisher files. The current UI may continue to display one collection
-while the registry and repository boundary grow to support many. YouTube player
-integration and remote collection acquisition are deferred until a real hosted
-collection is available.
+while the registry supports many. Published metadata and local media can evolve
+independently without embedding machine-specific paths in authored content.

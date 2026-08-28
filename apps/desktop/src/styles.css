@@ -300,9 +300,15 @@
   white-space: nowrap;
 }
 
+.collection-media-root {
+  max-width: 560px;
+}
+
 .collection-actions {
   display: flex;
   flex: none;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 7px;
 }
 

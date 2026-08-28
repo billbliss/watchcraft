@@ -1,3 +1,5 @@
+import { newestRelease, visibleCollections } from "./directory.mjs";
+
 const RELEASES_URL = "https://api.github.com/repos/billbliss/watchcraft/releases?per_page=20";
 const RELEASES_PAGE = "https://github.com/billbliss/watchcraft/releases";
 const COLLECTIONS_URL = "https://billbliss.github.io/watchcraft-collections/collections.json";
@@ -8,12 +10,14 @@ const fallbackCollections = [
     description: "A tiny self-contained video downloaded into Watchcraft’s private storage.",
     media_modes: ["managed-local"],
     manifest_url: "https://billbliss.github.io/watchcraft-collections/collections/hello-world-managed/collection.json",
+    archived: true,
   },
   {
     title: "Hello, Watchcraft! — Referenced",
     description: "The same tiny video kept in a folder that remains under your control.",
     media_modes: ["referenced-local"],
     package_url: "https://billbliss.github.io/watchcraft-collections/downloads/hello-world-referenced.zip",
+    archived: true,
   },
   {
     title: "Learning Adobe Premiere Pro",
@@ -74,9 +78,9 @@ async function loadReleases() {
   try {
     const response = await fetch(RELEASES_URL, { headers: { Accept: "application/vnd.github+json" } });
     if (!response.ok) throw new Error(`GitHub returned ${response.status}`);
-    const releases = (await response.json()).filter((release) => !release.draft);
-    renderRelease(releases.find((release) => release.prerelease), "beta");
-    renderRelease(releases.find((release) => !release.prerelease), "stable");
+    const releases = await response.json();
+    renderRelease(newestRelease(releases, true), "beta");
+    renderRelease(newestRelease(releases, false), "stable");
   } catch {
     renderRelease(null, "beta");
     renderRelease(null, "stable");
@@ -163,7 +167,7 @@ async function loadCollections() {
     // The embedded directory keeps the page useful if the optional public index is unavailable.
   }
   const grid = document.querySelector("#collection-grid");
-  grid.replaceChildren(...collections.map(collectionCard));
+  grid.replaceChildren(...visibleCollections(collections).map(collectionCard));
 }
 
 loadReleases();

@@ -47,8 +47,10 @@ export function DesktopApp(): ReactElement {
     [libraryLocation, scopeStatus, youtubeBridgeBaseUrl],
   );
 
-  const refreshCollections = useCallback(async (): Promise<void> => {
-    setCollections(await invoke<RegisteredCollection[]>("list_registered_collections"));
+  const refreshCollections = useCallback(async (): Promise<RegisteredCollection[]> => {
+    const registered = await invoke<RegisteredCollection[]>("list_registered_collections");
+    setCollections(registered);
+    return registered;
   }, []);
 
   const openLocation = useCallback((location: DesktopLibraryLocation): void => {
@@ -138,8 +140,18 @@ export function DesktopApp(): ReactElement {
         openAfter,
       });
       if (!location) throw new Error("The collection was installed but could not be opened.");
-      openLocation(location);
-      await refreshCollections();
+      const registered = await refreshCollections();
+      const installed = registered.find(
+        (collection) => collection.collectionId === location.collectionId,
+      );
+      if (installed?.active) openLocation(location);
+      if (
+        installed
+        && installed.mediaModes.includes("referenced-local")
+        && !installed.mediaRoot
+      ) {
+        await chooseMediaFolder(installed);
+      }
       if (openAfter) setSettingsOpen(false);
       return true;
     } catch (error: unknown) {
@@ -147,6 +159,55 @@ export function DesktopApp(): ReactElement {
       setSettingsError(message);
       if (!repository) setLibraryError(message);
       return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function chooseMediaFolder(collection: RegisteredCollection): Promise<void> {
+    const location = await invoke<DesktopLibraryLocation | null>(
+      "choose_collection_media_folder",
+      { collectionId: collection.collectionId, defaultPath: defaultFolder() },
+    );
+    if (location && collection.active) openLocation(location);
+    await refreshCollections();
+  }
+
+  async function locateCollectionMedia(collection: RegisteredCollection): Promise<void> {
+    setBusy(true);
+    setSettingsError(null);
+    try {
+      await chooseMediaFolder(collection);
+    } catch (error: unknown) {
+      setSettingsError(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function updateCollection(collection: RegisteredCollection): Promise<void> {
+    setBusy(true);
+    setSettingsError(null);
+    try {
+      const location = await invoke<DesktopLibraryLocation | null>("install_collection_url", {
+        url: collection.sourceLabel,
+        openAfter: collection.active,
+      });
+      if (!location) throw new Error("The collection update could not be opened.");
+      const registered = await refreshCollections();
+      const updated = registered.find(
+        (candidate) => candidate.collectionId === collection.collectionId,
+      );
+      if (updated?.active) openLocation(location);
+      if (
+        updated
+        && updated.mediaModes.includes("referenced-local")
+        && !updated.mediaRoot
+      ) {
+        await chooseMediaFolder(updated);
+      }
+    } catch (error: unknown) {
+      setSettingsError(errorMessage(error));
     } finally {
       setBusy(false);
     }
@@ -221,9 +282,11 @@ export function DesktopApp(): ReactElement {
       onAddFolder={addFolder}
       onAddUrl={addUrl}
       onClose={() => setSettingsOpen(false)}
+      onLocateMedia={locateCollectionMedia}
       onRemove={removeCollection}
       onSetArchived={setCollectionArchived}
       onSwitch={switchCollection}
+      onUpdate={updateCollection}
     />
   ) : null;
 

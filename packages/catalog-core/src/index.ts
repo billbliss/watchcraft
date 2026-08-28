@@ -104,7 +104,8 @@ export interface CatalogItem {
   item_id: string;
   title: string;
   media: MediaReference[];
-  transcript: {
+  /** @deprecated Legacy schema-v4 data; new collections omit transcript references. */
+  transcript?: {
     subtitles?: string;
     text?: string;
     segments?: string;
