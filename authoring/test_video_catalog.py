@@ -36,8 +36,12 @@ from normalize_topics import (
 )
 from process_catalog import select_work
 from watchcraft_author import (
+    build_parser as build_authoring_parser,
     import_youtube,
+    import_youtube_playlist,
     youtube_description_chapters,
+    youtube_playlist,
+    youtube_playlist_id,
     youtube_video_id,
 )
 
@@ -53,6 +57,203 @@ class FormattingTests(unittest.TestCase):
         self.assertEqual(
             youtube_video_id("https://youtu.be/PjObX9XQvgI"), "PjObX9XQvgI"
         )
+
+    def test_youtube_playlist_id_accepts_playlist_and_watch_urls(self):
+        playlist_id = "PL1234567890_example"
+        self.assertEqual(
+            youtube_playlist_id(
+                f"https://www.youtube.com/playlist?list={playlist_id}"
+            ),
+            playlist_id,
+        )
+        self.assertEqual(
+            youtube_playlist_id(
+                f"https://www.youtube.com/watch?v=PjObX9XQvgI&list={playlist_id}"
+            ),
+            playlist_id,
+        )
+
+    def test_youtube_playlist_follows_continuations_without_yt_dlp(self):
+        playlist_id = "PL1234567890_example"
+
+        def item(video_id, index):
+            return {
+                "lockupViewModel": {
+                    "rendererContext": {
+                        "commandContext": {
+                            "onTap": {
+                                "innertubeCommand": {
+                                    "watchEndpoint": {
+                                        "playlistId": playlist_id,
+                                        "videoId": video_id,
+                                        "index": index,
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+        continuation = {
+            "continuationItemViewModel": {
+                "continuationCommand": {
+                    "innertubeCommand": {
+                        "continuationCommand": {
+                            "token": "next-page",
+                            "request": "CONTINUATION_REQUEST_TYPE_BROWSE",
+                        }
+                    }
+                }
+            }
+        }
+        initial = {
+            "metadata": {
+                "playlistMetadataRenderer": {"title": "Editing Lessons"}
+            },
+            "contents": {
+                "itemSectionRenderer": {
+                    "contents": [item("PjObX9XQvgI", 0), continuation]
+                }
+            },
+        }
+        page = (
+            '<script>ytcfg.set({"INNERTUBE_API_KEY":"test-key",'
+            '"INNERTUBE_CLIENT_VERSION":"test-version"});</script>'
+            f"<script>var ytInitialData = {json.dumps(initial)};</script>"
+        )
+        next_page = {
+            "onResponseReceivedActions": [
+                {
+                    "appendContinuationItemsAction": {
+                        "continuationItems": [item("abcdefghijk", 1)]
+                    }
+                }
+            ]
+        }
+        with patch("watchcraft_author.request_text", return_value=page), patch(
+            "watchcraft_author.request_json", return_value=next_page
+        ) as request_json:
+            playlist = youtube_playlist(playlist_id)
+
+        self.assertEqual(playlist["title"], "Editing Lessons")
+        self.assertEqual(playlist["video_ids"], ["PjObX9XQvgI", "abcdefghijk"])
+        request_url, request_payload = request_json.call_args.args
+        self.assertEqual(
+            request_url,
+            "https://www.youtube.com/youtubei/v1/browse?key=test-key",
+        )
+        self.assertEqual(request_payload["continuation"], "next-page")
+
+    def test_youtube_playlist_import_is_ordered_resumable_and_skips_failures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            playlist = {
+                "playlist_id": "PL1234567890_example",
+                "url": "https://www.youtube.com/playlist?list=PL1234567890_example",
+                "title": "Editing Lessons",
+                "video_ids": ["PjObX9XQvgI", "abcdefghijk"],
+                "duplicate_count": 0,
+            }
+            with patch(
+                "watchcraft_author.youtube_playlist", return_value=playlist
+            ), patch(
+                "watchcraft_author.import_youtube",
+                side_effect=[
+                    {"title": "First Lesson"},
+                    RuntimeError("no English captions"),
+                ],
+            ) as import_one:
+                result = import_youtube_playlist(
+                    root,
+                    playlist["url"],
+                    collection_title=None,
+                    language="en",
+                    force=False,
+                    start_position=5,
+                )
+
+            self.assertEqual(result["imported_count"], 1)
+            self.assertEqual(result["failures"][0]["video_id"], "abcdefghijk")
+            self.assertEqual(
+                [call.kwargs["position"] for call in import_one.call_args_list],
+                [5, 6],
+            )
+            config = json.loads((root / "watchcraft-authoring.json").read_text())
+            self.assertEqual(config["collection"]["title"], "Editing Lessons")
+            self.assertEqual(
+                config["collection"]["source"],
+                {
+                    "type": "youtube-playlist",
+                    "playlist_id": "PL1234567890_example",
+                    "url": playlist["url"],
+                },
+            )
+
+    def test_resumed_playlist_import_refreshes_positions_without_renaming_collection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video_id = "PjObX9XQvgI"
+            (root / "watchcraft-authoring.json").write_text(
+                json.dumps(
+                    {
+                        "kind": "watchcraft.authoring",
+                        "schema_version": 1,
+                        "collection": {"title": "My Existing Course"},
+                        "sources": {
+                            f"{video_id}.youtube": {
+                                "type": "youtube",
+                                "video_id": video_id,
+                                "title": "Existing Lesson",
+                                "position": 99,
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state = root / "transcripts" / f"{video_id}.transcript.json"
+            state.parent.mkdir()
+            state.write_text("{}", encoding="utf-8")
+            playlist = {
+                "playlist_id": "PL1234567890_example",
+                "url": "https://www.youtube.com/playlist?list=PL1234567890_example",
+                "title": "YouTube Playlist Title",
+                "video_ids": [video_id],
+                "duplicate_count": 0,
+            }
+
+            with patch(
+                "watchcraft_author.youtube_playlist", return_value=playlist
+            ):
+                import_youtube_playlist(
+                    root,
+                    playlist["url"],
+                    collection_title=None,
+                    language="en",
+                    force=False,
+                    start_position=2,
+                )
+
+            config = json.loads((root / "watchcraft-authoring.json").read_text())
+            self.assertEqual(config["collection"]["title"], "My Existing Course")
+            self.assertEqual(
+                config["sources"][f"{video_id}.youtube"]["position"], 2
+            )
+
+    def test_youtube_add_accepts_a_playlist_parameter(self):
+        args = build_authoring_parser().parse_args(
+            [
+                "youtube",
+                "add",
+                "--workspace",
+                "/tmp/watchcraft-playlist-test",
+                "--playlist",
+                "PL1234567890_example",
+            ]
+        )
+        self.assertEqual(args.playlist, "PL1234567890_example")
+        self.assertIsNone(args.url)
 
     def test_youtube_description_chapters_extracts_publisher_timestamps(self):
         description = """Links and notes

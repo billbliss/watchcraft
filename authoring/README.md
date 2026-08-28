@@ -30,6 +30,26 @@ python watchcraft_author.py process \
   --workspace ~/dev/watchcraft-collections/collections/premiere-pro-ai-tools
 ```
 
+Import every visible video from a public or unlisted playlist without downloading
+the videos or requiring `yt-dlp`, a YouTube API key, or account credentials:
+
+```bash
+python watchcraft_author.py youtube add \
+  --workspace ~/dev/watchcraft-collections/collections/premiere-pro-course \
+  --collection-title "Premiere Pro Course" \
+  --playlist "https://www.youtube.com/playlist?list=PLAYLIST_ID"
+
+python watchcraft_author.py process \
+  --workspace ~/dev/watchcraft-collections/collections/premiere-pro-course
+```
+
+Playlist imports retain YouTube ordering and are resumable. Videos that are private,
+unavailable, or do not expose the requested caption language are reported and skipped.
+Use `--position N` to place the first playlist video at a position other than one.
+The `--playlist` value may be either a playlist URL or a YouTube watch URL containing
+both `v=` and `list=` parameters, such as the URL copied while playing the first video.
+Watchcraft uses the `list=` value and imports the playlist from its actual first entry.
+
 `youtube add` retrieves public metadata and the requested caption track without
 downloading the video. `process` analyzes unfinished sources, repairs an
 underspecified timeline, validates the resulting `collection.json` against the

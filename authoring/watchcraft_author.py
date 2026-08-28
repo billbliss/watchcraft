@@ -65,6 +65,22 @@ def youtube_video_id(value: str) -> str:
     return video_id
 
 
+def youtube_playlist_id(value: str) -> str:
+    candidate = value.strip()
+    if re.fullmatch(r"[A-Za-z0-9_-]{10,100}", candidate):
+        return candidate
+    parsed = urllib.parse.urlparse(candidate)
+    host = (parsed.hostname or "").casefold()
+    playlist_id = (
+        urllib.parse.parse_qs(parsed.query).get("list", [""])[0]
+        if host == "youtube.com" or host.endswith(".youtube.com")
+        else ""
+    )
+    if not re.fullmatch(r"[A-Za-z0-9_-]{10,100}", playlist_id):
+        raise ValueError(f"Not a recognizable YouTube playlist URL or ID: {value}")
+    return playlist_id
+
+
 def request_text(url: str) -> str:
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
@@ -72,6 +88,25 @@ def request_text(url: str) -> str:
             return response.read().decode("utf-8")
     except (OSError, urllib.error.URLError) as error:
         raise RuntimeError(f"Could not retrieve {url}: {error}") from error
+
+
+def request_json(url: str, payload: dict[str, Any]) -> dict[str, Any]:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except (OSError, urllib.error.URLError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"Could not retrieve {url}: {error}") from error
+    if not isinstance(result, dict):
+        raise RuntimeError(f"YouTube returned an invalid JSON response from {url}")
+    return result
 
 
 def first_json_string(page: str, name: str) -> str:
@@ -82,6 +117,165 @@ def first_json_string(page: str, name: str) -> str:
         return str(json.loads(f'"{match.group(1)}"'))
     except json.JSONDecodeError:
         return html.unescape(match.group(1))
+
+
+def youtube_initial_data(page: str) -> dict[str, Any]:
+    match = re.search(
+        r'(?:var\s+ytInitialData|window\["ytInitialData"\])\s*=\s*', page
+    )
+    if not match:
+        raise RuntimeError("YouTube did not expose public playlist data")
+    try:
+        payload, _ = json.JSONDecoder().raw_decode(page[match.end() :])
+    except json.JSONDecodeError as error:
+        raise RuntimeError("YouTube returned invalid public playlist data") from error
+    if not isinstance(payload, dict):
+        raise RuntimeError("YouTube returned invalid public playlist data")
+    return payload
+
+
+def first_nested_mapping(value: Any, key: str) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        candidate = value.get(key)
+        if isinstance(candidate, dict):
+            return candidate
+        for child in value.values():
+            found = first_nested_mapping(child, key)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = first_nested_mapping(child, key)
+            if found is not None:
+                return found
+    return None
+
+
+def playlist_watch_endpoint(value: Any, playlist_id: str) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        endpoint = value.get("watchEndpoint")
+        if (
+            isinstance(endpoint, dict)
+            and endpoint.get("playlistId") == playlist_id
+            and isinstance(endpoint.get("videoId"), str)
+            and "index" in endpoint
+        ):
+            return endpoint
+        for child in value.values():
+            found = playlist_watch_endpoint(child, playlist_id)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = playlist_watch_endpoint(child, playlist_id)
+            if found is not None:
+                return found
+    return None
+
+
+def playlist_continuation_token(value: Any) -> str | None:
+    if isinstance(value, dict):
+        command = value.get("continuationCommand")
+        if (
+            isinstance(command, dict)
+            and command.get("request") == "CONTINUATION_REQUEST_TYPE_BROWSE"
+            and isinstance(command.get("token"), str)
+        ):
+            return command["token"]
+        for child in value.values():
+            found = playlist_continuation_token(child)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = playlist_continuation_token(child)
+            if found:
+                return found
+    return None
+
+
+def youtube_playlist_batch(
+    payload: dict[str, Any], playlist_id: str
+) -> tuple[list[str], str | None]:
+    candidates: list[tuple[list[str], str | None]] = []
+
+    def visit(value: Any) -> None:
+        if isinstance(value, list):
+            video_ids = []
+            for child in value:
+                endpoint = playlist_watch_endpoint(child, playlist_id)
+                if endpoint is not None:
+                    video_ids.append(endpoint["videoId"])
+            if video_ids:
+                candidates.append((video_ids, playlist_continuation_token(value)))
+            for child in value:
+                visit(child)
+        elif isinstance(value, dict):
+            for child in value.values():
+                visit(child)
+
+    visit(payload)
+    if not candidates:
+        return [], None
+    return max(candidates, key=lambda candidate: len(candidate[0]))
+
+
+def youtube_playlist(value: str) -> dict[str, Any]:
+    playlist_id = youtube_playlist_id(value)
+    canonical_url = "https://www.youtube.com/playlist?" + urllib.parse.urlencode(
+        {"list": playlist_id}
+    )
+    page = request_text(f"{canonical_url}&hl=en")
+    initial_data = youtube_initial_data(page)
+    metadata = first_nested_mapping(initial_data, "playlistMetadataRenderer") or {}
+    title = " ".join(str(metadata.get("title") or "").split())
+    video_ids, continuation = youtube_playlist_batch(initial_data, playlist_id)
+    if not video_ids:
+        raise RuntimeError(
+            "The YouTube playlist is unavailable, private, empty, or has no visible videos"
+        )
+
+    api_key = first_json_string(page, "INNERTUBE_API_KEY")
+    client_version = first_json_string(page, "INNERTUBE_CLIENT_VERSION")
+    if continuation and (not api_key or not client_version):
+        raise RuntimeError("YouTube did not expose playlist pagination data")
+
+    seen_tokens: set[str] = set()
+    while continuation:
+        if continuation in seen_tokens:
+            raise RuntimeError("YouTube repeated a playlist continuation token")
+        seen_tokens.add(continuation)
+        response = request_json(
+            f"https://www.youtube.com/youtubei/v1/browse?key={api_key}",
+            {
+                "context": {
+                    "client": {
+                        "clientName": "WEB",
+                        "clientVersion": client_version,
+                        "hl": "en",
+                    }
+                },
+                "continuation": continuation,
+            },
+        )
+        batch, continuation = youtube_playlist_batch(response, playlist_id)
+        if not batch:
+            break
+        video_ids.extend(batch)
+
+    unique_video_ids = []
+    seen_video_ids = set()
+    for video_id in video_ids:
+        if video_id not in seen_video_ids:
+            unique_video_ids.append(video_id)
+            seen_video_ids.add(video_id)
+    return {
+        "playlist_id": playlist_id,
+        "url": canonical_url,
+        "title": title or playlist_id,
+        "video_ids": unique_video_ids,
+        "duplicate_count": len(video_ids) - len(unique_video_ids),
+    }
 
 
 def youtube_description_chapters(
@@ -259,6 +453,72 @@ def import_youtube(
     return metadata
 
 
+def import_youtube_playlist(
+    workspace: Path,
+    value: str,
+    *,
+    collection_title: str | None,
+    language: str,
+    force: bool,
+    start_position: int = 1,
+) -> dict[str, Any]:
+    if start_position < 1:
+        raise ValueError("YouTube playlist start position must be at least 1")
+    playlist = youtube_playlist(value)
+    config = load_authoring_config(workspace)
+    collection = config.setdefault("collection", {})
+    if collection_title:
+        collection["title"] = collection_title
+    collection.setdefault("title", playlist["title"])
+    collection.setdefault(
+        "collection_id",
+        re.sub(r"[^a-z0-9]+", "-", collection["title"].casefold()).strip("-"),
+    )
+    collection.setdefault(
+        "description", "A Watchcraft collection of public instructional videos."
+    )
+    effective_collection_title = str(collection["title"])
+    collection["source"] = {
+        "type": "youtube-playlist",
+        "playlist_id": playlist["playlist_id"],
+        "url": playlist["url"],
+    }
+    write_authoring_config(workspace, config)
+
+    imported = 0
+    failures = []
+    video_ids = playlist["video_ids"]
+    for offset, video_id in enumerate(video_ids):
+        position = start_position + offset
+        print(f"[{offset + 1}/{len(video_ids)}] {video_id}", flush=True)
+        try:
+            metadata = import_youtube(
+                workspace,
+                video_id,
+                collection_title=effective_collection_title,
+                language=language,
+                force=force,
+                position=position,
+            )
+            latest_config = load_authoring_config(workspace)
+            source = latest_config.get("sources", {}).get(f"{video_id}.youtube")
+            if isinstance(source, dict) and source.get("position") != position:
+                source["position"] = position
+                write_authoring_config(workspace, latest_config)
+            print(f"  added {metadata['title']}", flush=True)
+            imported += 1
+        except (RuntimeError, ValueError) as error:
+            failures.append({"video_id": video_id, "error": str(error)})
+            print(f"  skipped: {error}", file=sys.stderr, flush=True)
+    if not imported:
+        raise RuntimeError("No videos from the YouTube playlist could be imported")
+    return {
+        **playlist,
+        "imported_count": imported,
+        "failures": failures,
+    }
+
+
 def process_workspace(args: argparse.Namespace) -> int:
     states = discover_transcript_states(args.workspace)
     pending = []
@@ -346,8 +606,15 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     youtube = commands.add_parser("youtube", help="Import public YouTube sources")
     youtube_commands = youtube.add_subparsers(dest="youtube_command", required=True)
-    add = youtube_commands.add_parser("add", help="Add one public video and its captions")
-    add.add_argument("url")
+    add = youtube_commands.add_parser(
+        "add", help="Add one public video or every video in a public playlist"
+    )
+    add.add_argument("url", nargs="?")
+    add.add_argument(
+        "--playlist",
+        metavar="URL_OR_ID",
+        help="Import every visible video from a public or unlisted playlist",
+    )
     add.add_argument("--workspace", required=True, type=workspace_path)
     add.add_argument("--collection-title")
     add.add_argument("--language", default="en")
@@ -375,6 +642,29 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "youtube":
+        if bool(args.url) == bool(args.playlist):
+            raise ValueError("Provide either one YouTube video or --playlist, but not both")
+        if args.playlist:
+            result = import_youtube_playlist(
+                args.workspace,
+                args.playlist,
+                collection_title=args.collection_title,
+                language=args.language,
+                force=args.force,
+                start_position=args.position or 1,
+            )
+            skipped = len(result["failures"])
+            duplicates = result["duplicate_count"]
+            detail = []
+            if skipped:
+                detail.append(f"{skipped} skipped")
+            if duplicates:
+                detail.append(f"{duplicates} duplicate entries ignored")
+            suffix = f" ({', '.join(detail)})" if detail else ""
+            print(
+                f"added {result['imported_count']} videos from {result['title']}{suffix}"
+            )
+            return 0
         metadata = import_youtube(
             args.workspace,
             args.url,
