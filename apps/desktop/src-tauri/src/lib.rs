@@ -5,7 +5,11 @@ use http::{
 use http_range::HttpRange;
 use percent_encoding::percent_decode_str;
 use std::error::Error;
+#[cfg(any(target_os = "linux", test))]
+use std::io::Write;
 use std::io::{Read, Seek, SeekFrom};
+#[cfg(any(target_os = "linux", test))]
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::RwLock;
@@ -19,11 +23,13 @@ use library::{LibraryLocation, RegisteredCollection};
 
 const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "webm", "mkv"];
 const MAX_STREAM_CHUNK: u64 = 2 * 1024 * 1024;
-#[cfg(target_os = "linux")]
-const WATCHCRAFT_WEB_ORIGIN: &str = "https://watchcraft.stream/";
+#[cfg(not(target_os = "linux"))]
+const HOSTED_YOUTUBE_BRIDGE_URL: &str = "https://watchcraft.stream/youtube-player/";
 
 #[derive(Default)]
 struct ApprovedLibraryRoots(RwLock<Vec<PathBuf>>);
+
+struct YoutubeBridgeBaseUrl(String);
 
 fn is_video_path(path: &Path) -> bool {
     path.extension()
@@ -66,20 +72,6 @@ fn canonical_video_roots<'a>(
         .collect()
 }
 
-#[cfg(any(target_os = "linux", test))]
-fn is_youtube_request_url(requested_url: &str) -> bool {
-    Url::parse(requested_url)
-        .ok()
-        .filter(|url| url.scheme() == "https")
-        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
-        .is_some_and(|host| {
-            host == "youtube.com"
-                || host.ends_with(".youtube.com")
-                || host == "youtube-nocookie.com"
-                || host.ends_with(".youtube-nocookie.com")
-        })
-}
-
 fn validated_external_url(requested_url: &str) -> Result<Url, String> {
     let url = Url::parse(requested_url)
         .map_err(|_| "The requested external URL is invalid.".to_string())?;
@@ -94,6 +86,108 @@ fn validated_external_url(requested_url: &str) -> Result<Url, String> {
         return Err("Only YouTube links can be opened externally.".into());
     }
     Ok(url)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn youtube_bridge_asset(path: &str) -> Option<(&'static [u8], &'static str)> {
+    match path {
+        "/youtube-player/" | "/youtube-player/index.html" => Some((
+            include_bytes!("../../../../site/youtube-player/index.html"),
+            "text/html; charset=utf-8",
+        )),
+        "/youtube-player/player-bridge.mjs" => Some((
+            include_bytes!("../../../../site/youtube-player/player-bridge.mjs"),
+            "text/javascript; charset=utf-8",
+        )),
+        "/youtube-player/player-frame.html" => Some((
+            include_bytes!("../../../../site/youtube-player/player-frame.html"),
+            "text/html; charset=utf-8",
+        )),
+        "/youtube-player/player-frame.mjs" => Some((
+            include_bytes!("../../../../site/youtube-player/player-frame.mjs"),
+            "text/javascript; charset=utf-8",
+        )),
+        _ => None,
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn serve_youtube_bridge_request(mut stream: TcpStream) -> Result<(), String> {
+    let mut request = [0_u8; 8192];
+    let read = stream
+        .read(&mut request)
+        .map_err(|error| format!("Could not read a player bridge request: {error}"))?;
+    let request_line = String::from_utf8_lossy(&request[..read]);
+    let mut fields = request_line
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .split_whitespace();
+    let method = fields.next().unwrap_or_default();
+    let path = fields
+        .next()
+        .unwrap_or_default()
+        .split('?')
+        .next()
+        .unwrap_or_default();
+    let asset = (method == "GET" || method == "HEAD")
+        .then(|| youtube_bridge_asset(path))
+        .flatten();
+    let (status, body, content_type) = match asset {
+        Some((body, content_type)) => ("200 OK", body, content_type),
+        None => (
+            "404 Not Found",
+            b"Not found".as_slice(),
+            "text/plain; charset=utf-8",
+        ),
+    };
+    let headers = format!(
+        "HTTP/1.1 {status}\r\n\
+         Content-Length: {}\r\n\
+         Content-Type: {content_type}\r\n\
+         Cache-Control: no-store\r\n\
+         Content-Security-Policy: default-src 'self'; frame-src https://www.youtube.com https://www.youtube-nocookie.com; script-src 'self'; style-src 'self' 'unsafe-inline'\r\n\
+         Referrer-Policy: strict-origin-when-cross-origin\r\n\
+         X-Content-Type-Options: nosniff\r\n\
+         Connection: close\r\n\r\n",
+        body.len()
+    );
+    stream
+        .write_all(headers.as_bytes())
+        .and_then(|_| {
+            if method == "HEAD" {
+                Ok(())
+            } else {
+                stream.write_all(body)
+            }
+        })
+        .map_err(|error| format!("Could not send a player bridge response: {error}"))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn start_youtube_bridge_server() -> Result<String, String> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|error| format!("Could not start the YouTube player bridge: {error}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|error| format!("Could not locate the YouTube player bridge: {error}"))?
+        .port();
+    std::thread::Builder::new()
+        .name("watchcraft-youtube-bridge".into())
+        .spawn(move || {
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(stream) => {
+                        if let Err(error) = serve_youtube_bridge_request(stream) {
+                            eprintln!("Watchcraft YouTube player bridge failed: {error}");
+                        }
+                    }
+                    Err(error) => eprintln!("Watchcraft YouTube player bridge failed: {error}"),
+                }
+            }
+        })
+        .map_err(|error| format!("Could not run the YouTube player bridge: {error}"))?;
+    Ok(format!("http://127.0.0.1:{port}/youtube-player/"))
 }
 
 fn validated_video_path<R: Runtime>(
@@ -422,10 +516,37 @@ fn open_video(app: tauri::AppHandle, path: String) -> Result<bool, String> {
 fn open_external_url(url: String) -> Result<bool, String> {
     let url = validated_external_url(&url)?;
 
+    #[cfg(target_os = "windows")]
+    {
+        use std::iter;
+        use std::ptr::{null, null_mut};
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+        let operation: Vec<u16> = "open".encode_utf16().chain(iter::once(0)).collect();
+        let target: Vec<u16> = url.as_str().encode_utf16().chain(iter::once(0)).collect();
+        let result = unsafe {
+            ShellExecuteW(
+                null_mut(),
+                operation.as_ptr(),
+                target.as_ptr(),
+                null(),
+                null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        return if result as isize > 32 {
+            Ok(true)
+        } else {
+            Err(format!(
+                "Windows could not open the browser (ShellExecuteW returned {}).",
+                result as isize
+            ))
+        };
+    }
+
     #[cfg(target_os = "macos")]
     let mut command = Command::new("open");
-    #[cfg(target_os = "windows")]
-    let mut command = Command::new("explorer");
     #[cfg(all(
         unix,
         not(any(target_os = "macos", target_os = "ios", target_os = "android"))
@@ -434,7 +555,13 @@ fn open_external_url(url: String) -> Result<bool, String> {
     #[cfg(any(target_os = "ios", target_os = "android"))]
     return Err("Opening a browser is not supported on this platform yet.".into());
 
-    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    #[cfg(any(
+        target_os = "macos",
+        all(
+            unix,
+            not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+        )
+    ))]
     {
         command
             .arg(url.as_str())
@@ -448,6 +575,11 @@ fn open_external_url(url: String) -> Result<bool, String> {
 fn default_video_player(app: tauri::AppHandle, path: String) -> Result<Option<String>, String> {
     let path = validated_video_path(&app, &path)?;
     Ok(default_player_name(&path))
+}
+
+#[tauri::command]
+fn youtube_bridge_base_url(bridge: tauri::State<YoutubeBridgeBaseUrl>) -> String {
+    bridge.0.clone()
 }
 
 #[tauri::command]
@@ -558,8 +690,15 @@ fn finish_playback_smoke(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    let configured_youtube_bridge_base_url =
+        start_youtube_bridge_server().expect("could not start the local YouTube player bridge");
+    #[cfg(not(target_os = "linux"))]
+    let configured_youtube_bridge_base_url = HOSTED_YOUTUBE_BRIDGE_URL.to_string();
+
     tauri::Builder::default()
         .manage(ApprovedLibraryRoots::default())
+        .manage(YoutubeBridgeBaseUrl(configured_youtube_bridge_base_url))
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_persisted_scope::init())
         .plugin(tauri_plugin_dialog::init())
@@ -574,33 +713,11 @@ pub fn run() {
                 });
             responder.respond(response);
         })
-        .setup(|_app| {
-            #[cfg(target_os = "linux")]
-            if let Some(main_window) = _app.get_webview_window("main") {
-                main_window.with_webview(|platform_webview| {
-                    use webkit2gtk::{URIRequestExt, WebViewExt};
-
-                    platform_webview
-                        .inner()
-                        .connect_resource_load_started(|_, _, request| {
-                            let Some(uri) = request.uri() else {
-                                return;
-                            };
-                            if !is_youtube_request_url(uri.as_str()) {
-                                return;
-                            }
-                            if let Some(headers) = request.http_headers() {
-                                headers.replace("Referer", WATCHCRAFT_WEB_ORIGIN);
-                            }
-                        });
-                })?;
-            }
-            Ok(())
-        })
         .invoke_handler(tauri::generate_handler![
             open_video,
             open_external_url,
             default_video_player,
+            youtube_bridge_base_url,
             load_current_collection,
             list_registered_collections,
             choose_collection_folder,
@@ -617,12 +734,15 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_video_roots, is_video_path, is_within_approved_roots, is_youtube_request_url,
-        validated_external_url, video_content_type,
+        canonical_video_roots, is_video_path, is_within_approved_roots,
+        start_youtube_bridge_server, validated_external_url, video_content_type,
     };
     use std::fs;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use url::Url;
 
     #[cfg(target_os = "macos")]
     use super::{macos_application_name, macos_handler_for_content_type};
@@ -640,25 +760,32 @@ mod tests {
     }
 
     #[test]
-    fn identifies_only_secure_youtube_webview_requests() {
-        assert!(is_youtube_request_url(
-            "https://www.youtube-nocookie.com/embed/PjObX9XQvgI"
-        ));
-        assert!(is_youtube_request_url("https://www.youtube.com/player.js"));
-        assert!(!is_youtube_request_url(
-            "http://www.youtube.com/embed/video"
-        ));
-        assert!(!is_youtube_request_url(
-            "https://youtube.example/embed/video"
-        ));
-    }
-
-    #[test]
     fn allows_only_secure_youtube_external_links() {
         assert!(validated_external_url("https://www.youtube.com/watch?v=PjObX9XQvgI").is_ok());
         assert!(validated_external_url("https://youtu.be/PjObX9XQvgI").is_ok());
         assert!(validated_external_url("http://www.youtube.com/watch?v=PjObX9XQvgI").is_err());
         assert!(validated_external_url("https://example.com/watch?v=PjObX9XQvgI").is_err());
+    }
+
+    #[test]
+    fn local_youtube_bridge_serves_the_player_with_a_web_referrer_policy() {
+        let base_url = start_youtube_bridge_server().expect("start local player bridge");
+        let url = Url::parse(&base_url).expect("valid local player bridge URL");
+        let mut stream = TcpStream::connect(("127.0.0.1", url.port().expect("bridge port")))
+            .expect("connect to local player bridge");
+        stream
+            .write_all(
+                b"GET /youtube-player/ HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+            )
+            .expect("request local player bridge");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .expect("read local player bridge response");
+
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.contains("Referrer-Policy: strict-origin-when-cross-origin\r\n"));
+        assert!(response.contains("data-youtube-player-bridge"));
     }
 
     #[test]

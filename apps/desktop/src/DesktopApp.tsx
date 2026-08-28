@@ -34,16 +34,17 @@ export function DesktopApp(): ReactElement {
   const [libraryRoot, setLibraryRoot] = useState<string | null>(null);
   const [scopeStatus, setScopeStatus] = useState<ScopeStatus>("checking");
   const [libraryLocation, setLibraryLocation] = useState<DesktopLibraryLocation | null>(null);
+  const [youtubeBridgeBaseUrl, setYoutubeBridgeBaseUrl] = useState<string | null>(null);
   const [collections, setCollections] = useState<RegisteredCollection[]>([]);
   const [libraryError, setLibraryError] = useState<string | null>(null);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const repository = useMemo(
-    () => libraryLocation && scopeStatus === "ready"
-      ? new DesktopCatalogRepository(libraryLocation)
+    () => libraryLocation && youtubeBridgeBaseUrl && scopeStatus === "ready"
+      ? new DesktopCatalogRepository(libraryLocation, youtubeBridgeBaseUrl)
       : null,
-    [libraryLocation, scopeStatus],
+    [libraryLocation, scopeStatus, youtubeBridgeBaseUrl],
   );
 
   const refreshCollections = useCallback(async (): Promise<void> => {
@@ -64,9 +65,13 @@ export function DesktopApp(): ReactElement {
   useEffect(() => {
     let current = true;
     setScopeStatus("checking");
-    void restoreLibrary()
-      .then(async (location) => {
+    void Promise.all([
+      restoreLibrary(),
+      invoke<string>("youtube_bridge_base_url"),
+    ])
+      .then(async ([location, bridgeBaseUrl]) => {
         if (!current) return;
+        setYoutubeBridgeBaseUrl(bridgeBaseUrl);
         if (location) openLocation(location);
         else setScopeStatus("needs-access");
         await refreshCollections();

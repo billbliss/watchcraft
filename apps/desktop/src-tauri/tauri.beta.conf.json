@@ -9,9 +9,19 @@
         "height": 900,
         "minWidth": 900,
         "minHeight": 600,
+        "zoomHotkeysEnabled": true,
         "resizable": true,
         "fullscreen": false
       }
     ]
+  },
+  "bundle": {
+    "linux": {
+      "deb": {
+        "files": {
+          "/usr/share/metainfo/app.watchcraft.reader.metainfo.xml": "linux/app.watchcraft.reader.beta.metainfo.xml"
+        }
+      }
+    }
   }
 }

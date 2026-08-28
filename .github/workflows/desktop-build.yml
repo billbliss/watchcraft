@@ -140,6 +140,14 @@ jobs:
             fi
           done
 
+          deb_extract_dir="$extract_dir/deb"
+          dpkg-deb --extract "$deb_path" "$deb_extract_dir"
+          metainfo_path="$(find "$deb_extract_dir/usr/share/metainfo" -type f -name '*.metainfo.xml' -print -quit)"
+          if [[ -z "$metainfo_path" ]]; then
+            echo "The Debian package is missing AppStream metadata for Ubuntu App Center." >&2
+            exit 1
+          fi
+
       - name: Remove the extra DMG volume icon
         if: runner.os == 'macOS'
         run: node scripts/remove-dmg-volume-icon.mjs

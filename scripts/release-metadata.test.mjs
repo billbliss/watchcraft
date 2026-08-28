@@ -12,6 +12,9 @@ const desktopCapabilities = JSON.parse(
     "utf8",
   ),
 );
+const betaTauriConfig = JSON.parse(
+  readFileSync(new URL("../apps/desktop/src-tauri/tauri.beta.conf.json", import.meta.url), "utf8"),
+);
 
 test("prerelease tags produce beta builds", () => {
   assert.deepEqual(releaseMetadata({ refType: "tag", refName: "v0.2.0-beta.3" }), {
@@ -53,6 +56,12 @@ test("desktop builds can display their packaged version", () => {
   assert.ok(desktopCapabilities.permissions.includes("core:app:allow-version"));
 });
 
+test("desktop builds enable and permit the standard zoom shortcuts", () => {
+  assert.equal(tauriConfig.app.windows[0].zoomHotkeysEnabled, true);
+  assert.equal(betaTauriConfig.app.windows[0].zoomHotkeysEnabled, true);
+  assert.ok(desktopCapabilities.permissions.includes("core:webview:allow-set-webview-zoom"));
+});
+
 test("Windows beta builds use NSIS without the MSI prerelease restriction", () => {
   assert.equal(installerBundles({ runnerOs: "Windows", channel: "beta" }), "nsis");
 });
@@ -73,4 +82,16 @@ test("Linux packages retain the media runtime required for embedded playback", (
     "gstreamer1.0-plugins-bad",
     "gstreamer1.0-libav",
   ]);
+});
+
+test("Linux Debian packages include channel-specific AppStream metadata", () => {
+  const destination = "/usr/share/metainfo/app.watchcraft.reader.metainfo.xml";
+  assert.equal(
+    tauriConfig.bundle.linux.deb.files[destination],
+    "linux/app.watchcraft.reader.metainfo.xml",
+  );
+  assert.equal(
+    betaTauriConfig.bundle.linux.deb.files[destination],
+    "linux/app.watchcraft.reader.beta.metainfo.xml",
+  );
 });

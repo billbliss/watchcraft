@@ -17,6 +17,7 @@
         "height": 900,
         "minWidth": 900,
         "minHeight": 600,
+        "zoomHotkeysEnabled": true,
         "resizable": true,
         "fullscreen": false
       }
@@ -27,7 +28,7 @@
         "connect-src": "ipc: http://ipc.localhost asset: http://asset.localhost",
         "img-src": "'self' asset: http://asset.localhost data:",
         "media-src": "'self' asset: http://asset.localhost stream: http://stream.localhost",
-        "frame-src": "https://watchcraft.stream https://www.youtube-nocookie.com https://www.youtube.com",
+        "frame-src": "http://127.0.0.1:* https://watchcraft.stream https://www.youtube-nocookie.com https://www.youtube.com",
         "style-src": "'self' 'unsafe-inline'"
       },
       "devCsp": {
@@ -35,7 +36,7 @@
         "connect-src": "ipc: http://ipc.localhost http://127.0.0.1:1420 ws://127.0.0.1:1420 asset: http://asset.localhost",
         "img-src": "'self' asset: http://asset.localhost data:",
         "media-src": "'self' asset: http://asset.localhost stream: http://stream.localhost",
-        "frame-src": "https://watchcraft.stream https://www.youtube-nocookie.com https://www.youtube.com",
+        "frame-src": "http://127.0.0.1:* https://watchcraft.stream https://www.youtube-nocookie.com https://www.youtube.com",
         "style-src": "'self' 'unsafe-inline'"
       },
       "assetProtocol": {
@@ -55,6 +56,9 @@
         "bundleMediaFramework": true
       },
       "deb": {
+        "files": {
+          "/usr/share/metainfo/app.watchcraft.reader.metainfo.xml": "linux/app.watchcraft.reader.metainfo.xml"
+        },
         "depends": [
           "gstreamer1.0-plugins-good",
           "gstreamer1.0-plugins-bad",

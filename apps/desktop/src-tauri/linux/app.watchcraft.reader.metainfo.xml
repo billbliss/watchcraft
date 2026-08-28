@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>app.watchcraft.reader</id>
+  <name>Watchcraft</name>
+  <summary>Learn a craft by watching</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>Browse instructional video collections, search their transcripts, and play local or YouTube lessons.</p>
+  </description>
+  <launchable type="desktop-id">Watchcraft.desktop</launchable>
+  <url type="homepage">https://watchcraft.stream/</url>
+  <url type="bugtracker">https://github.com/billbliss/watchcraft/issues</url>
+  <content_rating type="oars-1.1"/>
+</component>
