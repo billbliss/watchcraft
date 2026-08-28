@@ -100,7 +100,9 @@ export function DesktopApp(): ReactElement {
 
   function defaultFolder(): string | null {
     return libraryRoot
-      ?? collections.find((collection) => collection.sourceType === "folder")?.sourceLabel
+      ?? collections.find(
+        (collection) => !collection.archived && collection.sourceType === "folder",
+      )?.sourceLabel
       ?? null;
   }
 
@@ -190,6 +192,26 @@ export function DesktopApp(): ReactElement {
     }
   }
 
+  async function setCollectionArchived(
+    collection: RegisteredCollection,
+    archived: boolean,
+  ): Promise<void> {
+    setBusy(true);
+    setSettingsError(null);
+    try {
+      const location = await invoke<DesktopLibraryLocation>(
+        "set_registered_collection_archived",
+        { collectionId: collection.collectionId, archived },
+      );
+      openLocation(location);
+      await refreshCollections();
+    } catch (error: unknown) {
+      setSettingsError(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const settings = settingsOpen ? (
     <CollectionSettings
       appVersion={appVersion}
@@ -200,6 +222,7 @@ export function DesktopApp(): ReactElement {
       onAddUrl={addUrl}
       onClose={() => setSettingsOpen(false)}
       onRemove={removeCollection}
+      onSetArchived={setCollectionArchived}
       onSwitch={switchCollection}
     />
   ) : null;

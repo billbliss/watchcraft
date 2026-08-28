@@ -643,6 +643,17 @@ fn activate_registered_collection(
 }
 
 #[tauri::command]
+fn set_registered_collection_archived(
+    app: tauri::AppHandle,
+    collection_id: String,
+    archived: bool,
+) -> Result<LibraryLocation, String> {
+    let location =
+        library::set_collection_archived(&app_data_root(&app)?, &collection_id, archived)?;
+    approve_library_location(&app, location)
+}
+
+#[tauri::command]
 fn remove_registered_collection(
     app: tauri::AppHandle,
     collection_id: String,
@@ -723,6 +734,7 @@ pub fn run() {
             choose_collection_folder,
             install_collection_url,
             activate_registered_collection,
+            set_registered_collection_archived,
             remove_registered_collection,
             playback_smoke_library_root,
             finish_playback_smoke

@@ -8,6 +8,7 @@ export interface RegisteredCollection {
   sourceType: "folder" | "url";
   sourceLabel: string;
   active: boolean;
+  archived: boolean;
   mediaExpected: number;
   mediaFound: number;
   mediaExtra: number;
@@ -29,6 +30,7 @@ interface CollectionSettingsProps {
   onAddUrl: (url: string, openAfter: boolean) => Promise<boolean>;
   onClose: () => void;
   onRemove: (collection: RegisteredCollection) => Promise<void>;
+  onSetArchived: (collection: RegisteredCollection, archived: boolean) => Promise<void>;
   onSwitch: (collection: RegisteredCollection) => Promise<void>;
 }
 
@@ -48,10 +50,15 @@ export function CollectionSettings({
   onAddUrl,
   onClose,
   onRemove,
+  onSetArchived,
   onSwitch,
 }: CollectionSettingsProps): ReactElement {
   const [openAfter, setOpenAfter] = useState(true);
+  const [showArchived, setShowArchived] = useState(false);
   const [url, setUrl] = useState("");
+  const availableCollections = collections.filter((collection) => !collection.archived);
+  const archivedCount = collections.length - availableCollections.length;
+  const displayedCollections = showArchived ? collections : availableCollections;
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent): void {
@@ -92,29 +99,45 @@ export function CollectionSettings({
             <div className="settings-section-heading">
               <div>
                 <h3>Collections</h3>
-                <p>Switch between installed collections or remove a registration from this device.</p>
+                <p>Switch collections, archive ones you rarely use, or remove a registration from this device.</p>
               </div>
-              <span>{collections.length}</span>
+              <div className="collection-heading-actions">
+                {archivedCount > 0 ? (
+                  <label className="show-archived-option">
+                    <input
+                      checked={showArchived}
+                      disabled={busy}
+                      onChange={(event) => setShowArchived(event.target.checked)}
+                      type="checkbox"
+                    />
+                    <span>Show archived collections ({archivedCount})</span>
+                  </label>
+                ) : null}
+                <span className="collection-count">{availableCollections.length}</span>
+              </div>
             </div>
             <div className="collection-registry">
-              {collections.map((collection) => {
+              {displayedCollections.map((collection) => {
                 const media = mediaSummary(collection);
                 const sourceLabel = displayCollectionSource(collection);
+                const cannotRemove = collections.length === 1
+                  || (collection.active && availableCollections.length === 1);
                 return (
                   <article
-                    className={`collection-entry ${collection.active ? "active" : ""}`}
+                    className={`collection-entry ${collection.active ? "active" : ""} ${collection.archived ? "archived" : ""}`}
                     key={collection.collectionId}
                     onDoubleClick={(event) => {
-                      if (busy || collection.active) return;
+                      if (busy || collection.active || collection.archived) return;
                       if ((event.target as HTMLElement).closest("button")) return;
                       void onSwitch(collection);
                     }}
-                    title={collection.active ? undefined : "Double-click to open"}
+                    title={collection.active || collection.archived ? undefined : "Double-click to open"}
                   >
                     <div className="collection-entry-copy">
                       <div className="collection-title-row">
                         <strong>{collection.title}</strong>
                         {collection.active ? <span className="active-badge">Open</span> : null}
+                        {collection.archived ? <span className="archived-badge">Archived</span> : null}
                       </div>
                       <span className="collection-source" title={sourceLabel}>
                         {collection.sourceType === "url" ? "URL" : "Folder"} · {sourceLabel}
@@ -125,14 +148,32 @@ export function CollectionSettings({
                       {media ? <small>{media}</small> : null}
                     </div>
                     <div className="collection-actions">
-                      {!collection.active ? (
+                      {!collection.active && !collection.archived ? (
                         <button disabled={busy} onClick={() => void onSwitch(collection)} type="button">Open</button>
                       ) : null}
+                      {collection.archived ? (
+                        <button disabled={busy} onClick={() => void onSetArchived(collection, false)} type="button">Restore</button>
+                      ) : (
+                        <button
+                          disabled={busy || collection.active || availableCollections.length === 1}
+                          onClick={() => void onSetArchived(collection, true)}
+                          title={
+                            collection.active
+                              ? "Open another collection before archiving this one"
+                              : availableCollections.length === 1
+                                ? "The final available collection cannot be archived"
+                                : "Keep installed but remove from the everyday list"
+                          }
+                          type="button"
+                        >
+                          Archive
+                        </button>
+                      )}
                       <button
                         className="danger-action"
-                        disabled={busy || collections.length === 1}
+                        disabled={busy || cannotRemove}
                         onClick={() => void onRemove(collection)}
-                        title={collections.length === 1 ? "Add another collection before removing this one" : "Remove from Watchcraft"}
+                        title={cannotRemove ? "The final available collection cannot be removed" : "Remove from Watchcraft"}
                         type="button"
                       >
                         Remove

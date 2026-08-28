@@ -37,6 +37,7 @@ pub(crate) struct RegisteredCollection {
     pub(crate) source_type: String,
     pub(crate) source_label: String,
     pub(crate) active: bool,
+    pub(crate) archived: bool,
     pub(crate) media_expected: usize,
     pub(crate) media_found: usize,
     pub(crate) media_extra: usize,
@@ -365,7 +366,6 @@ pub(crate) fn list_collections(app_data_root: &Path) -> Result<Vec<RegisteredCol
     let mut collections = registry
         .collections
         .values()
-        .filter(|installed| installed.enabled)
         .map(|installed| {
             let (source_type, source_label) = match &installed.source {
                 CollectionSource::LocalManifest { selected_root, .. } => (
@@ -386,6 +386,7 @@ pub(crate) fn list_collections(app_data_root: &Path) -> Result<Vec<RegisteredCol
                 source_type,
                 source_label,
                 active: current == Some(installed.collection_id.as_str()),
+                archived: !installed.enabled,
                 media_expected: installed.media_expected,
                 media_found: installed.media_found,
                 media_extra: installed.media_extra,
@@ -397,9 +398,48 @@ pub(crate) fn list_collections(app_data_root: &Path) -> Result<Vec<RegisteredCol
         right
             .active
             .cmp(&left.active)
+            .then_with(|| left.archived.cmp(&right.archived))
             .then_with(|| left.title.to_lowercase().cmp(&right.title.to_lowercase()))
     });
     Ok(collections)
+}
+
+pub(crate) fn set_collection_archived(
+    app_data_root: &Path,
+    collection_id: &str,
+    archived: bool,
+) -> Result<LibraryLocation, String> {
+    let mut registry = read_registry(app_data_root)?;
+    let installed = registry
+        .collections
+        .get(collection_id)
+        .ok_or("That collection is not registered with Watchcraft.")?;
+    if installed.enabled == !archived {
+        return current_location(app_data_root, &registry)
+            .ok_or_else(|| "The open collection is unavailable.".into());
+    }
+    if archived {
+        if registry.current_collection_id.as_deref() == Some(collection_id) {
+            return Err("Open another collection before archiving this one.".into());
+        }
+        if registry
+            .collections
+            .values()
+            .filter(|collection| collection.enabled)
+            .count()
+            <= 1
+        {
+            return Err("The final available collection cannot be archived.".into());
+        }
+    }
+    registry
+        .collections
+        .get_mut(collection_id)
+        .expect("registered collection checked above")
+        .enabled = !archived;
+    write_registry(app_data_root, &registry)?;
+    current_location(app_data_root, &registry)
+        .ok_or_else(|| "The open collection is unavailable.".into())
 }
 
 pub(crate) fn activate_collection(
@@ -431,10 +471,17 @@ pub(crate) fn remove_collection(
     if registry.collections.len() <= 1 {
         return Err("The final collection cannot be removed. Add another collection first.".into());
     }
-    registry.collections.remove(collection_id);
     if registry.current_collection_id.as_deref() == Some(collection_id) {
-        registry.current_collection_id = registry.collections.keys().next().cloned();
+        registry.current_collection_id = registry
+            .collections
+            .values()
+            .find(|collection| collection.collection_id != collection_id && collection.enabled)
+            .map(|collection| collection.collection_id.clone());
+        if registry.current_collection_id.is_none() {
+            return Err("The final available collection cannot be removed.".into());
+        }
     }
+    registry.collections.remove(collection_id);
     write_registry(app_data_root, &registry)?;
 
     if let Ok(safe_id) = safe_component(collection_id) {
@@ -1123,6 +1170,7 @@ mod tests {
     use super::{
         activate_collection, discover_manifest, install_from_folder_with_activation,
         install_from_url, list_collections, load_current, remove_collection,
+        set_collection_archived,
     };
     use std::fs;
     use std::io::{Read, Write};
@@ -1324,6 +1372,49 @@ mod tests {
         assert!(remove_collection(&app_data, "first")
             .unwrap_err()
             .contains("final collection"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn archives_and_restores_non_active_collections() {
+        let root = temporary_root("archive-registry");
+        let app_data = root.join("private");
+        let first = root.join("First Course");
+        let second = root.join("Second Course");
+        for (folder, id) in [(&first, "first"), (&second, "second")] {
+            fs::create_dir_all(folder.join("analysis")).unwrap();
+            fs::create_dir_all(folder.join("media")).unwrap();
+            fs::write(folder.join("analysis/lesson.json"), "{}").unwrap();
+            fs::write(folder.join("media/lesson.mp4"), "video").unwrap();
+            write_fixture(&folder.join("course.watchcraft"), id, 1, ".");
+        }
+
+        install_from_folder_with_activation(&app_data, &first, true).unwrap();
+        install_from_folder_with_activation(&app_data, &second, false).unwrap();
+
+        set_collection_archived(&app_data, "second", true).unwrap();
+        let registered = list_collections(&app_data).unwrap();
+        assert_eq!(registered.len(), 2);
+        assert!(registered
+            .iter()
+            .any(|collection| collection.collection_id == "second" && collection.archived));
+        assert!(activate_collection(&app_data, "second")
+            .unwrap_err()
+            .contains("not registered"));
+        assert!(set_collection_archived(&app_data, "first", true)
+            .unwrap_err()
+            .contains("Open another collection"));
+
+        set_collection_archived(&app_data, "second", false).unwrap();
+        activate_collection(&app_data, "second").unwrap();
+        set_collection_archived(&app_data, "first", true).unwrap();
+        assert!(remove_collection(&app_data, "second")
+            .unwrap_err()
+            .contains("final available"));
+
+        set_collection_archived(&app_data, "first", false).unwrap();
+        let remaining = remove_collection(&app_data, "second").unwrap();
+        assert_eq!(remaining.collection_id, "first");
         fs::remove_dir_all(root).unwrap();
     }
 
