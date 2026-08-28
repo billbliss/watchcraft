@@ -578,7 +578,7 @@ pub fn run() {
             #[cfg(target_os = "linux")]
             if let Some(main_window) = _app.get_webview_window("main") {
                 main_window.with_webview(|platform_webview| {
-                    use webkit2gtk::prelude::*;
+                    use webkit2gtk::{URIRequestExt, WebViewExt};
 
                     platform_webview
                         .inner()
