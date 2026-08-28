@@ -1,4 +1,4 @@
-import { newestRelease, visibleCollections } from "./directory.mjs";
+import { collectionDeepLink, newestRelease, visibleCollections } from "./directory.mjs";
 
 const RELEASES_URL = "https://api.github.com/repos/billbliss/watchcraft/releases?per_page=20";
 const RELEASES_PAGE = "https://github.com/billbliss/watchcraft/releases";
@@ -79,11 +79,14 @@ async function loadReleases() {
     const response = await fetch(RELEASES_URL, { headers: { Accept: "application/vnd.github+json" } });
     if (!response.ok) throw new Error(`GitHub returned ${response.status}`);
     const releases = await response.json();
+    const stableRelease = newestRelease(releases, false);
     renderRelease(newestRelease(releases, true), "beta");
-    renderRelease(newestRelease(releases, false), "stable");
+    renderRelease(stableRelease, "stable");
+    return Boolean(stableRelease);
   } catch {
     renderRelease(null, "beta");
     renderRelease(null, "stable");
+    return false;
   }
 }
 
@@ -113,7 +116,7 @@ async function copyText(text) {
   }
 }
 
-function collectionCard(collection) {
+function collectionCard(collection, stableAvailable) {
   const card = document.createElement("article");
   card.className = "collection-card";
 
@@ -128,8 +131,21 @@ function collectionCard(collection) {
   actions.className = "collection-actions";
 
   if (collection.manifest_url) {
+    const preferredChannel = stableAvailable ? "release" : "beta";
+    const open = document.createElement("a");
+    open.className = "button";
+    open.href = collectionDeepLink(collection.manifest_url, preferredChannel);
+    open.textContent = stableAvailable ? "Open in Watchcraft" : "Open in Watchcraft Beta";
+    actions.append(open);
+    if (stableAvailable) {
+      const openBeta = document.createElement("a");
+      openBeta.className = "button secondary";
+      openBeta.href = collectionDeepLink(collection.manifest_url, "beta");
+      openBeta.textContent = "Open in Beta";
+      actions.append(openBeta);
+    }
     const copy = document.createElement("button");
-    copy.className = "button";
+    copy.className = "button secondary";
     copy.type = "button";
     copy.textContent = "Copy collection URL";
     copy.addEventListener("click", async () => {
@@ -154,7 +170,7 @@ function collectionCard(collection) {
   return card;
 }
 
-async function loadCollections() {
+async function loadCollections(stableAvailable) {
   let collections = fallbackCollections;
   try {
     const response = await fetch(COLLECTIONS_URL);
@@ -167,8 +183,11 @@ async function loadCollections() {
     // The embedded directory keeps the page useful if the optional public index is unavailable.
   }
   const grid = document.querySelector("#collection-grid");
-  grid.replaceChildren(...visibleCollections(collections).map(collectionCard));
+  grid.replaceChildren(
+    ...visibleCollections(collections).map(
+      (collection) => collectionCard(collection, stableAvailable),
+    ),
+  );
 }
 
-loadReleases();
-loadCollections();
+void loadReleases().then(loadCollections);

@@ -50,6 +50,12 @@ export function installerBundles({ runnerOs, channel }) {
   throw new Error(`Unsupported runner operating system: ${runnerOs || "unknown"}.`);
 }
 
+export function deepLinkScheme(channel) {
+  if (channel === "beta") return "watchcraft-beta";
+  if (channel === "release") return "watchcraft";
+  throw new Error(`Unknown build channel: ${channel || "unknown"}.`);
+}
+
 function run() {
   const outputPath = process.argv[2];
   if (!outputPath) {
@@ -71,7 +77,7 @@ function run() {
     });
     appendFileSync(
       process.env.GITHUB_OUTPUT,
-      `channel=${metadata.channel}\nprerelease=${metadata.prerelease}\nversion=${metadata.version}\nbundles=${bundles}\n`,
+      `channel=${metadata.channel}\nprerelease=${metadata.prerelease}\nversion=${metadata.version}\nbundles=${bundles}\nscheme=${deepLinkScheme(metadata.channel)}\n`,
     );
   }
   process.stdout.write(

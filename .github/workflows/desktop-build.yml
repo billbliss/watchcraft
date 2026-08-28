@@ -102,6 +102,8 @@ jobs:
 
       - name: Verify Linux media packaging
         if: runner.os == 'Linux'
+        env:
+          WATCHCRAFT_DEEP_LINK_SCHEME: ${{ steps.release.outputs.scheme }}
         shell: bash
         run: |
           set -euo pipefail
@@ -148,12 +150,23 @@ jobs:
             exit 1
           fi
 
+          appimage_desktop="$(find "$extract_dir/squashfs-root" -type f -name '*.desktop' -print -quit)"
+          deb_desktop="$(find "$deb_extract_dir/usr/share/applications" -type f -name '*.desktop' -print -quit)"
+          for desktop_file in "$appimage_desktop" "$deb_desktop"; do
+            if [[ -z "$desktop_file" ]] || ! grep -Fq "x-scheme-handler/$WATCHCRAFT_DEEP_LINK_SCHEME" "$desktop_file"; then
+              echo "The Linux package does not register $WATCHCRAFT_DEEP_LINK_SCHEME links." >&2
+              exit 1
+            fi
+          done
+
       - name: Remove the extra DMG volume icon
         if: runner.os == 'macOS'
         run: node scripts/remove-dmg-volume-icon.mjs
 
       - name: Verify the packaged macOS app signature
         if: runner.os == 'macOS'
+        env:
+          WATCHCRAFT_DEEP_LINK_SCHEME: ${{ steps.release.outputs.scheme }}
         shell: bash
         run: |
           set -euo pipefail
@@ -179,6 +192,11 @@ jobs:
           fi
 
           codesign --verify --deep --strict --verbose=2 "$app_path"
+          if ! /usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes' "$app_path/Contents/Info.plist" \
+            | grep -Fq "$WATCHCRAFT_DEEP_LINK_SCHEME"; then
+            echo "The macOS app does not register $WATCHCRAFT_DEEP_LINK_SCHEME links." >&2
+            exit 1
+          fi
 
       - name: Upload installer
         uses: actions/upload-artifact@v7

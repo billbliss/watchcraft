@@ -15,6 +15,13 @@
       }
     ]
   },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["watchcraft-beta"]
+      }
+    }
+  },
   "bundle": {
     "linux": {
       "deb": {

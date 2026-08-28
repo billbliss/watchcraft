@@ -13,6 +13,13 @@
       }
     ]
   },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["watchcraft-dev"]
+      }
+    }
+  },
   "bundle": {
     "active": false
   }

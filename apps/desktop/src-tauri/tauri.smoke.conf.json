@@ -14,6 +14,13 @@
       }
     ]
   },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["watchcraft-smoke"]
+      }
+    }
+  },
   "bundle": {
     "active": false
   }

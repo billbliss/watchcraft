@@ -12,3 +12,8 @@ export function newestRelease(releases, prerelease) {
 export function visibleCollections(collections) {
   return collections.filter((collection) => collection.archived !== true);
 }
+
+export function collectionDeepLink(manifestUrl, channel) {
+  const scheme = channel === "release" ? "watchcraft" : "watchcraft-beta";
+  return `${scheme}://install?url=${encodeURIComponent(manifestUrl)}`;
+}

@@ -1,12 +1,14 @@
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useMemo, useState, type ReactElement } from "react";
+import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { App } from "../../web/src/App";
 import { CollectionSettings, type RegisteredCollection } from "./CollectionSettings";
 import {
   DesktopCatalogRepository,
   type DesktopLibraryLocation,
 } from "./desktopCatalogRepository";
+import { collectionUrlFromDeepLink } from "./deepLink";
 import { singleFlight } from "./singleFlight";
 
 type ScopeStatus = "checking" | "ready" | "needs-access";
@@ -40,6 +42,8 @@ export function DesktopApp(): ReactElement {
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [pendingDeepLinkUrl, setPendingDeepLinkUrl] = useState<string | null>(null);
+  const processingDeepLink = useRef<string | null>(null);
   const repository = useMemo(
     () => libraryLocation && youtubeBridgeBaseUrl && scopeStatus === "ready"
       ? new DesktopCatalogRepository(libraryLocation, youtubeBridgeBaseUrl)
@@ -98,6 +102,45 @@ export function DesktopApp(): ReactElement {
     }
     window.addEventListener("keydown", openSettingsShortcut);
     return () => window.removeEventListener("keydown", openSettingsShortcut);
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let stopListening: (() => void) | undefined;
+
+    function receiveDeepLinks(urls: string[]): void {
+      const collectionUrl = urls
+        .map(collectionUrlFromDeepLink)
+        .find((url): url is string => Boolean(url));
+      if (collectionUrl) {
+        setPendingDeepLinkUrl(collectionUrl);
+      } else if (urls.length > 0) {
+        setSettingsError("That Watchcraft link is invalid or does not contain a secure collection URL.");
+        setSettingsOpen(true);
+      }
+    }
+
+    void onOpenUrl(receiveDeepLinks)
+      .then((unlisten) => {
+        if (disposed) unlisten();
+        else stopListening = unlisten;
+      })
+      .catch((error: unknown) => {
+        if (!disposed) console.error("Could not listen for Watchcraft links", error);
+      });
+
+    void getCurrent()
+      .then((urls) => {
+        if (!disposed && urls) receiveDeepLinks(urls);
+      })
+      .catch((error: unknown) => {
+        if (!disposed) console.error("Could not read the opening Watchcraft link", error);
+      });
+
+    return () => {
+      disposed = true;
+      stopListening?.();
+    };
   }, []);
 
   function defaultFolder(): string | null {
@@ -272,6 +315,32 @@ export function DesktopApp(): ReactElement {
       setBusy(false);
     }
   }
+
+  useEffect(() => {
+    if (
+      !pendingDeepLinkUrl
+      || scopeStatus === "checking"
+      || !youtubeBridgeBaseUrl
+      || processingDeepLink.current === pendingDeepLinkUrl
+    ) {
+      return;
+    }
+    const requestedUrl = pendingDeepLinkUrl;
+    processingDeepLink.current = requestedUrl;
+    setPendingDeepLinkUrl(null);
+    const confirmed = window.confirm(
+      `Add this collection to Watchcraft?\n\n${requestedUrl}`,
+    );
+    if (!confirmed) {
+      processingDeepLink.current = null;
+      return;
+    }
+    setSettingsError(null);
+    setSettingsOpen(true);
+    void addUrl(requestedUrl, true).finally(() => {
+      processingDeepLink.current = null;
+    });
+  }, [pendingDeepLinkUrl, scopeStatus, youtubeBridgeBaseUrl]);
 
   const settings = settingsOpen ? (
     <CollectionSettings

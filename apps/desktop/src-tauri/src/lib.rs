@@ -740,7 +740,21 @@ pub fn run() {
     #[cfg(not(target_os = "linux"))]
     let configured_youtube_bridge_base_url = HOSTED_YOUTUBE_BRIDGE_URL.to_string();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    let builder = builder
+        // The single-instance plugin must be registered first so Linux and Windows
+        // can forward deep links to an app that is already open.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
+        .plugin(tauri_plugin_deep_link::init());
+
+    builder
         .manage(ApprovedLibraryRoots::default())
         .manage(YoutubeBridgeBaseUrl(configured_youtube_bridge_base_url))
         .plugin(tauri_plugin_fs::init())

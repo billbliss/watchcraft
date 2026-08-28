@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { newestRelease, visibleCollections } from "../site/directory.mjs";
+import {
+  collectionDeepLink,
+  newestRelease,
+  visibleCollections,
+} from "../site/directory.mjs";
 
 test("selects the newest published release instead of trusting API order", () => {
   const releases = [
@@ -20,4 +24,18 @@ test("omits archived collections from the public directory", () => {
   ];
 
   assert.deepEqual(visibleCollections(collections), [{ collection_id: "course" }]);
+});
+
+test("builds separate stable and beta collection install links", () => {
+  const manifestUrl = "https://example.com/courses/collection.json";
+  const encoded = "https%3A%2F%2Fexample.com%2Fcourses%2Fcollection.json";
+
+  assert.equal(
+    collectionDeepLink(manifestUrl, "release"),
+    `watchcraft://install?url=${encoded}`,
+  );
+  assert.equal(
+    collectionDeepLink(manifestUrl, "beta"),
+    `watchcraft-beta://install?url=${encoded}`,
+  );
 });

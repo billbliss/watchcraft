@@ -45,6 +45,13 @@
       }
     }
   },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["watchcraft"]
+      }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",

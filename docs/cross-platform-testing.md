@@ -73,3 +73,13 @@ Test all three media delivery modes on each OS:
    configuration error 153 when opened or after seeking.
 6. Confirm Settings identifies the three modes as **Managed local media**,
    **Referenced local media**, and **Remote media**.
+7. With Watchcraft closed, open a collection link from `watchcraft.stream` and
+   confirm the browser launches the installed app, Watchcraft asks before
+   installing, and the collection opens. Repeat while Watchcraft is already
+   running to verify single-instance delivery. Beta builds must handle
+   `watchcraft-beta://` without replacing the stable app's `watchcraft://`
+   registration.
+
+Installed Debian packages should register these links through the desktop entry.
+An AppImage may require desktop integration; moving it after registration can
+invalidate the handler because Linux records its absolute executable path.

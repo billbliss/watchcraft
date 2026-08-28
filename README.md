@@ -97,7 +97,10 @@ and earlier private revisions. An optional `media_root_hint` helps establish a
 folder-installed binding but is not used as runtime authority. Development runs
 as **Watchcraft Dev** with its own app identity, so an installed or previously
 bundled Watchcraft copy cannot be mistaken for the freshly launched development
-build.
+build. Published collection pages can open the installer directly with
+`watchcraft://install?url=…`; beta builds use the separate
+`watchcraft-beta://install?url=…` scheme so both channels can be installed
+together.
 
 Before merging desktop playback changes, run the native smoke test:
 
