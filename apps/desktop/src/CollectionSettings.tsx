@@ -82,7 +82,7 @@ export function CollectionSettings({
             <h2 id="settings-title">Settings</h2>
           </div>
           <div className="settings-header-actions">
-            <span className="settings-version">Version {appVersion ?? "…"}</span>
+            <span className="settings-version">Version {appVersion ?? "unavailable"}</span>
             <button aria-label="Close settings" className="settings-close" disabled={busy} onClick={onClose} type="button">×</button>
           </div>
         </header>

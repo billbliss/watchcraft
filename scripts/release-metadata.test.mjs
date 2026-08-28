@@ -6,6 +6,12 @@ import { installerBundles, releaseMetadata, tauriChannelConfig } from "./release
 const tauriConfig = JSON.parse(
   readFileSync(new URL("../apps/desktop/src-tauri/tauri.conf.json", import.meta.url), "utf8"),
 );
+const desktopCapabilities = JSON.parse(
+  readFileSync(
+    new URL("../apps/desktop/src-tauri/capabilities/default.json", import.meta.url),
+    "utf8",
+  ),
+);
 
 test("prerelease tags produce beta builds", () => {
   assert.deepEqual(releaseMetadata({ refType: "tag", refName: "v0.2.0-beta.3" }), {
@@ -41,6 +47,10 @@ test("release builds preserve the production identity", () => {
   assert.deepEqual(tauriChannelConfig({ channel: "release", version: "1.0.0" }), {
     version: "1.0.0",
   });
+});
+
+test("desktop builds can display their packaged version", () => {
+  assert.ok(desktopCapabilities.permissions.includes("core:app:allow-version"));
 });
 
 test("Windows beta builds use NSIS without the MSI prerelease restriction", () => {
