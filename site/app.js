@@ -2,28 +2,28 @@ import { collectionDeepLink, newestRelease, visibleCollections } from "./directo
 
 const RELEASES_URL = "https://api.github.com/repos/billbliss/watchcraft/releases?per_page=20";
 const RELEASES_PAGE = "https://github.com/billbliss/watchcraft/releases";
-const COLLECTIONS_URL = "https://billbliss.github.io/watchcraft-collections/collections.json";
+const COLLECTIONS_URL = "https://collections.watchcraft.stream/collections.json";
 
 const fallbackCollections = [
   {
     title: "Hello, Watchcraft! — Managed",
     description: "A tiny self-contained video downloaded into Watchcraft’s private storage.",
     media_modes: ["managed-local"],
-    manifest_url: "https://billbliss.github.io/watchcraft-collections/collections/hello-world-managed/collection.json",
+    manifest_url: "https://collections.watchcraft.stream/collections/hello-world-managed/collection.json",
     archived: true,
   },
   {
     title: "Hello, Watchcraft! — Referenced",
     description: "The same tiny video kept in a folder that remains under your control.",
     media_modes: ["referenced-local"],
-    package_url: "https://billbliss.github.io/watchcraft-collections/downloads/hello-world-referenced.zip",
+    package_url: "https://collections.watchcraft.stream/downloads/hello-world-referenced.zip",
     archived: true,
   },
   {
     title: "Learning Adobe Premiere Pro",
     description: "Four public YouTube lessons with searchable topics and chapter navigation.",
     media_modes: ["remote"],
-    manifest_url: "https://billbliss.github.io/watchcraft-collections/collections/premiere-pro-ai-tools/collection.json",
+    manifest_url: "https://collections.watchcraft.stream/collections/premiere-pro-ai-tools/collection.json",
   },
 ];
 

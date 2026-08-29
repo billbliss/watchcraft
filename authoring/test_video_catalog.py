@@ -21,6 +21,7 @@ from build_collection import (
     build_collection_manifest,
     build_topic_chapter_map,
     render_csv,
+    update_collection_directory,
     write_collection,
 )
 from chunked_download import chunk_plan
@@ -71,6 +72,7 @@ class FormattingTests(unittest.TestCase):
                 "--exclude",
                 "PjObX9XQvgI",
                 "--import-only",
+                "--unlisted",
             ]
         )
         self.assertEqual(args.command, "collection")
@@ -78,7 +80,83 @@ class FormattingTests(unittest.TestCase):
         self.assertEqual(args.slug, "useful-lessons")
         self.assertEqual(args.exclude, ["PjObX9XQvgI"])
         self.assertTrue(args.import_only)
+        self.assertTrue(args.unlisted)
         self.assertEqual(args.normalization_batch_size, 40)
+
+    def test_collection_directory_lists_new_collection_and_preserves_description(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            workspace = repo / "collections" / "useful-lessons"
+            workspace.mkdir(parents=True)
+            (repo / "site").mkdir()
+            directory_path = repo / "site" / "collections.json"
+            directory_path.write_text(
+                json.dumps({
+                    "kind": "watchcraft.collection-directory",
+                    "schema_version": 1,
+                    "base_url": "https://example.com/library",
+                    "collections": [],
+                }),
+                encoding="utf-8",
+            )
+            manifest = {
+                "collection_id": "useful-lessons",
+                "title": "Useful Lessons",
+                "description": "Generated description.",
+                "items": {
+                    "lesson": {"media": [{"delivery": "remote"}]},
+                },
+            }
+
+            update_collection_directory(workspace, manifest)
+            entry = json.loads(directory_path.read_text())["collections"][0]
+            self.assertEqual(entry["media_modes"], ["remote"])
+            self.assertEqual(
+                entry["manifest_url"],
+                "https://example.com/library/collections/useful-lessons/collection.json",
+            )
+            entry["description"] = "Hand-edited description."
+            directory_path.write_text(
+                json.dumps({
+                    "kind": "watchcraft.collection-directory",
+                    "schema_version": 1,
+                    "base_url": "https://example.com/library",
+                    "collections": [entry],
+                }),
+                encoding="utf-8",
+            )
+            manifest["title"] = "Better Lessons"
+            update_collection_directory(workspace, manifest)
+            updated = json.loads(directory_path.read_text())["collections"][0]
+            self.assertEqual(updated["title"], "Better Lessons")
+            self.assertEqual(updated["description"], "Hand-edited description.")
+
+    def test_collection_directory_removes_explicitly_unlisted_collection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            workspace = repo / "collections" / "private-lessons"
+            workspace.mkdir(parents=True)
+            (repo / "site").mkdir()
+            (workspace / "watchcraft-authoring.json").write_text(
+                json.dumps({"collection": {"listed": False}}), encoding="utf-8"
+            )
+            directory_path = repo / "site" / "collections.json"
+            directory_path.write_text(
+                json.dumps({
+                    "base_url": "https://example.com",
+                    "collections": [{"collection_id": "private-lessons"}],
+                }),
+                encoding="utf-8",
+            )
+
+            update_collection_directory(
+                workspace,
+                {"collection_id": "private-lessons", "title": "Private Lessons"},
+            )
+
+            self.assertEqual(
+                json.loads(directory_path.read_text())["collections"], []
+            )
 
     @patch("watchcraft_author.run_topic_normalization", return_value=0)
     @patch("watchcraft_author.process_workspace", return_value=0)

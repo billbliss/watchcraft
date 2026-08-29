@@ -463,6 +463,16 @@ def write_authoring_config(workspace: Path, config: dict[str, Any]) -> None:
     )
 
 
+def set_collection_listing(workspace: Path, *, unlisted: bool) -> None:
+    config = load_authoring_config(workspace)
+    collection = config.setdefault("collection", {})
+    if unlisted:
+        collection["listed"] = False
+    else:
+        collection.setdefault("listed", True)
+    write_authoring_config(workspace, config)
+
+
 def slugify(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.casefold()).strip("-")
 
@@ -832,6 +842,10 @@ def create_playlist_collection(args: argparse.Namespace) -> int:
     config = load_authoring_config(workspace)
     collection = config.setdefault("collection", {})
     collection["collection_id"] = collection_slug
+    if args.unlisted:
+        collection["listed"] = False
+    else:
+        collection.setdefault("listed", True)
     collection["description"] = (
         f"A Watchcraft collection generated from the {collection_title} "
         "YouTube playlist."
@@ -982,6 +996,11 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--language", default="en")
     add.add_argument("--force", action="store_true")
     add.add_argument(
+        "--unlisted",
+        action="store_true",
+        help="Keep this collection out of the website directory",
+    )
+    add.add_argument(
         "--position",
         type=int,
         help="One-based lesson position retained by future collection rebuilds",
@@ -1008,6 +1027,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     create.add_argument("--limit", type=int)
     create.add_argument("--import-only", action="store_true")
+    create.add_argument(
+        "--unlisted",
+        action="store_true",
+        help="Publish by URL without advertising the collection on the website",
+    )
     create.add_argument("--dry-run", action="store_true")
     create.add_argument("--analysis-model", default=default_analysis_model())
     create.add_argument(
@@ -1064,6 +1088,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"({result['added_count']} added, {result['cached_count']} cached)"
                 f"{suffix}"
             )
+            set_collection_listing(args.workspace, unlisted=args.unlisted)
             return 0
         metadata = import_youtube(
             args.workspace,
@@ -1073,6 +1098,7 @@ def main(argv: list[str] | None = None) -> int:
             force=args.force,
             position=args.position,
         )
+        set_collection_listing(args.workspace, unlisted=args.unlisted)
         duration = metadata.get("duration_seconds")
         duration_label = f"{duration // 60}:{duration % 60:02d}" if duration else "unknown"
         print(f"added {metadata['title']} ({duration_label})")

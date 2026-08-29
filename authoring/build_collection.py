@@ -274,6 +274,93 @@ def load_authoring_config(root: Path) -> dict:
     return payload
 
 
+def update_collection_directory(root: Path, manifest: dict) -> None:
+    """Advertise a repository collection unless its authoring config opts out."""
+    if root.parent.name != "collections":
+        return
+    directory_path = root.parent.parent / "site" / "collections.json"
+    if not directory_path.is_file():
+        return
+
+    try:
+        directory = json.loads(directory_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(
+            f"Could not read collection directory: {directory_path}"
+        ) from error
+    entries = directory.get("collections")
+    if not isinstance(entries, list):
+        raise RuntimeError(
+            f"Collection directory has no collections list: {directory_path}"
+        )
+
+    collection_id = str(manifest["collection_id"])
+    authoring = load_authoring_config(root)
+    collection_config = authoring.get("collection", {})
+    listed = collection_config.get("listed", True) is not False
+    matching_indexes = [
+        index
+        for index, entry in enumerate(entries)
+        if isinstance(entry, dict) and entry.get("collection_id") == collection_id
+    ]
+    if not listed:
+        if matching_indexes:
+            directory["collections"] = [
+                entry
+                for entry in entries
+                if not (
+                    isinstance(entry, dict)
+                    and entry.get("collection_id") == collection_id
+                )
+            ]
+            atomic_write_text(
+                directory_path,
+                json.dumps(directory, ensure_ascii=False, indent=2) + "\n",
+            )
+            print(f"unlisted {manifest['title']} from the website directory")
+        return
+
+    base_url = str(directory.get("base_url") or "").rstrip("/")
+    if not base_url:
+        raise RuntimeError(
+            f"Collection directory has no base_url: {directory_path}"
+        )
+    media_modes = sorted(
+        {
+            str(media["delivery"])
+            for item in manifest.get("items", {}).values()
+            for media in item.get("media", [])
+            if media.get("delivery")
+        }
+    )
+    generated_entry = {
+        "collection_id": collection_id,
+        "title": str(manifest["title"]),
+        "description": str(
+            manifest.get("description")
+            or f"A Watchcraft collection with {len(manifest.get('items', {}))} videos."
+        ),
+        "media_modes": media_modes,
+        "manifest_url": f"{base_url}/collections/{root.name}/collection.json",
+    }
+    if matching_indexes:
+        first = matching_indexes[0]
+        existing = entries[first]
+        generated_entry["description"] = str(
+            existing.get("description") or generated_entry["description"]
+        )
+        entries[first] = {**existing, **generated_entry}
+        for index in reversed(matching_indexes[1:]):
+            del entries[index]
+    else:
+        entries.append(generated_entry)
+    atomic_write_text(
+        directory_path,
+        json.dumps(directory, ensure_ascii=False, indent=2) + "\n",
+    )
+    print(f"listed {manifest['title']} in the website directory")
+
+
 def build_collection_manifest(
     root: Path,
     analyses: list[dict],
@@ -636,6 +723,7 @@ def write_collection(root: Path) -> dict:
         metadata_root / "catalog.csv", render_csv(analyses, collection_manifest)
     )
     (metadata_root / "catalog.html").unlink(missing_ok=True)
+    update_collection_directory(root, collection_manifest)
     print(
         f"built {collection_manifest['title']} revision "
         f"{collection_manifest['revision']} for {len(analyses)} videos"

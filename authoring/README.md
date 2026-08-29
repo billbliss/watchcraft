@@ -70,6 +70,13 @@ The content repository should ignore `**/transcripts/`, downloaded media, caches
 credentials, and other private working material. Transcripts are private authoring
 inputs used to produce analysis; published collection items omit transcript references.
 
+When a workspace lives at `collections/<slug>/` in a content repository whose
+`site/collections.json` defines `base_url`, every successful build adds or updates
+the collection in that website directory. Existing hand-edited directory
+descriptions are preserved. Pass `--unlisted` to `youtube add` or `collection
+create` to publish a collection by URL without advertising it; the choice is
+stored in `watchcraft-authoring.json` and respected by later builds.
+
 Legacy local-media libraries continue to use the `Video Catalog/` metadata folder.
 
 ## Local credentials
@@ -108,7 +115,8 @@ The durable phase boundaries and failure guarantees are recorded in
 
 Use `--dry-run` to inspect the playlist without writing files or making AI calls,
 `--import-only` to postpone analysis, `--exclude VIDEO_ID` to omit a video, or
-`--limit N` to work with the first `N` selected videos.
+`--limit N` to work with the first `N` selected videos. Use `--unlisted` when the
+manifest should remain directly installable but absent from the website directory.
 
 If YouTube blocks caption requests from the current IP, Watchcraft stops after
 the first blocked request and preserves completed work. Retry from another
