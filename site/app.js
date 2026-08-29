@@ -131,19 +131,11 @@ function collectionCard(collection, stableAvailable) {
   actions.className = "collection-actions";
 
   if (collection.manifest_url) {
-    const preferredChannel = stableAvailable ? "release" : "beta";
     const open = document.createElement("a");
     open.className = "button";
-    open.href = collectionDeepLink(collection.manifest_url, preferredChannel);
+    open.href = collectionDeepLink(collection.manifest_url);
     open.textContent = stableAvailable ? "Open in Watchcraft" : "Open in Watchcraft Beta";
     actions.append(open);
-    if (stableAvailable) {
-      const openBeta = document.createElement("a");
-      openBeta.className = "button secondary";
-      openBeta.href = collectionDeepLink(collection.manifest_url, "beta");
-      openBeta.textContent = "Open in Beta";
-      actions.append(openBeta);
-    }
     const copy = document.createElement("button");
     copy.className = "button secondary";
     copy.type = "button";

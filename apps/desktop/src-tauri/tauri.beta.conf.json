@@ -18,7 +18,7 @@
   "plugins": {
     "deep-link": {
       "desktop": {
-        "schemes": ["watchcraft-beta"]
+        "schemes": ["watchcraft", "watchcraft-beta"]
       }
     }
   },

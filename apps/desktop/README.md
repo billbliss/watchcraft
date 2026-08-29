@@ -41,9 +41,15 @@ configured previously.
   private settings.
 - **Watchcraft Beta** is produced by prerelease tags such as
   `v0.1.0-beta.1`. It can be installed alongside the stable app and keeps a
-  separate collection registry.
+  separate collection registry. It accepts public `watchcraft://` collection
+  links as well as explicit `watchcraft-beta://` links.
 - **Watchcraft** is produced by stable tags such as `v0.1.0` and uses the
-  production identity and settings.
+  production identity and settings. It accepts public `watchcraft://` links.
+
+Published sites should use `watchcraft://`. Reserve `watchcraft-beta://` for a
+beta-only schema or behavior that must not be routed to stable. When both apps
+are installed, the operating system decides which one owns the shared public
+scheme; the beta-specific scheme always targets beta.
 
 To build the beta identity locally, run `npm run desktop:build:beta` from the
 repository root. See `docs/releases.md` for the tag-driven release process.

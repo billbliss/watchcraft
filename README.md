@@ -114,9 +114,9 @@ folder-installed binding but is not used as runtime authority. Development runs
 as **Watchcraft Dev** with its own app identity, so an installed or previously
 bundled Watchcraft copy cannot be mistaken for the freshly launched development
 build. Published collection pages can open the installer directly with
-`watchcraft://install?url=…`; beta builds use the separate
-`watchcraft-beta://install?url=…` scheme so both channels can be installed
-together.
+`watchcraft://install?url=…`. Both stable and beta builds accept that public
+scheme. Beta also retains `watchcraft-beta://install?url=…` for explicitly
+targeting beta when testing a schema or behavior that stable does not support.
 
 Before merging desktop playback changes, run the native smoke test:
 

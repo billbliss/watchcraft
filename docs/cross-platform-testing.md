@@ -76,9 +76,9 @@ Test all three media delivery modes on each OS:
 7. With Watchcraft closed, open a collection link from `watchcraft.stream` and
    confirm the browser launches the installed app, Watchcraft asks before
    installing, and the collection opens. Repeat while Watchcraft is already
-   running to verify single-instance delivery. Beta builds must handle
-   `watchcraft-beta://` without replacing the stable app's `watchcraft://`
-   registration.
+   running to verify single-instance delivery. Test a beta build with both the
+   public `watchcraft://` form and the explicit `watchcraft-beta://` form. Test a
+   stable build with `watchcraft://`.
 
 Installed Debian packages should register these links through the desktop entry.
 An AppImage may require desktop integration; moving it after registration can

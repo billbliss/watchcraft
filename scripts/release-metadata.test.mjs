@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
-  deepLinkScheme,
+  deepLinkSchemes,
   installerBundles,
   releaseMetadata,
   tauriChannelConfig,
@@ -49,7 +49,10 @@ test("beta builds use a separate product and application identity", () => {
   assert.equal(config.productName, "Watchcraft Beta");
   assert.equal(config.identifier, "app.watchcraft.reader.beta");
   assert.equal(config.version, "0.2.0-beta.1");
-  assert.deepEqual(config.plugins["deep-link"].desktop.schemes, ["watchcraft-beta"]);
+  assert.deepEqual(config.plugins["deep-link"].desktop.schemes, [
+    "watchcraft",
+    "watchcraft-beta",
+  ]);
 });
 
 test("release builds preserve the production identity", () => {
@@ -59,9 +62,9 @@ test("release builds preserve the production identity", () => {
   assert.deepEqual(tauriConfig.plugins["deep-link"].desktop.schemes, ["watchcraft"]);
 });
 
-test("beta and stable builds own separate collection link schemes", () => {
-  assert.equal(deepLinkScheme("beta"), "watchcraft-beta");
-  assert.equal(deepLinkScheme("release"), "watchcraft");
+test("beta accepts public links while retaining its channel-specific scheme", () => {
+  assert.deepEqual(deepLinkSchemes("beta"), ["watchcraft", "watchcraft-beta"]);
+  assert.deepEqual(deepLinkSchemes("release"), ["watchcraft"]);
 });
 
 test("desktop builds can display their packaged version", () => {

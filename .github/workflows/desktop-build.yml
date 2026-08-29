@@ -103,7 +103,7 @@ jobs:
       - name: Verify Linux media packaging
         if: runner.os == 'Linux'
         env:
-          WATCHCRAFT_DEEP_LINK_SCHEME: ${{ steps.release.outputs.scheme }}
+          WATCHCRAFT_DEEP_LINK_SCHEMES: ${{ steps.release.outputs.schemes }}
         shell: bash
         run: |
           set -euo pipefail
@@ -152,11 +152,14 @@ jobs:
 
           appimage_desktop="$(find "$extract_dir/squashfs-root" -type f -name '*.desktop' -print -quit)"
           deb_desktop="$(find "$deb_extract_dir/usr/share/applications" -type f -name '*.desktop' -print -quit)"
-          for desktop_file in "$appimage_desktop" "$deb_desktop"; do
-            if [[ -z "$desktop_file" ]] || ! grep -Fq "x-scheme-handler/$WATCHCRAFT_DEEP_LINK_SCHEME" "$desktop_file"; then
-              echo "The Linux package does not register $WATCHCRAFT_DEEP_LINK_SCHEME links." >&2
-              exit 1
-            fi
+          IFS=',' read -ra deep_link_schemes <<< "$WATCHCRAFT_DEEP_LINK_SCHEMES"
+          for deep_link_scheme in "${deep_link_schemes[@]}"; do
+            for desktop_file in "$appimage_desktop" "$deb_desktop"; do
+              if [[ -z "$desktop_file" ]] || ! grep -Fq "x-scheme-handler/$deep_link_scheme" "$desktop_file"; then
+                echo "The Linux package does not register $deep_link_scheme links." >&2
+                exit 1
+              fi
+            done
           done
 
       - name: Remove the extra DMG volume icon
@@ -166,7 +169,7 @@ jobs:
       - name: Verify the packaged macOS app signature
         if: runner.os == 'macOS'
         env:
-          WATCHCRAFT_DEEP_LINK_SCHEME: ${{ steps.release.outputs.scheme }}
+          WATCHCRAFT_DEEP_LINK_SCHEMES: ${{ steps.release.outputs.schemes }}
         shell: bash
         run: |
           set -euo pipefail
@@ -192,11 +195,14 @@ jobs:
           fi
 
           codesign --verify --deep --strict --verbose=2 "$app_path"
-          if ! /usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes' "$app_path/Contents/Info.plist" \
-            | grep -Fq "$WATCHCRAFT_DEEP_LINK_SCHEME"; then
-            echo "The macOS app does not register $WATCHCRAFT_DEEP_LINK_SCHEME links." >&2
-            exit 1
-          fi
+          url_types="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes' "$app_path/Contents/Info.plist")"
+          IFS=',' read -ra deep_link_schemes <<< "$WATCHCRAFT_DEEP_LINK_SCHEMES"
+          for deep_link_scheme in "${deep_link_schemes[@]}"; do
+            if ! grep -Fq "$deep_link_scheme" <<< "$url_types"; then
+              echo "The macOS app does not register $deep_link_scheme links." >&2
+              exit 1
+            fi
+          done
 
       - name: Upload installer
         uses: actions/upload-artifact@v7

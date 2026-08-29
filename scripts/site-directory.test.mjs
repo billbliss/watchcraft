@@ -26,16 +26,12 @@ test("omits archived collections from the public directory", () => {
   assert.deepEqual(visibleCollections(collections), [{ collection_id: "course" }]);
 });
 
-test("builds separate stable and beta collection install links", () => {
+test("builds stable public collection install links", () => {
   const manifestUrl = "https://example.com/courses/collection.json";
   const encoded = "https%3A%2F%2Fexample.com%2Fcourses%2Fcollection.json";
 
   assert.equal(
-    collectionDeepLink(manifestUrl, "release"),
+    collectionDeepLink(manifestUrl),
     `watchcraft://install?url=${encoded}`,
-  );
-  assert.equal(
-    collectionDeepLink(manifestUrl, "beta"),
-    `watchcraft-beta://install?url=${encoded}`,
   );
 });
