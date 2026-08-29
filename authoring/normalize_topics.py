@@ -648,7 +648,10 @@ def display_label_error(label: str, reserved_keys: set[str]) -> str | None:
 
 
 def deterministic_display_label(
-    label: str, reserved_keys: set[str]
+    label: str,
+    reserved_keys: set[str],
+    *,
+    preferred_label: str | None = None,
 ) -> str | None:
     normalized = " ".join(label.split())
     if ":" in normalized:
@@ -669,6 +672,67 @@ def deterministic_display_label(
         )
         if display_label_error(shortened, reserved_keys) is None:
             return shortened
+
+    # A model-generated label can be perfectly valid except that an earlier topic
+    # already claimed it. Preserve the model's natural wording and add a distinctive
+    # word from the canonical topic before falling back to a generic qualifier.
+    preferred = " ".join((preferred_label or "").split())
+    if preferred:
+        word_pattern = r"[A-Za-z0-9]+(?:[&+./-][A-Za-z0-9]+)*"
+        preferred_words = re.findall(word_pattern, preferred)
+        preferred_tokens = {
+            canonical_topic_key(word).rstrip("s")
+            for word in preferred_words
+        }
+        filler_words = {
+            "a",
+            "an",
+            "and",
+            "by",
+            "for",
+            "in",
+            "of",
+            "on",
+            "or",
+            "running",
+            "the",
+            "through",
+            "to",
+            "using",
+            "with",
+        }
+        distinctive_words = []
+        for word in re.findall(word_pattern, label):
+            token = canonical_topic_key(word).rstrip("s")
+            if token in filler_words or token in preferred_tokens:
+                continue
+            distinctive_words.append(word)
+
+        preferred_tails = [
+            preferred_words,
+            preferred_words[-3:],
+            preferred_words[-2:],
+        ]
+        for word in distinctive_words:
+            for tail in preferred_tails:
+                title_word = word[:1].upper() + word[1:]
+                disambiguated = " ".join([title_word, *tail])
+                if display_label_error(disambiguated, reserved_keys) is None:
+                    return disambiguated
+
+        for qualifier in ("Overview", "Guidance", "Methods", "Concepts"):
+            disambiguated = f"{preferred} {qualifier}"
+            if display_label_error(disambiguated, reserved_keys) is None:
+                return disambiguated
+
+        # This should be extremely rare, but a stable suffix guarantees that a large
+        # collection cannot be left unfinished solely because every natural fallback
+        # is already reserved.
+        digest = hashlib.sha256(canonical_topic_key(label).encode()).hexdigest()[:4].upper()
+        for tail in (preferred_words[:4], preferred_words[:3], preferred_words[:2]):
+            disambiguated = " ".join([*tail, digest])
+            if display_label_error(disambiguated, reserved_keys) is None:
+                return disambiguated
     return None
 
 
@@ -688,6 +752,7 @@ def label_batch(
         canonical_topic_key(label) for label in reserved_labels if label.strip()
     }
     rejected: dict[str, str] = {}
+    rejected_labels: dict[str, str] = {}
     for repair_attempt in range(4):
         source_ids = {f"D{index + 1:03d}": key for index, key in enumerate(remaining)}
         payload = {
@@ -726,6 +791,7 @@ def label_batch(
             error = display_label_error(label, reserved_keys)
             if error:
                 rejected[key] = f"{label!r}: {error}"
+                rejected_labels[key] = label
                 continue
             results[key] = label
             reserved_keys.add(canonical_topic_key(label))
@@ -741,7 +807,11 @@ def label_batch(
         )
     unresolved = []
     for key in remaining:
-        fallback = deterministic_display_label(canonical[key]["label"], reserved_keys)
+        fallback = deterministic_display_label(
+            canonical[key]["label"],
+            reserved_keys,
+            preferred_label=rejected_labels.get(key),
+        )
         if fallback is None:
             unresolved.append(key)
             continue

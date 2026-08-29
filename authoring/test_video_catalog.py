@@ -496,6 +496,56 @@ class FormattingTests(unittest.TestCase):
             ),
             "pan materials",
         )
+        self.assertEqual(
+            deterministic_display_label(
+                "drain pitch",
+                {"drain pitch"},
+                preferred_label="Drain Pitch",
+            ),
+            "Drain Pitch Overview",
+        )
+        self.assertEqual(
+            deterministic_display_label(
+                "drains running through a finished basement and foundation",
+                {"basement drain routing"},
+                preferred_label="Basement Drain Routing",
+            ),
+            "Finished Basement Drain Routing",
+        )
+
+    def test_duplicate_display_label_gets_deterministic_qualifier(self):
+        class FakeResponses:
+            def parse(self, **_kwargs):
+                generated = GeneratedDisplayLabels(
+                    labels=[
+                        DisplayLabelDecision(
+                            source_id="D001", label="Drain Pitch"
+                        )
+                    ]
+                )
+                return type("Response", (), {"output_parsed": generated})()
+
+        client = type("Client", (), {"responses": FakeResponses()})()
+        canonical = {
+            "drain pitch": {
+                "label": "drain pitch",
+                "family_ids": [],
+                "contexts": set(),
+            }
+        }
+
+        self.assertEqual(
+            label_batch(
+                client,
+                model="test-model",
+                keys=["drain pitch"],
+                canonical=canonical,
+                families={},
+                reserved_labels=["Drain Pitch"],
+                retries=0,
+            ),
+            {"drain pitch": "Drain Pitch Overview"},
+        )
 
     def test_display_label_failure_preserves_valid_partial_results(self):
         valid = "valid topic"
