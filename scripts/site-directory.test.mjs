@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   collectionDeepLink,
@@ -34,4 +35,11 @@ test("builds stable public collection install links", () => {
     collectionDeepLink(manifestUrl),
     `watchcraft://install?url=${encoded}`,
   );
+});
+
+test("loads the public directory from the blocker-resistant endpoint", () => {
+  const app = readFileSync(new URL("../site/app.js", import.meta.url), "utf8");
+
+  assert.match(app, /https:\/\/collections\.watchcraft\.stream\/directory\.json/);
+  assert.doesNotMatch(app, /collections\.watchcraft\.stream\/collections\.json/);
 });

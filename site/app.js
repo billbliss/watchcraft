@@ -2,7 +2,7 @@ import { collectionDeepLink, newestRelease, visibleCollections } from "./directo
 
 const RELEASES_URL = "https://api.github.com/repos/billbliss/watchcraft/releases?per_page=20";
 const RELEASES_PAGE = "https://github.com/billbliss/watchcraft/releases";
-const COLLECTIONS_URL = "https://collections.watchcraft.stream/collections.json";
+const COLLECTIONS_URL = "https://collections.watchcraft.stream/directory.json";
 
 const fallbackCollections = [
   {
