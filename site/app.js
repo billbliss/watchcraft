@@ -134,7 +134,8 @@ function collectionCard(collection, stableAvailable) {
     const open = document.createElement("a");
     open.className = "button";
     open.href = collectionDeepLink(collection.manifest_url);
-    open.textContent = stableAvailable ? "Open in Watchcraft" : "Open in Watchcraft Beta";
+    // open.textContent = stableAvailable ? "Open in Watchcraft" : "Open in Watchcraft Beta";
+    open.textContent = "Open in Watchcraft";
     actions.append(open);
     const copy = document.createElement("button");
     copy.className = "button secondary";
