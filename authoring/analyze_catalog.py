@@ -91,7 +91,7 @@ Catalog rules:
 - Write a specific, concise title and a substantive one-paragraph summary.
 - Provide 8-30 precise topics when the material supports them. Prefer actual tool names and
   demonstrated concepts over broad terms such as "photography".
-- Build a chronological technique timeline from transcript timestamps. Cover the important
+- Build a chronological timeline from transcript timestamps. Cover the important
   instruction without creating a chapter for every conversational aside.
 - Use HH:MM:SS timestamps copied or conservatively inferred from the transcript.
 - Featured techniques should identify the most distinctive, searchable demonstrations.

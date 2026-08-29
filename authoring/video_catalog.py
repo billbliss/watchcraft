@@ -322,7 +322,7 @@ def build_parser() -> argparse.ArgumentParser:
     transcribe_parser.add_argument("--force", action="store_true")
 
     analyze_parser = subparsers.add_parser(
-        "analyze", help="Create searchable summaries and technique timelines"
+        "analyze", help="Create searchable summaries and timelines"
     )
     analyze_parser.add_argument("--root", required=True, type=validated_root)
     analyze_selection = analyze_parser.add_mutually_exclusive_group(required=True)

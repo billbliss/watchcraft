@@ -886,7 +886,7 @@ export function App({ onCollectionLoaded, repository, sidebarFooter }: AppProps)
                   </section>
 
                   <section className="chapters-column">
-                    <h3>Technique timeline</h3>
+                    <h3>Timeline</h3>
                     {analysisError && <p className="inline-error">{analysisError}</p>}
                     {!analysis && !analysisError && <p className="muted">Loading chapters…</p>}
                     <div className="timeline">

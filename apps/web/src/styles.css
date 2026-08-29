@@ -279,7 +279,7 @@ button { color: inherit; }
 .detail { display: grid; min-width: 0; min-height: 0; grid-template-rows: minmax(190px, 52%) 8px minmax(190px, 1fr); }
 .detail.resizing-player,
 .detail.resizing-player * { cursor: row-resize !important; user-select: none !important; }
-.player-pane { display: grid; min-height: 0; padding: 18px 30px; place-items: center; background: #080b09; }
+.player-pane { display: grid; min-height: 0; padding: 12px 30px; place-items: center; background: #080b09; }
 .player-stack {
   display: grid;
   width: min(1100px, 100%);
@@ -288,7 +288,7 @@ button { color: inherit; }
   min-height: 0;
   grid-template-rows: minmax(0, 1fr) auto;
   overflow: hidden;
-  border: 1px solid #324038;
+  /* border: 1px solid #324038; */
   border-radius: 14px;
   background: #050706;
   box-shadow: 0 18px 50px #0008;
