@@ -5,11 +5,7 @@ use http::{
 use http_range::HttpRange;
 use percent_encoding::percent_decode_str;
 use std::error::Error;
-#[cfg(any(target_os = "linux", test))]
-use std::io::Write;
 use std::io::{Read, Seek, SeekFrom};
-#[cfg(any(target_os = "linux", test))]
-use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::RwLock;
@@ -23,7 +19,6 @@ use library::{LibraryLocation, RegisteredCollection};
 
 const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "webm", "mkv"];
 const MAX_STREAM_CHUNK: u64 = 2 * 1024 * 1024;
-#[cfg(not(target_os = "linux"))]
 const HOSTED_YOUTUBE_BRIDGE_URL: &str = "https://watchcraft.stream/youtube-player/";
 
 #[derive(Default)]
@@ -88,106 +83,8 @@ fn validated_external_url(requested_url: &str) -> Result<Url, String> {
     Ok(url)
 }
 
-#[cfg(any(target_os = "linux", test))]
-fn youtube_bridge_asset(path: &str) -> Option<(&'static [u8], &'static str)> {
-    match path {
-        "/youtube-player/" | "/youtube-player/index.html" => Some((
-            include_bytes!("../../../../site/youtube-player/index.html"),
-            "text/html; charset=utf-8",
-        )),
-        "/youtube-player/player-bridge.mjs" => Some((
-            include_bytes!("../../../../site/youtube-player/player-bridge.mjs"),
-            "text/javascript; charset=utf-8",
-        )),
-        "/youtube-player/player-frame.html" => Some((
-            include_bytes!("../../../../site/youtube-player/player-frame.html"),
-            "text/html; charset=utf-8",
-        )),
-        "/youtube-player/player-frame.mjs" => Some((
-            include_bytes!("../../../../site/youtube-player/player-frame.mjs"),
-            "text/javascript; charset=utf-8",
-        )),
-        _ => None,
-    }
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn serve_youtube_bridge_request(mut stream: TcpStream) -> Result<(), String> {
-    let mut request = [0_u8; 8192];
-    let read = stream
-        .read(&mut request)
-        .map_err(|error| format!("Could not read a player bridge request: {error}"))?;
-    let request_line = String::from_utf8_lossy(&request[..read]);
-    let mut fields = request_line
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .split_whitespace();
-    let method = fields.next().unwrap_or_default();
-    let path = fields
-        .next()
-        .unwrap_or_default()
-        .split('?')
-        .next()
-        .unwrap_or_default();
-    let asset = (method == "GET" || method == "HEAD")
-        .then(|| youtube_bridge_asset(path))
-        .flatten();
-    let (status, body, content_type) = match asset {
-        Some((body, content_type)) => ("200 OK", body, content_type),
-        None => (
-            "404 Not Found",
-            b"Not found".as_slice(),
-            "text/plain; charset=utf-8",
-        ),
-    };
-    let headers = format!(
-        "HTTP/1.1 {status}\r\n\
-         Content-Length: {}\r\n\
-         Content-Type: {content_type}\r\n\
-         Cache-Control: no-store\r\n\
-         Content-Security-Policy: default-src 'self'; frame-src https://www.youtube.com https://www.youtube-nocookie.com; script-src 'self'; style-src 'self' 'unsafe-inline'\r\n\
-         Referrer-Policy: strict-origin-when-cross-origin\r\n\
-         X-Content-Type-Options: nosniff\r\n\
-         Connection: close\r\n\r\n",
-        body.len()
-    );
-    stream
-        .write_all(headers.as_bytes())
-        .and_then(|_| {
-            if method == "HEAD" {
-                Ok(())
-            } else {
-                stream.write_all(body)
-            }
-        })
-        .map_err(|error| format!("Could not send a player bridge response: {error}"))
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn start_youtube_bridge_server() -> Result<String, String> {
-    let listener = TcpListener::bind(("127.0.0.1", 0))
-        .map_err(|error| format!("Could not start the YouTube player bridge: {error}"))?;
-    let port = listener
-        .local_addr()
-        .map_err(|error| format!("Could not locate the YouTube player bridge: {error}"))?
-        .port();
-    std::thread::Builder::new()
-        .name("watchcraft-youtube-bridge".into())
-        .spawn(move || {
-            for stream in listener.incoming() {
-                match stream {
-                    Ok(stream) => {
-                        if let Err(error) = serve_youtube_bridge_request(stream) {
-                            eprintln!("Watchcraft YouTube player bridge failed: {error}");
-                        }
-                    }
-                    Err(error) => eprintln!("Watchcraft YouTube player bridge failed: {error}"),
-                }
-            }
-        })
-        .map_err(|error| format!("Could not run the YouTube player bridge: {error}"))?;
-    Ok(format!("http://127.0.0.1:{port}/youtube-player/"))
+fn configured_youtube_bridge_base_url() -> String {
+    HOSTED_YOUTUBE_BRIDGE_URL.to_string()
 }
 
 fn validated_video_path<R: Runtime>(
@@ -734,11 +631,7 @@ fn finish_playback_smoke(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    #[cfg(target_os = "linux")]
-    let configured_youtube_bridge_base_url =
-        start_youtube_bridge_server().expect("could not start the local YouTube player bridge");
-    #[cfg(not(target_os = "linux"))]
-    let configured_youtube_bridge_base_url = HOSTED_YOUTUBE_BRIDGE_URL.to_string();
+    let configured_youtube_bridge_base_url = configured_youtube_bridge_base_url();
 
     let builder = tauri::Builder::default();
     #[cfg(desktop)]
@@ -771,6 +664,20 @@ pub fn run() {
                 });
             responder.respond(response);
         })
+        .setup(|_app| {
+            #[cfg(target_os = "linux")]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+
+                // Debian desktop databases do not always refresh immediately after a
+                // sideloaded package is installed. Registering at startup creates a
+                // per-user handler and makes both cold- and warm-start links reliable.
+                if let Err(error) = _app.deep_link().register_all() {
+                    eprintln!("Watchcraft could not register its deep-link handlers: {error}");
+                }
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             open_video,
             open_external_url,
@@ -794,15 +701,12 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_video_roots, is_video_path, is_within_approved_roots,
-        start_youtube_bridge_server, validated_external_url, video_content_type,
+        canonical_video_roots, configured_youtube_bridge_base_url, is_video_path,
+        is_within_approved_roots, validated_external_url, video_content_type,
     };
     use std::fs;
-    use std::io::{Read, Write};
-    use std::net::TcpStream;
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
-    use url::Url;
 
     #[cfg(target_os = "macos")]
     use super::{macos_application_name, macos_handler_for_content_type};
@@ -828,24 +732,11 @@ mod tests {
     }
 
     #[test]
-    fn local_youtube_bridge_serves_the_player_with_a_web_referrer_policy() {
-        let base_url = start_youtube_bridge_server().expect("start local player bridge");
-        let url = Url::parse(&base_url).expect("valid local player bridge URL");
-        let mut stream = TcpStream::connect(("127.0.0.1", url.port().expect("bridge port")))
-            .expect("connect to local player bridge");
-        stream
-            .write_all(
-                b"GET /youtube-player/ HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
-            )
-            .expect("request local player bridge");
-        let mut response = String::new();
-        stream
-            .read_to_string(&mut response)
-            .expect("read local player bridge response");
-
-        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
-        assert!(response.contains("Referrer-Policy: strict-origin-when-cross-origin\r\n"));
-        assert!(response.contains("data-youtube-player-bridge"));
+    fn desktop_youtube_playback_uses_the_hosted_https_bridge() {
+        assert_eq!(
+            configured_youtube_bridge_base_url(),
+            "https://watchcraft.stream/youtube-player/"
+        );
     }
 
     #[test]

@@ -71,6 +71,11 @@ test("desktop builds can display their packaged version", () => {
   assert.ok(desktopCapabilities.permissions.includes("core:app:allow-version"));
 });
 
+test("desktop builds can subscribe to forwarded deep-link events", () => {
+  assert.ok(desktopCapabilities.permissions.includes("core:event:allow-listen"));
+  assert.ok(desktopCapabilities.permissions.includes("core:event:allow-unlisten"));
+});
+
 test("desktop builds enable and permit the standard zoom shortcuts", () => {
   assert.equal(tauriConfig.app.windows[0].zoomHotkeysEnabled, true);
   assert.equal(betaTauriConfig.app.windows[0].zoomHotkeysEnabled, true);
