@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   deepLinkSchemes,
   installerBundles,
+  linuxPackageIdentity,
   releaseMetadata,
   tauriChannelConfig,
 } from "./release-metadata.mjs";
@@ -48,6 +49,7 @@ test("beta builds use a separate product and application identity", () => {
   const config = tauriChannelConfig({ channel: "beta", version: "0.2.0-beta.1" });
   assert.equal(config.productName, "Watchcraft Beta");
   assert.equal(config.identifier, "app.watchcraft.reader.beta");
+  assert.equal(config.mainBinaryName, "watchcraft-beta");
   assert.equal(config.version, "0.2.0-beta.1");
   assert.deepEqual(config.plugins["deep-link"].desktop.schemes, [
     "watchcraft",
@@ -56,10 +58,48 @@ test("beta builds use a separate product and application identity", () => {
 });
 
 test("release builds preserve the production identity", () => {
-  assert.deepEqual(tauriChannelConfig({ channel: "release", version: "1.0.0" }), {
-    version: "1.0.0",
-  });
+  const config = tauriChannelConfig({ channel: "release", version: "1.0.0" });
+  assert.equal(config.version, "1.0.0");
+  assert.deepEqual(config.bundle.linux.deb.conflicts, [
+    "watchcraft-beta (<= 0.2.0-beta.2)",
+  ]);
+  assert.deepEqual(config.bundle.linux.deb.replaces, [
+    "watchcraft-beta (<= 0.2.0-beta.2)",
+  ]);
   assert.deepEqual(tauriConfig.plugins["deep-link"].desktop.schemes, ["watchcraft"]);
+});
+
+test("Developer ID builds allow Tauri to infer the imported certificate identity", () => {
+  const betaConfig = tauriChannelConfig(
+    { channel: "beta", version: "0.2.0-beta.1" },
+    { developerIdSigning: true },
+  );
+  const releaseConfig = tauriChannelConfig(
+    { channel: "release", version: "1.0.0" },
+    { developerIdSigning: true },
+  );
+  assert.equal(betaConfig.bundle.macOS.signingIdentity, null);
+  assert.equal(releaseConfig.bundle.macOS.signingIdentity, null);
+  assert.equal(
+    tauriChannelConfig({ channel: "beta", version: "0.2.0-beta.1" })
+      .bundle.macOS,
+    undefined,
+  );
+});
+
+test("Linux beta and release packages install distinct executables", () => {
+  assert.deepEqual(linuxPackageIdentity("beta"), {
+    packageName: "watchcraft-beta",
+    binaryName: "watchcraft-beta",
+    desktopName: "Watchcraft Beta.desktop",
+    metainfoName: "app.watchcraft.reader.beta.metainfo.xml",
+  });
+  assert.deepEqual(linuxPackageIdentity("release"), {
+    packageName: "watchcraft",
+    binaryName: "watchcraft",
+    desktopName: "Watchcraft.desktop",
+    metainfoName: "app.watchcraft.reader.metainfo.xml",
+  });
 });
 
 test("beta accepts public links while retaining its channel-specific scheme", () => {
@@ -105,13 +145,18 @@ test("Linux packages retain the media runtime required for embedded playback", (
 });
 
 test("Linux Debian packages include channel-specific AppStream metadata", () => {
-  const destination = "/usr/share/metainfo/app.watchcraft.reader.metainfo.xml";
+  const stableDestination = "/usr/share/metainfo/app.watchcraft.reader.metainfo.xml";
+  const betaDestination = "/usr/share/metainfo/app.watchcraft.reader.beta.metainfo.xml";
   assert.equal(
-    tauriConfig.bundle.linux.deb.files[destination],
+    tauriConfig.bundle.linux.deb.files[stableDestination],
     "linux/app.watchcraft.reader.metainfo.xml",
   );
   assert.equal(
-    betaTauriConfig.bundle.linux.deb.files[destination],
+    betaTauriConfig.bundle.linux.deb.files[stableDestination],
+    null,
+  );
+  assert.equal(
+    betaTauriConfig.bundle.linux.deb.files[betaDestination],
     "linux/app.watchcraft.reader.beta.metainfo.xml",
   );
 });

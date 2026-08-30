@@ -5,6 +5,7 @@ const TAG_PATTERN = /^v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/;
 const BETA_CONFIG = JSON.parse(
   readFileSync(new URL("../apps/desktop/src-tauri/tauri.beta.conf.json", import.meta.url), "utf8"),
 );
+const LEGACY_BETA_PACKAGE = "watchcraft-beta (<= 0.2.0-beta.2)";
 
 export function releaseMetadata({
   refType = "",
@@ -35,10 +36,55 @@ export function releaseMetadata({
   };
 }
 
-export function tauriChannelConfig(metadata) {
+export function tauriChannelConfig(metadata, { developerIdSigning = false } = {}) {
+  const macOsBundle = developerIdSigning
+    ? {
+        macOS: {
+          signingIdentity: null,
+        },
+      }
+    : {};
   return metadata.channel === "beta"
-    ? { ...BETA_CONFIG, version: metadata.version }
-    : { version: metadata.version };
+    ? {
+        ...BETA_CONFIG,
+        version: metadata.version,
+        bundle: {
+          ...BETA_CONFIG.bundle,
+          ...macOsBundle,
+        },
+      }
+    : {
+        version: metadata.version,
+        bundle: {
+          ...macOsBundle,
+          linux: {
+            deb: {
+              conflicts: [LEGACY_BETA_PACKAGE],
+              replaces: [LEGACY_BETA_PACKAGE],
+            },
+          },
+        },
+      };
+}
+
+export function linuxPackageIdentity(channel) {
+  if (channel === "beta") {
+    return {
+      packageName: "watchcraft-beta",
+      binaryName: "watchcraft-beta",
+      desktopName: "Watchcraft Beta.desktop",
+      metainfoName: "app.watchcraft.reader.beta.metainfo.xml",
+    };
+  }
+  if (channel === "release") {
+    return {
+      packageName: "watchcraft",
+      binaryName: "watchcraft",
+      desktopName: "Watchcraft.desktop",
+      metainfoName: "app.watchcraft.reader.metainfo.xml",
+    };
+  }
+  throw new Error(`Unknown build channel: ${channel || "unknown"}.`);
 }
 
 export function installerBundles({ runnerOs, channel }) {
@@ -68,16 +114,22 @@ function run() {
     requestedChannel: process.env.WATCHCRAFT_CHANNEL || "beta",
     baseVersion: rootPackage.version,
   });
-  writeFileSync(outputPath, `${JSON.stringify(tauriChannelConfig(metadata), null, 2)}\n`);
+  writeFileSync(
+    outputPath,
+    `${JSON.stringify(tauriChannelConfig(metadata, {
+      developerIdSigning: process.env.WATCHCRAFT_DEVELOPER_ID_SIGNING === "true",
+    }), null, 2)}\n`,
+  );
 
   if (process.env.GITHUB_OUTPUT) {
     const bundles = installerBundles({
       runnerOs: process.env.RUNNER_OS,
       channel: metadata.channel,
     });
+    const linuxIdentity = linuxPackageIdentity(metadata.channel);
     appendFileSync(
       process.env.GITHUB_OUTPUT,
-      `channel=${metadata.channel}\nprerelease=${metadata.prerelease}\nversion=${metadata.version}\nbundles=${bundles}\nschemes=${deepLinkSchemes(metadata.channel).join(",")}\n`,
+      `channel=${metadata.channel}\nprerelease=${metadata.prerelease}\nversion=${metadata.version}\nbundles=${bundles}\nschemes=${deepLinkSchemes(metadata.channel).join(",")}\npackage_name=${linuxIdentity.packageName}\nbinary_name=${linuxIdentity.binaryName}\ndesktop_name=${linuxIdentity.desktopName}\nmetainfo_name=${linuxIdentity.metainfoName}\n`,
     );
   }
   process.stdout.write(

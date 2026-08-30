@@ -3,13 +3,20 @@
   <id>app.watchcraft.reader</id>
   <name>Watchcraft</name>
   <summary>Learn a craft by watching</summary>
+  <developer_name>Bill Bliss</developer_name>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
   <description>
-    <p>Browse and search instructional video collections, then play local or YouTube lessons.</p>
+    <p>Watchcraft is a local-first catalog that makes instructional video collections searchable by concept without uploading your media.</p>
+    <p>Move directly to the chapter where a technique is taught and play lessons from local files or public YouTube sources.</p>
   </description>
   <launchable type="desktop-id">Watchcraft.desktop</launchable>
   <url type="homepage">https://watchcraft.stream/</url>
   <url type="bugtracker">https://github.com/billbliss/watchcraft/issues</url>
+  <keywords>
+    <keyword>instructional video</keyword>
+    <keyword>learning</keyword>
+    <keyword>catalog</keyword>
+  </keywords>
   <content_rating type="oars-1.1"/>
 </component>

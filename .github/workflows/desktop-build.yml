@@ -32,6 +32,8 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    env:
+      WATCHCRAFT_APPLE_SIGNING: ${{ github.event_name != 'pull_request' && secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_ID != '' && secrets.APPLE_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -62,6 +64,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            appstream \
             gstreamer1.0-libav \
             gstreamer1.0-plugins-bad \
             gstreamer1.0-plugins-good \
@@ -92,18 +95,35 @@ jobs:
         id: release
         env:
           WATCHCRAFT_CHANNEL: ${{ inputs.channel || 'beta' }}
+          WATCHCRAFT_DEVELOPER_ID_SIGNING: ${{ runner.os == 'macOS' && env.WATCHCRAFT_APPLE_SIGNING == 'true' }}
         run: node scripts/release-metadata.mjs apps/desktop/src-tauri/tauri.workflow.conf.json
 
       - name: Run unit tests
         run: npm test
 
       - name: Build native installer
+        if: runner.os != 'macOS' || env.WATCHCRAFT_APPLE_SIGNING != 'true'
         run: npm exec --workspace @watchcraft/desktop -- tauri build --config src-tauri/tauri.workflow.conf.json --bundles ${{ steps.release.outputs.bundles }}
 
-      - name: Verify Linux media packaging
+      - name: Build signed and notarized macOS installer
+        if: runner.os == 'macOS' && env.WATCHCRAFT_APPLE_SIGNING == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: npm exec --workspace @watchcraft/desktop -- tauri build --config src-tauri/tauri.workflow.conf.json --bundles ${{ steps.release.outputs.bundles }}
+
+      - name: Verify Linux packaging
         if: runner.os == 'Linux'
         env:
+          WATCHCRAFT_BINARY_NAME: ${{ steps.release.outputs.binary_name }}
+          WATCHCRAFT_CHANNEL: ${{ steps.release.outputs.channel }}
           WATCHCRAFT_DEEP_LINK_SCHEMES: ${{ steps.release.outputs.schemes }}
+          WATCHCRAFT_DESKTOP_NAME: ${{ steps.release.outputs.desktop_name }}
+          WATCHCRAFT_METAINFO_NAME: ${{ steps.release.outputs.metainfo_name }}
+          WATCHCRAFT_PACKAGE_NAME: ${{ steps.release.outputs.package_name }}
         shell: bash
         run: |
           set -euo pipefail
@@ -113,6 +133,22 @@ jobs:
           if [[ -z "$appimage_path" || -z "$deb_path" ]]; then
             echo "The Linux build did not produce both an AppImage and a Debian package." >&2
             exit 1
+          fi
+
+          deb_package_name="$(dpkg-deb -f "$deb_path" Package)"
+          if [[ "$deb_package_name" != "$WATCHCRAFT_PACKAGE_NAME" ]]; then
+            echo "Expected Debian package $WATCHCRAFT_PACKAGE_NAME, found $deb_package_name." >&2
+            exit 1
+          fi
+
+          if [[ "$WATCHCRAFT_CHANNEL" == "release" ]]; then
+            legacy_beta="watchcraft-beta (<= 0.2.0-beta.2)"
+            deb_conflicts="$(dpkg-deb -f "$deb_path" Conflicts)"
+            deb_replaces="$(dpkg-deb -f "$deb_path" Replaces)"
+            if [[ "$deb_conflicts" != *"$legacy_beta"* || "$deb_replaces" != *"$legacy_beta"* ]]; then
+              echo "The stable Debian package does not replace legacy beta packages." >&2
+              exit 1
+            fi
           fi
 
           extract_dir="$(mktemp -d)"
@@ -127,6 +163,12 @@ jobs:
             cd "$extract_dir"
             "$appimage_path" --appimage-extract >/dev/null
           )
+
+          appimage_binary="$(find "$extract_dir/squashfs-root" -type f -path "*/bin/$WATCHCRAFT_BINARY_NAME" -print -quit)"
+          if [[ -z "$appimage_binary" ]]; then
+            echo "The AppImage does not contain $WATCHCRAFT_BINARY_NAME." >&2
+            exit 1
+          fi
 
           plugin_dir="$(find "$extract_dir/squashfs-root/usr/lib" -type d -name 'gstreamer-1.0' -print -quit)"
           if [[ -z "$plugin_dir" ]] || ! find "$plugin_dir" -type f -print -quit | grep -q .; then
@@ -144,14 +186,36 @@ jobs:
 
           deb_extract_dir="$extract_dir/deb"
           dpkg-deb --extract "$deb_path" "$deb_extract_dir"
-          metainfo_path="$(find "$deb_extract_dir/usr/share/metainfo" -type f -name '*.metainfo.xml' -print -quit)"
-          if [[ -z "$metainfo_path" ]]; then
-            echo "The Debian package is missing AppStream metadata for Ubuntu App Center." >&2
+          if [[ ! -x "$deb_extract_dir/usr/bin/$WATCHCRAFT_BINARY_NAME" ]]; then
+            echo "The Debian package does not contain /usr/bin/$WATCHCRAFT_BINARY_NAME." >&2
             exit 1
           fi
+          other_binary="watchcraft"
+          if [[ "$WATCHCRAFT_BINARY_NAME" == "watchcraft" ]]; then
+            other_binary="watchcraft-beta"
+          fi
+          if [[ -e "$deb_extract_dir/usr/bin/$other_binary" ]]; then
+            echo "The Debian package unexpectedly contains /usr/bin/$other_binary." >&2
+            exit 1
+          fi
+          metainfo_path="$deb_extract_dir/usr/share/metainfo/$WATCHCRAFT_METAINFO_NAME"
+          if [[ ! -f "$metainfo_path" ]]; then
+            echo "The Debian package is missing $WATCHCRAFT_METAINFO_NAME for Ubuntu App Center." >&2
+            exit 1
+          fi
+          metainfo_count="$(find "$deb_extract_dir/usr/share/metainfo" -type f -name 'app.watchcraft.reader*.metainfo.xml' | wc -l)"
+          if [[ "$metainfo_count" -ne 1 ]]; then
+            echo "The Debian package contains metadata belonging to another Watchcraft channel." >&2
+            exit 1
+          fi
+          appstreamcli validate "$metainfo_path"
 
-          appimage_desktop="$(find "$extract_dir/squashfs-root" -type f -name '*.desktop' -print -quit)"
-          deb_desktop="$(find "$deb_extract_dir/usr/share/applications" -type f -name '*.desktop' -print -quit)"
+          appimage_desktop="$extract_dir/squashfs-root/usr/share/applications/$WATCHCRAFT_DESKTOP_NAME"
+          deb_desktop="$deb_extract_dir/usr/share/applications/$WATCHCRAFT_DESKTOP_NAME"
+          if [[ ! -f "$appimage_desktop" || ! -f "$deb_desktop" ]]; then
+            echo "The Linux package is missing $WATCHCRAFT_DESKTOP_NAME." >&2
+            exit 1
+          fi
           IFS=',' read -ra deep_link_schemes <<< "$WATCHCRAFT_DEEP_LINK_SCHEMES"
           for deep_link_scheme in "${deep_link_schemes[@]}"; do
             for desktop_file in "$appimage_desktop" "$deb_desktop"; do
@@ -161,14 +225,36 @@ jobs:
               fi
             done
           done
+          for desktop_file in "$appimage_desktop" "$deb_desktop"; do
+            if ! grep -Eq "^Exec=.*${WATCHCRAFT_BINARY_NAME}([[:space:]\"%]|$)" "$desktop_file"; then
+              echo "The Linux desktop launcher does not invoke $WATCHCRAFT_BINARY_NAME." >&2
+              exit 1
+            fi
+            if ! grep -Fxq "Icon=$WATCHCRAFT_BINARY_NAME" "$desktop_file"; then
+              echo "The Linux desktop launcher does not use the channel-specific icon." >&2
+              exit 1
+            fi
+            if ! grep -Fxq "StartupWMClass=$WATCHCRAFT_BINARY_NAME" "$desktop_file"; then
+              echo "The Linux desktop launcher does not use the channel-specific window class." >&2
+              exit 1
+            fi
+          done
 
-      - name: Remove the extra DMG volume icon
-        if: runner.os == 'macOS'
-        run: node scripts/remove-dmg-volume-icon.mjs
+          icon_path="$(find "$deb_extract_dir/usr/share/icons" -type f -path "*/apps/$WATCHCRAFT_BINARY_NAME.png" -print -quit)"
+          if [[ -z "$icon_path" ]]; then
+            echo "The Debian package does not contain its channel-specific icon." >&2
+            exit 1
+          fi
+          other_icon="$(find "$deb_extract_dir/usr/share/icons" -type f -path "*/apps/$other_binary.png" -print -quit)"
+          if [[ -n "$other_icon" ]]; then
+            echo "The Debian package unexpectedly contains the other channel's icon." >&2
+            exit 1
+          fi
 
-      - name: Verify the packaged macOS app signature
+      - name: Verify the packaged macOS app signature and notarization
         if: runner.os == 'macOS'
         env:
+          WATCHCRAFT_EXPECT_NOTARIZATION: ${{ env.WATCHCRAFT_APPLE_SIGNING }}
           WATCHCRAFT_DEEP_LINK_SCHEMES: ${{ steps.release.outputs.schemes }}
         shell: bash
         run: |
@@ -195,6 +281,11 @@ jobs:
           fi
 
           codesign --verify --deep --strict --verbose=2 "$app_path"
+          if [[ "$WATCHCRAFT_EXPECT_NOTARIZATION" == "true" ]]; then
+            spctl --assess --type execute --verbose=2 "$app_path"
+            xcrun stapler validate "$app_path"
+            codesign --verify --strict --verbose=2 "$dmg_path"
+          fi
           url_types="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes' "$app_path/Contents/Info.plist")"
           IFS=',' read -ra deep_link_schemes <<< "$WATCHCRAFT_DEEP_LINK_SCHEMES"
           for deep_link_scheme in "${deep_link_schemes[@]}"; do

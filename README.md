@@ -147,6 +147,6 @@ directory; stable tags publish the production identity. See the
 compatibility smoke checklist.
 
 The public landing page is deployed from `site/` to
-<https://billbliss.github.io/watchcraft/>. It discovers permanent installer
+<https://watchcraft.stream/>. It discovers permanent installer
 assets from GitHub Releases and the optional advertised collection directory
 from `watchcraft-collections`.

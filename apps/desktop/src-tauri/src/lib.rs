@@ -87,6 +87,114 @@ fn configured_youtube_bridge_base_url() -> String {
     HOSTED_YOUTUBE_BRIDGE_URL.to_string()
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn linux_deep_link_schemes_to_register(
+    is_beta: bool,
+    public_handler_is_usable: bool,
+) -> Vec<&'static str> {
+    if !is_beta {
+        return vec!["watchcraft"];
+    }
+
+    let mut schemes = vec!["watchcraft-beta"];
+    if !public_handler_is_usable {
+        schemes.push("watchcraft");
+    }
+    schemes
+}
+
+#[cfg(target_os = "linux")]
+fn linux_default_deep_link_handler(scheme: &str) -> Option<String> {
+    let mime_type = format!("x-scheme-handler/{scheme}");
+    let output = Command::new("xdg-mime")
+        .args(["query", "default", mime_type.as_str()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let handler = String::from_utf8(output.stdout).ok()?;
+    let handler = handler.trim();
+    (!handler.is_empty()).then(|| handler.to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_desktop_exec_command(contents: &str) -> Option<&str> {
+    let value = contents
+        .lines()
+        .find_map(|line| line.strip_prefix("Exec="))?
+        .trim();
+    if let Some(quoted) = value.strip_prefix('"') {
+        quoted
+            .split('"')
+            .next()
+            .filter(|command| !command.is_empty())
+    } else {
+        value
+            .split_ascii_whitespace()
+            .next()
+            .filter(|command| !command.is_empty())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_command_exists(command: &str) -> bool {
+    let command_path = Path::new(command);
+    if command_path.is_absolute() || command.contains('/') {
+        return command_path.is_file();
+    }
+
+    std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).any(|directory| directory.join(command).is_file()))
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_desktop_handler_is_usable<R: Runtime>(app: &tauri::AppHandle<R>, handler: &str) -> bool {
+    let handler_path = Path::new(handler);
+    if handler_path.file_name().and_then(|name| name.to_str()) != Some(handler) {
+        return false;
+    }
+
+    let mut application_directories = Vec::new();
+    if let Ok(data_dir) = app.path().data_dir() {
+        application_directories.push(data_dir.join("applications"));
+    }
+    if let Some(data_dirs) = std::env::var_os("XDG_DATA_DIRS") {
+        application_directories.extend(
+            std::env::split_paths(&data_dirs).map(|directory| directory.join("applications")),
+        );
+    } else {
+        application_directories.push(PathBuf::from("/usr/local/share/applications"));
+        application_directories.push(PathBuf::from("/usr/share/applications"));
+    }
+
+    application_directories.into_iter().any(|directory| {
+        std::fs::read_to_string(directory.join(handler))
+            .ok()
+            .and_then(|contents| linux_desktop_exec_command(&contents).map(str::to_string))
+            .map(|command| linux_command_exists(&command))
+            .unwrap_or(false)
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn register_linux_deep_link_handlers<R: Runtime>(app: &tauri::AppHandle<R>) {
+    use tauri_plugin_deep_link::DeepLinkExt;
+
+    let is_beta = app.config().identifier == "app.watchcraft.reader.beta";
+    let public_handler_is_usable = linux_default_deep_link_handler("watchcraft")
+        .map(|handler| linux_desktop_handler_is_usable(app, &handler))
+        .unwrap_or(false);
+
+    for scheme in linux_deep_link_schemes_to_register(is_beta, public_handler_is_usable) {
+        if let Err(error) = app.deep_link().register(scheme) {
+            eprintln!("Watchcraft could not register {scheme} links: {error}");
+        }
+    }
+}
+
 fn validated_video_path<R: Runtime>(
     app: &tauri::AppHandle<R>,
     requested_path: &str,
@@ -667,14 +775,12 @@ pub fn run() {
         .setup(|_app| {
             #[cfg(target_os = "linux")]
             {
-                use tauri_plugin_deep_link::DeepLinkExt;
-
                 // Debian desktop databases do not always refresh immediately after a
                 // sideloaded package is installed. Registering at startup creates a
                 // per-user handler and makes both cold- and warm-start links reliable.
-                if let Err(error) = _app.deep_link().register_all() {
-                    eprintln!("Watchcraft could not register its deep-link handlers: {error}");
-                }
+                // Beta only claims the public scheme when no working handler exists,
+                // so it remains a website-link fallback without stealing stable's links.
+                register_linux_deep_link_handlers(_app.handle());
             }
             Ok(())
         })
@@ -702,7 +808,8 @@ pub fn run() {
 mod tests {
     use super::{
         canonical_video_roots, configured_youtube_bridge_base_url, is_video_path,
-        is_within_approved_roots, validated_external_url, video_content_type,
+        is_within_approved_roots, linux_deep_link_schemes_to_register, validated_external_url,
+        video_content_type,
     };
     use std::fs;
     use std::path::Path;
@@ -736,6 +843,30 @@ mod tests {
         assert_eq!(
             configured_youtube_bridge_base_url(),
             "https://watchcraft.stream/youtube-player/"
+        );
+    }
+
+    #[test]
+    fn stable_claims_the_public_linux_deep_link_scheme() {
+        assert_eq!(
+            linux_deep_link_schemes_to_register(false, false),
+            vec!["watchcraft"]
+        );
+    }
+
+    #[test]
+    fn beta_preserves_a_working_public_linux_deep_link_handler() {
+        assert_eq!(
+            linux_deep_link_schemes_to_register(true, true),
+            vec!["watchcraft-beta"]
+        );
+    }
+
+    #[test]
+    fn beta_falls_back_for_public_linux_deep_links_when_needed() {
+        assert_eq!(
+            linux_deep_link_schemes_to_register(true, false),
+            vec!["watchcraft-beta", "watchcraft"]
         );
     }
 

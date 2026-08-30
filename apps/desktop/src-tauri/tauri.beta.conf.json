@@ -1,5 +1,6 @@
 {
   "productName": "Watchcraft Beta",
+  "mainBinaryName": "watchcraft-beta",
   "identifier": "app.watchcraft.reader.beta",
   "app": {
     "windows": [
@@ -26,7 +27,8 @@
     "linux": {
       "deb": {
         "files": {
-          "/usr/share/metainfo/app.watchcraft.reader.metainfo.xml": "linux/app.watchcraft.reader.beta.metainfo.xml"
+          "/usr/share/metainfo/app.watchcraft.reader.metainfo.xml": null,
+          "/usr/share/metainfo/app.watchcraft.reader.beta.metainfo.xml": "linux/app.watchcraft.reader.beta.metainfo.xml"
         }
       }
     }
