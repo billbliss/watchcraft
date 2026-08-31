@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -16,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
+from pydantic import BaseModel, ConfigDict
 
 # Load local authoring credentials while preserving explicit shell overrides.
 load_dotenv(Path(__file__).resolve().parents[1] / ".env.local")
@@ -27,6 +29,7 @@ from analyze_catalog import (
     create_openai_client,
     discover_transcript_states,
     load_transcript_state,
+    transcript_has_timeline_evidence,
 )
 from build_collection import write_collection
 from normalize_topics import (
@@ -49,6 +52,19 @@ USER_AGENT = "Mozilla/5.0 (compatible; WatchcraftAuthor/0.1; +https://watchcraft
 YOUTUBE_PROXY_URL_ENV = "WATCHCRAFT_YOUTUBE_PROXY_URL"
 YOUTUBE_WEBSHARE_USERNAME_ENV = "WATCHCRAFT_YOUTUBE_WEBSHARE_USERNAME"
 YOUTUBE_WEBSHARE_PASSWORD_ENV = "WATCHCRAFT_YOUTUBE_WEBSHARE_PASSWORD"
+CATEGORY_SYSTEM_PROMPT = """Classify an instructional-video collection into one broad, durable category.
+
+Reuse one of the supplied existing categories exactly whenever it reasonably fits. Create a new
+category only when none of the existing choices describes the collection well. New category labels
+must be concise Title Case noun phrases, no more than 40 characters, and broad enough to reuse for
+future collections. Return only the structured result."""
+
+
+class CategoryProposal(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    category: str
+    rationale: str
 
 
 class YouTubeIpBlocked(RuntimeError):
@@ -509,6 +525,131 @@ def collection_workspace_path(collections_repo: Path, slug: str) -> Path:
     if slugify(slug) != slug or not slug:
         raise ValueError(f"Collection slug must be lowercase kebab-case: {slug}")
     return collections_root / slug
+
+
+def collection_directory_categories(collections_repo: Path) -> list[str]:
+    directory_path = collections_repo.expanduser().resolve() / "site" / "collections.json"
+    if not directory_path.is_file():
+        return []
+    try:
+        directory = json.loads(directory_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"Could not read collection directory: {directory_path}") from error
+    entries = directory.get("collections")
+    if not isinstance(entries, list):
+        raise RuntimeError(f"Collection directory has no collections list: {directory_path}")
+    categories = {
+        " ".join(str(entry.get("category") or "").split())
+        for entry in entries
+        if isinstance(entry, dict)
+    }
+    return sorted(
+        (category for category in categories if category),
+        key=str.casefold,
+    )
+
+
+def request_collection_category(
+    client: Any,
+    *,
+    model: str,
+    collection: dict[str, Any],
+    sources: dict[str, Any],
+    existing_categories: list[str],
+    retries: int,
+) -> tuple[str, bool]:
+    payload = {
+        "title": str(collection.get("title") or ""),
+        "description": str(collection.get("description") or ""),
+        "publisher": str(collection.get("publisher") or ""),
+        "video_titles": [
+            str(source.get("title"))
+            for source in sources.values()
+            if isinstance(source, dict) and source.get("title")
+        ][:50],
+        "existing_categories": existing_categories,
+    }
+    last_error: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            response = client.responses.parse(
+                model=model,
+                input=[
+                    {"role": "system", "content": CATEGORY_SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": json.dumps(payload, ensure_ascii=False),
+                    },
+                ],
+                text_format=CategoryProposal,
+            )
+            proposal = response.output_parsed
+            if proposal is None:
+                raise RuntimeError("The category model returned no structured output")
+            category = " ".join(proposal.category.split())
+            if not category or len(category) > 40:
+                raise RuntimeError(
+                    "The category model returned an empty or overly long category"
+                )
+            existing_by_key = {
+                existing.casefold(): existing for existing in existing_categories
+            }
+            reused = existing_by_key.get(category.casefold())
+            return (reused or category, reused is not None)
+        except Exception as error:  # SDK error classes vary between releases.
+            last_error = error
+            if attempt >= retries:
+                break
+            delay = min(30, 2**attempt)
+            print(
+                f"  category API attempt {attempt + 1} failed; "
+                f"retrying in {delay}s",
+                flush=True,
+            )
+            time.sleep(delay)
+    raise RuntimeError(
+        f"Category request failed after {retries + 1} attempts: {last_error}"
+    )
+
+
+def ensure_collection_category(
+    collections_repo: Path,
+    workspace: Path,
+    args: argparse.Namespace,
+) -> str | None:
+    directory_path = collections_repo.expanduser().resolve() / "site" / "collections.json"
+    if args.unlisted or not directory_path.is_file():
+        return None
+    config = load_authoring_config(workspace)
+    collection = config.setdefault("collection", {})
+    explicit = " ".join(str(args.category or "").split())
+    saved = " ".join(str(collection.get("category") or "").split())
+    if saved and not explicit:
+        return saved
+    existing_categories = collection_directory_categories(collections_repo)
+    existing_by_key = {
+        existing.casefold(): existing for existing in existing_categories
+    }
+    if explicit:
+        if len(explicit) > 40:
+            raise ValueError("--category must be 40 characters or fewer")
+        category = existing_by_key.get(explicit.casefold(), explicit)
+        reused = category.casefold() in existing_by_key
+    else:
+        print("Choosing collection category…", flush=True)
+        category, reused = request_collection_category(
+            create_openai_client(args.timeout),
+            model=args.analysis_model,
+            collection=collection,
+            sources=config.get("sources", {}),
+            existing_categories=existing_categories,
+            retries=args.retries,
+        )
+    collection["category"] = category
+    write_authoring_config(workspace, config)
+    disposition = "existing category" if reused else "new category"
+    print(f"category: {category} ({disposition})", flush=True)
+    return category
 
 
 def render_collection_readme(
@@ -1019,6 +1160,7 @@ def create_playlist_collection(args: argparse.Namespace) -> int:
     require_playlist_complete(
         workspace, expected_video_ids, require_analysis=False
     )
+    ensure_collection_category(args.collections_repo, workspace, args)
     if args.import_only:
         print("import complete; analysis was skipped")
         return 0
@@ -1031,6 +1173,7 @@ def process_workspace(args: argparse.Namespace) -> int:
     states = discover_transcript_states(args.workspace)
     pending = []
     repairs = []
+    skipped_repairs = []
     chapter_updates: list[tuple[Path, dict[str, Any]]] = []
     for state_path in states:
         state = load_transcript_state(state_path)
@@ -1045,10 +1188,16 @@ def process_workspace(args: argparse.Namespace) -> int:
             if aligned != analysis:
                 chapter_updates.append((output, aligned))
             if len(aligned.get("sections", [])) < MIN_USEFUL_TIMELINE_SECTIONS:
-                repairs.append(state_path)
+                if transcript_has_timeline_evidence(
+                    state, MIN_USEFUL_TIMELINE_SECTIONS
+                ):
+                    repairs.append(state_path)
+                else:
+                    skipped_repairs.append(state_path)
     print(
         f"{len(states)} transcripts | {len(pending)} pending analyses | "
         f"{len(repairs)} timeline repairs | "
+        f"{len(skipped_repairs)} skipped timeline repairs | "
         f"{len(chapter_updates)} publisher chapter updates",
         flush=True,
     )
@@ -1057,6 +1206,11 @@ def process_workspace(args: argparse.Namespace) -> int:
             print(f"  analyze: {load_transcript_state(path)['video']}")
         for path in repairs:
             print(f"  repair: {load_transcript_state(path)['video']}")
+        for path in skipped_repairs:
+            print(
+                "  skip timeline (insufficient timed speech): "
+                f"{load_transcript_state(path)['video']}"
+            )
         for _, analysis in chapter_updates:
             print(f"  publisher chapters: {analysis['video']}")
         return 0
@@ -1083,16 +1237,24 @@ def process_workspace(args: argparse.Namespace) -> int:
             output = analysis_path(args.workspace, state["video"])
             analysis = json.loads(output.read_text(encoding="utf-8"))
             if len(analysis.get("sections", [])) < MIN_USEFUL_TIMELINE_SECTIONS:
-                print("  repairing underspecified timeline…", flush=True)
-                count = repair_one(
-                    args.workspace,
-                    state_path,
-                    client=client,
-                    model=args.analysis_model,
-                    retries=args.retries,
-                    max_transcript_chars=args.max_transcript_chars,
-                )
-                print(f"  timeline: {count} sections", flush=True)
+                if transcript_has_timeline_evidence(
+                    state, MIN_USEFUL_TIMELINE_SECTIONS
+                ):
+                    print("  repairing underspecified timeline…", flush=True)
+                    count = repair_one(
+                        args.workspace,
+                        state_path,
+                        client=client,
+                        model=args.analysis_model,
+                        retries=args.retries,
+                        max_transcript_chars=args.max_transcript_chars,
+                    )
+                    print(f"  timeline: {count} sections", flush=True)
+                else:
+                    print(
+                        "  timeline skipped: insufficient timed speech",
+                        flush=True,
+                    )
     for index, state_path in enumerate(repairs, start=1):
         state = load_transcript_state(state_path)
         print(f"[repair {index}/{len(repairs)}] {state['video']}", flush=True)
@@ -1150,6 +1312,10 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--collections-repo", required=True, type=Path)
     create.add_argument("--slug")
     create.add_argument("--collection-title")
+    create.add_argument(
+        "--category",
+        help="Use this public-directory category instead of choosing one automatically",
+    )
     create.add_argument("--language", default="en")
     create.add_argument(
         "--exclude",

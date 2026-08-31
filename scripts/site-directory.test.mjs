@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
+  collectionCategories,
   collectionDeepLink,
+  collectionsInCategory,
   newestRelease,
   visibleCollections,
+  withFallbackCategories,
 } from "../site/directory.mjs";
 
 test("selects the newest published release instead of trusting API order", () => {
@@ -25,6 +28,45 @@ test("omits archived collections from the public directory", () => {
   ];
 
   assert.deepEqual(visibleCollections(collections), [{ collection_id: "course" }]);
+});
+
+test("lists and filters collection categories while ignoring archived entries", () => {
+  const collections = [
+    { collection_id: "guitar", category: "Music" },
+    { collection_id: "cooking", category: "Cooking" },
+    { collection_id: "archived", category: "Examples", archived: true },
+    { collection_id: "legacy" },
+  ];
+
+  assert.deepEqual(collectionCategories(collections), ["Cooking", "Music"]);
+  assert.deepEqual(
+    collectionsInCategory(collections, "Music"),
+    [{ collection_id: "guitar", category: "Music" }],
+  );
+  assert.deepEqual(
+    collectionsInCategory(collections, ""),
+    collections.slice(0, 2).concat(collections[3]),
+  );
+});
+
+test("fills categories missing from an older directory without overriding published values", () => {
+  const collections = [
+    { collection_id: "legacy" },
+    { collection_id: "published", category: "Published Category" },
+    { collection_id: "unknown" },
+  ];
+
+  assert.deepEqual(
+    withFallbackCategories(collections, {
+      legacy: "Fallback Category",
+      published: "Wrong Category",
+    }),
+    [
+      { collection_id: "legacy", category: "Fallback Category" },
+      { collection_id: "published", category: "Published Category" },
+      { collection_id: "unknown" },
+    ],
+  );
 });
 
 test("builds stable public collection install links", () => {

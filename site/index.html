@@ -50,11 +50,13 @@
         padding: 3.5rem 0;
       }
       .section-heading { display: grid; grid-template-columns: minmax(0, 1fr) minmax(16rem, 30rem); gap: 2rem; align-items: end; margin-bottom: 2rem; }
+      .collection-section-heading { grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); }
       h2 { margin: 0; font-size: clamp(2rem, 4vw, 3.2rem); letter-spacing: -.035em; }
       .section-heading p, .fine-print { margin: 0; color: var(--muted); line-height: 1.6; }
       .release-grid, .collection-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
       .panel, .collection-card { padding: 1.5rem; border: 1px solid var(--border); border-radius: 1.25rem; background: color-mix(in srgb, var(--surface) 92%, transparent); }
-      .panel h3, .collection-card h3 { margin: 0; font-size: 1.25rem; }
+      .panel h3 { margin: 0; font-size: 1.25rem; }
+      .collection-card h3 { margin: .38rem 0 0; font-size: 1.08rem; line-height: 1.2; }
       .release-meta, .collection-card p { color: var(--muted); line-height: 1.55; }
       .badge { display: inline-flex; margin-left: .5rem; padding: .22rem .52rem; border-radius: 999px; background: #254b32; color: var(--accent); font-size: .7rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; vertical-align: .16rem; }
       .badge.stable { background: #2c493f; }
@@ -66,9 +68,18 @@
       .button[disabled] { opacity: .55; cursor: default; }
       .platform-note { margin-top: 1rem; color: var(--warning); font-size: .88rem; line-height: 1.5; }
       .collection-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-      .collection-card { display: flex; flex-direction: column; min-height: 15rem; }
+      .collection-heading-copy { display: grid; gap: .85rem; }
+      .category-filter { display: flex; align-items: center; gap: .65rem; width: fit-content; max-width: 100%; color: var(--muted); font-size: .78rem; letter-spacing: .06em; text-transform: uppercase; }
+      .category-filter select { width: var(--category-select-width, 11rem); min-width: 11rem; max-width: min(20rem, 100%); padding: .45rem 1.8rem .45rem .65rem; border: 1px solid var(--border); border-radius: .62rem; color: var(--text); background: var(--surface); font: inherit; font-size: .82rem; letter-spacing: 0; text-transform: none; }
+      .category-filter select:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
+      .collection-card { display: flex; flex-direction: column; min-height: 13rem; padding: 1.15rem; }
+      .collection-card-meta { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 46%); gap: .75rem; align-items: start; }
       .mode { color: var(--accent); font-size: .78rem; font-weight: 750; text-transform: uppercase; letter-spacing: .07em; }
-      .collection-actions { display: flex; flex-wrap: wrap; gap: .55rem; margin-top: auto; padding-top: 1rem; }
+      .collection-category { display: -webkit-box; overflow: hidden; color: var(--muted); font-size: .72rem; font-weight: 400; line-height: 1.25; letter-spacing: .07em; text-align: right; text-transform: uppercase; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+      .collection-card p { margin: .85rem 0; font-size: .9rem; }
+      .collection-actions { display: flex; flex-wrap: wrap; gap: .45rem; margin-top: auto; padding-top: .7rem; }
+      .collection-card .button { min-height: 2.3rem; padding: .5rem .7rem; font-size: .84rem; }
+      .collection-empty { grid-column: 1 / -1; color: var(--muted); }
       .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; counter-reset: steps; }
       .step { padding: 1.25rem; border-left: 2px solid var(--border); color: var(--muted); line-height: 1.55; }
       .step::before { counter-increment: steps; content: counter(steps); display: block; margin-bottom: .65rem; color: var(--accent); font-weight: 800; }
@@ -137,9 +148,17 @@
       </section>
 
       <section id="collections">
-        <div class="section-heading">
+        <div class="section-heading collection-section-heading">
           <h2>Available collections</h2>
-          <p>This is a directory, not a definitive list of all collections. Watchcraft can install any compatible collection published at any accessible URL.</p>
+          <div class="collection-heading-copy">
+            <p>Browse featured collections below, or install any compatible collection by URL.</p>
+            <label class="category-filter" for="collection-category">
+              <span>Category</span>
+              <select id="collection-category">
+                <option value="">All</option>
+              </select>
+            </label>
+          </div>
         </div>
         <div class="collection-grid" id="collection-grid" aria-live="polite">
           <article class="collection-card"><p>Loading available collections…</p></article>
@@ -153,6 +172,6 @@
       <p>Watchcraft is an open-source project.</p>
       <p><a href="https://github.com/billbliss/watchcraft">Application source</a> · <a href="https://github.com/billbliss/watchcraft-collections">Collection source</a></p>
     </footer>
-    <script type="module" src="app.js?v=directory-v2"></script>
+    <script type="module" src="app.js?v=directory-v6"></script>
   </body>
 </html>

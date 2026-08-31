@@ -366,16 +366,14 @@ export function App({ onCollectionLoaded, repository, sidebarFooter }: AppProps)
   const selectedItemTopics = selectedItem && manifest
     ? selectedItem.topic_ids
         .map((topicId) => manifest.topics[topicId])
-        .filter((topic): topic is Topic => {
-          if (!topic) return false;
-          return selectedTopics.has(topic.topic_id)
-            || topicPassesFrequencyFilter(
-              topic.video_count,
-              manifest.stats.video_count,
-              topicThreshold,
-            );
-        })
+        .filter((topic): topic is Topic => Boolean(topic))
     : [];
+  const chapterTopics = selectedItemTopics.filter((topic) =>
+    Boolean(selectedItem?.topic_sections[topic.topic_id]?.length),
+  );
+  const otherTopics = selectedItemTopics.filter((topic) =>
+    !selectedItem?.topic_sections[topic.topic_id]?.length,
+  );
   const relatedTopics = highlightedTopic && manifest
     ? (manifest.topics[highlightedTopic]?.related_topic_ids ?? [])
         .map((topicId) => manifest.topics[topicId])
@@ -846,23 +844,35 @@ export function App({ onCollectionLoaded, repository, sidebarFooter }: AppProps)
                   <section>
                     <p className="summary">{selectedItem.summary}</p>
                     <h3>Concepts and techniques</h3>
-                    <div className="topic-pills">
-                      {selectedItemTopics.map((topic) => {
-                        const navigable = Boolean(selectedItem.topic_sections[topic.topic_id]?.length);
-                        return (
-                          <button
-                            className={`topic-pill ${navigable ? "navigable" : ""} ${highlightedTopic === topic.topic_id ? "active" : ""}`}
-                            disabled={!navigable}
-                            key={topic.topic_id}
-                            onClick={() => setHighlightedTopic(
-                              highlightedTopic === topic.topic_id ? null : topic.topic_id,
-                            )}
-                            type="button"
-                          >
-                            {topic.label}
-                          </button>
-                        );
-                      })}
+                    <div className="topic-groups">
+                      {chapterTopics.length ? (
+                        <div className="topic-group">
+                          <span className="topic-group-label">Chapter topics:</span>
+                          {chapterTopics.map((topic) => (
+                            <button
+                              className={`topic-pill navigable ${highlightedTopic === topic.topic_id ? "active" : ""}`}
+                              key={topic.topic_id}
+                              onClick={() => setHighlightedTopic(
+                                highlightedTopic === topic.topic_id ? null : topic.topic_id,
+                              )}
+                              type="button"
+                            >
+                              {topic.label}
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                      {otherTopics.length ? (
+                        <div className="topic-group">
+                          <span className="topic-group-label">Other topics:</span>
+                          {otherTopics.map((topic, index) => (
+                            <span className="other-topic" key={topic.topic_id}>
+                              {topic.label}
+                              {index < otherTopics.length - 1 ? <span aria-hidden="true"> ·</span> : null}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
                     </div>
                     <div className="related-box">
                       <strong>Related topics</strong>

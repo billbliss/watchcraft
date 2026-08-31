@@ -77,6 +77,13 @@ descriptions are preserved. Pass `--unlisted` to `youtube add` or `collection
 create` to publish a collection by URL without advertising it; the choice is
 stored in `watchcraft-authoring.json` and respected by later builds.
 
+For a listed `collection create`, the authoring tool also chooses a public-directory
+category after import. It reuses an existing directory category when suitable and
+prints `(new category)` when it creates one. The choice is saved in
+`watchcraft-authoring.json` and copied only to the public directory, not the
+installable collection manifest. Pass `--category "Category Name"` to choose it
+explicitly.
+
 Legacy local-media libraries continue to use the `Video Catalog/` metadata folder.
 
 ## Local credentials

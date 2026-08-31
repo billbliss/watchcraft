@@ -343,6 +343,9 @@ def update_collection_directory(root: Path, manifest: dict) -> None:
         "media_modes": media_modes,
         "manifest_url": f"{base_url}/collections/{root.name}/collection.json",
     }
+    category = " ".join(str(collection_config.get("category") or "").split())
+    if category:
+        generated_entry["category"] = category
     if matching_indexes:
         first = matching_indexes[0]
         existing = entries[first]

@@ -1,13 +1,36 @@
-import { collectionDeepLink, newestRelease, visibleCollections } from "./directory.mjs";
+import {
+  collectionCategories,
+  collectionDeepLink,
+  collectionsInCategory,
+  newestRelease,
+  withFallbackCategories,
+} from "./directory.mjs";
 
 const RELEASES_URL = "https://api.github.com/repos/billbliss/watchcraft/releases?per_page=20";
 const RELEASES_PAGE = "https://github.com/billbliss/watchcraft/releases";
 const COLLECTIONS_URL = "https://collections.watchcraft.stream/directory.json";
+const FALLBACK_CATEGORIES = {
+  "hello-world-managed": "Examples",
+  "hello-world-referenced": "Examples",
+  "premiere-pro-ai-tools": "Video Editing",
+  "davinci-resolve": "Video Editing",
+  "official-ptgui-tutorial": "Image Editing",
+  "essence-of-linear-algebra": "Mathematics",
+  "justinguitar-grade-1-beginner-guitar-course": "Music",
+  "plumbing-repairs-and-upgrades": "Home Improvement",
+  "techniquely-with-lan-lam-america-s-test-kitchen": "Cooking",
+  "photoshop-tutorial-for-beginners-complete-series": "Image Editing",
+  "electrical-upgrades": "Home Improvement",
+  "photoshop-advanced-course-masking-retouching-3d-lighting-and-cameras": "Image Editing",
+  "30-days-of-photoshop": "Image Editing",
+  "vegan-recipes-goodful": "Cooking",
+};
 
 const fallbackCollections = [
   {
     title: "Hello, Watchcraft! — Managed",
     description: "A tiny self-contained video downloaded into Watchcraft’s private storage.",
+    category: "Examples",
     media_modes: ["managed-local"],
     manifest_url: "https://collections.watchcraft.stream/collections/hello-world-managed/collection.json",
     archived: true,
@@ -15,6 +38,7 @@ const fallbackCollections = [
   {
     title: "Hello, Watchcraft! — Referenced",
     description: "The same tiny video kept in a folder that remains under your control.",
+    category: "Examples",
     media_modes: ["referenced-local"],
     package_url: "https://collections.watchcraft.stream/downloads/hello-world-referenced.zip",
     archived: true,
@@ -22,6 +46,7 @@ const fallbackCollections = [
   {
     title: "Learning Adobe Premiere Pro",
     description: "Four public YouTube lessons with searchable topics and chapter navigation.",
+    category: "Creative Software",
     media_modes: ["remote"],
     manifest_url: "https://collections.watchcraft.stream/collections/premiere-pro-ai-tools/collection.json",
   },
@@ -120,9 +145,18 @@ function collectionCard(collection, stableAvailable) {
   const card = document.createElement("article");
   card.className = "collection-card";
 
+  const meta = document.createElement("div");
+  meta.className = "collection-card-meta";
   const mode = document.createElement("div");
   mode.className = "mode";
   mode.textContent = (collection.media_modes || []).map(modeLabel).join(" · ");
+  meta.append(mode);
+  if (collection.category) {
+    const category = document.createElement("div");
+    category.className = "collection-category";
+    category.textContent = collection.category;
+    meta.append(category);
+  }
   const title = document.createElement("h3");
   title.textContent = collection.title;
   const description = document.createElement("p");
@@ -159,8 +193,38 @@ function collectionCard(collection, stableAvailable) {
     actions.append(download);
   }
 
-  card.append(mode, title, description, actions);
+  card.append(meta, title, description, actions);
   return card;
+}
+
+function renderCollections(collections, stableAvailable, category = "") {
+  const grid = document.querySelector("#collection-grid");
+  const filtered = collectionsInCategory(collections, category);
+  grid.replaceChildren(
+    ...filtered.map((collection) => collectionCard(collection, stableAvailable)),
+  );
+  if (!filtered.length) {
+    const empty = document.createElement("p");
+    empty.className = "collection-empty";
+    empty.textContent = "No collections are available in this category.";
+    grid.append(empty);
+  }
+}
+
+function sizeCategorySelect(select) {
+  const context = document.createElement("canvas").getContext("2d");
+  if (!context) return;
+  const style = getComputedStyle(select);
+  context.font = style.font;
+  const widestOption = Math.max(
+    ...Array.from(select.options, (option) => context.measureText(option.textContent || "").width),
+  );
+  const horizontalPadding = Number.parseFloat(style.paddingLeft)
+    + Number.parseFloat(style.paddingRight);
+  select.style.setProperty(
+    "--category-select-width",
+    `${Math.ceil(widestOption + horizontalPadding + 28)}px`,
+  );
 }
 
 async function loadCollections(stableAvailable) {
@@ -170,17 +234,23 @@ async function loadCollections(stableAvailable) {
     if (!response.ok) throw new Error(`Collection directory returned ${response.status}`);
     const directory = await response.json();
     if (Array.isArray(directory.collections) && directory.collections.length) {
-      collections = directory.collections;
+      collections = withFallbackCategories(directory.collections, FALLBACK_CATEGORIES);
     }
   } catch {
     // The embedded directory keeps the page useful if the optional public index is unavailable.
   }
-  const grid = document.querySelector("#collection-grid");
-  grid.replaceChildren(
-    ...visibleCollections(collections).map(
-      (collection) => collectionCard(collection, stableAvailable),
-    ),
-  );
+  const categorySelect = document.querySelector("#collection-category");
+  for (const category of collectionCategories(collections)) {
+    const option = document.createElement("option");
+    option.value = category;
+    option.textContent = category;
+    categorySelect.append(option);
+  }
+  sizeCategorySelect(categorySelect);
+  categorySelect.addEventListener("change", () => {
+    renderCollections(collections, stableAvailable, categorySelect.value);
+  });
+  renderCollections(collections, stableAvailable);
 }
 
 void loadReleases().then(loadCollections);

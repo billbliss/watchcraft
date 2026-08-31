@@ -1,8 +1,11 @@
+import argparse
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import video_catalog
 from analyze_catalog import (
@@ -16,6 +19,7 @@ from analyze_catalog import (
     analysis_path,
     analyze_state,
     request_timeline_repair,
+    transcript_has_timeline_evidence,
 )
 from build_collection import (
     build_collection_manifest,
@@ -41,14 +45,19 @@ from normalize_topics import (
     topic_inventory,
 )
 from process_catalog import select_work
+from repair_timelines import pending_repairs
 from watchcraft_author import (
+    CategoryProposal,
     YouTubeCaptionsUnavailable,
     YouTubeIpBlocked,
     build_parser as build_authoring_parser,
+    collection_directory_categories,
     create_playlist_collection,
+    ensure_collection_category,
     import_youtube,
     import_youtube_playlist,
     process_and_normalize_collection,
+    request_collection_category,
     youtube_description_chapters,
     youtube_playlist,
     youtube_playlist_id,
@@ -84,6 +93,7 @@ class FormattingTests(unittest.TestCase):
         self.assertTrue(args.skip_missing_captions)
         self.assertTrue(args.import_only)
         self.assertTrue(args.unlisted)
+        self.assertIsNone(args.category)
         self.assertEqual(args.normalization_batch_size, 40)
 
     def test_collection_directory_lists_new_collection_and_preserves_description(self):
@@ -110,10 +120,20 @@ class FormattingTests(unittest.TestCase):
                     "lesson": {"media": [{"delivery": "remote"}]},
                 },
             }
+            (workspace / "watchcraft-authoring.json").write_text(
+                json.dumps({
+                    "kind": "watchcraft.authoring",
+                    "schema_version": 1,
+                    "collection": {"category": "Video Editing"},
+                    "sources": {},
+                }),
+                encoding="utf-8",
+            )
 
             update_collection_directory(workspace, manifest)
             entry = json.loads(directory_path.read_text())["collections"][0]
             self.assertEqual(entry["media_modes"], ["remote"])
+            self.assertEqual(entry["category"], "Video Editing")
             self.assertEqual(
                 entry["manifest_url"],
                 "https://example.com/library/collections/useful-lessons/collection.json",
@@ -133,6 +153,72 @@ class FormattingTests(unittest.TestCase):
             updated = json.loads(directory_path.read_text())["collections"][0]
             self.assertEqual(updated["title"], "Better Lessons")
             self.assertEqual(updated["description"], "Hand-edited description.")
+
+    def test_collection_category_reuses_existing_case_insensitively(self):
+        client = Mock()
+        client.responses.parse.return_value.output_parsed = CategoryProposal(
+            category="video editing",
+            rationale="The lessons teach a video editor.",
+        )
+
+        category, reused = request_collection_category(
+            client,
+            model="test-model",
+            collection={"title": "Learn an Editor"},
+            sources={"one.youtube": {"title": "Editing lesson"}},
+            existing_categories=["Image Editing", "Video Editing"],
+            retries=0,
+        )
+
+        self.assertEqual(category, "Video Editing")
+        self.assertTrue(reused)
+
+    def test_collection_category_reports_when_an_explicit_category_is_new(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            workspace = repo / "collections" / "garden-lessons"
+            workspace.mkdir(parents=True)
+            (repo / "site").mkdir()
+            (repo / "site" / "collections.json").write_text(
+                json.dumps({
+                    "collections": [
+                        {"collection_id": "cooking", "category": "Cooking"},
+                        {"collection_id": "music", "category": "Music"},
+                    ]
+                }),
+                encoding="utf-8",
+            )
+            (workspace / "watchcraft-authoring.json").write_text(
+                json.dumps({
+                    "kind": "watchcraft.authoring",
+                    "schema_version": 1,
+                    "collection": {"title": "Garden Lessons"},
+                    "sources": {},
+                }),
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                unlisted=False,
+                category="Gardening",
+                timeout=30,
+                analysis_model="test-model",
+                retries=0,
+            )
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                chosen = ensure_collection_category(repo, workspace, args)
+
+            self.assertEqual(chosen, "Gardening")
+            self.assertIn("category: Gardening (new category)", output.getvalue())
+            config = json.loads(
+                (workspace / "watchcraft-authoring.json").read_text()
+            )
+            self.assertEqual(config["collection"]["category"], "Gardening")
+            self.assertEqual(
+                collection_directory_categories(repo),
+                ["Cooking", "Music"],
+            )
 
     def test_collection_directory_removes_explicitly_unlisted_collection(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1729,6 +1815,36 @@ class FormattingTests(unittest.TestCase):
                 transcript_duration="00:10:00",
                 retries=0,
             )
+
+    def test_music_only_captions_do_not_trigger_timeline_repair(self):
+        music_only = {
+            "video": "music.youtube",
+            "text": "[Music]",
+            "segments": [
+                {"start": 1.26, "end": 196.3, "text": "[Music]"},
+            ],
+        }
+        instructional = {
+            "video": "lesson.youtube",
+            "segments": [
+                {"start": 0, "end": 10, "text": "Prepare the ingredients."},
+                {"start": 10, "end": 20, "text": "Blend until smooth."},
+                {"start": 20, "end": 30, "text": "Chill before serving."},
+            ],
+        }
+        self.assertFalse(transcript_has_timeline_evidence(music_only))
+        self.assertTrue(transcript_has_timeline_evidence(instructional))
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            transcript = root / "transcripts/music.transcript.json"
+            transcript.parent.mkdir()
+            transcript.write_text(json.dumps(music_only), encoding="utf-8")
+            analysis = root / "analysis/music.analysis.json"
+            analysis.parent.mkdir()
+            analysis.write_text(json.dumps({"sections": []}), encoding="utf-8")
+
+            self.assertEqual(pending_repairs(root, None, False), [])
 
     def test_canonical_aliases_are_conservative_and_mechanical(self):
         self.assertTrue(mechanically_equivalent("4x5 crop", "4x5 Cropping"))

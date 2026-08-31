@@ -19,6 +19,7 @@ from analyze_catalog import (
     request_timeline_repair,
     selected_states,
     source_context,
+    transcript_has_timeline_evidence,
     transcript_text,
     unique_strings,
 )
@@ -50,7 +51,10 @@ def pending_repairs(root: Path, requested_video: str | None, force: bool) -> lis
         if not output.is_file():
             continue
         analysis = json.loads(output.read_text(encoding="utf-8"))
-        if force or not analysis.get("sections"):
+        if (
+            (force or not analysis.get("sections"))
+            and transcript_has_timeline_evidence(state)
+        ):
             pending.append(state_path)
     return pending
 
@@ -69,6 +73,10 @@ def repair_one(
     output = analysis_path(root, relative_video)
     analysis = json.loads(output.read_text(encoding="utf-8"))
     transcript = transcript_text(state)
+    if not transcript_has_timeline_evidence(state):
+        raise RuntimeError(
+            "Transcript does not contain enough timed speech to support a timeline repair"
+        )
     if len(transcript) > max_transcript_chars:
         raise RuntimeError(
             f"Transcript is {len(transcript):,} characters, exceeding the configured "

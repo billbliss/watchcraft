@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -175,6 +176,24 @@ def transcript_text(payload: dict[str, Any]) -> str:
     if isinstance(segments, list) and segments:
         return render_readable_transcript(segments)
     return str(payload.get("text", "")).strip()
+
+
+def transcript_has_timeline_evidence(
+    payload: dict[str, Any], minimum_segments: int = 3
+) -> bool:
+    """Return whether captions contain enough timed speech to support a timeline."""
+    segments = payload.get("segments")
+    if not isinstance(segments, list):
+        return False
+    meaningful_segments = 0
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        text = str(segment.get("text", ""))
+        spoken_text = re.sub(r"\[[^\]]*\]|\([^)]*\)|[♪♫]", " ", text)
+        if re.search(r"[\w\d]", spoken_text, flags=re.UNICODE):
+            meaningful_segments += 1
+    return meaningful_segments >= minimum_segments
 
 
 def source_context(root: Path, relative_video: str) -> dict[str, str]:
