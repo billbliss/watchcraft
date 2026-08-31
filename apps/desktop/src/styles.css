@@ -146,6 +146,14 @@
   white-space: nowrap;
 }
 
+.settings-bottom-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 13px;
+}
+
 .settings-dialog .settings-close {
   display: grid;
   width: 30px;
@@ -223,6 +231,12 @@
   max-height: 300px;
   gap: 8px;
   overflow: auto;
+}
+
+.collection-registry-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
 }
 
 .collection-entry {
@@ -373,7 +387,6 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 13px;
   color: #b8c3bb;
   font-size: .74rem;
 }

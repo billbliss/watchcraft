@@ -94,7 +94,6 @@ export function CollectionSettings({
             <h2 id="settings-title">Settings</h2>
           </div>
           <div className="settings-header-actions">
-            <span className="settings-version">Version {appVersion ?? "unavailable"}</span>
             <button aria-label="Close settings" className="settings-close" disabled={busy} onClick={onClose} type="button">×</button>
           </div>
         </header>
@@ -104,20 +103,9 @@ export function CollectionSettings({
             <div className="settings-section-heading">
               <div>
                 <h3>Collections</h3>
-                <p>Switch collections, archive ones you rarely use, or remove a registration from this device.</p>
+                <p>Switch collections, archive ones you rarely use, or remove a collection from this device.</p>
               </div>
               <div className="collection-heading-actions">
-                {archivedCount > 0 ? (
-                  <label className="show-archived-option">
-                    <input
-                      checked={showArchived}
-                      disabled={busy}
-                      onChange={(event) => setShowArchived(event.target.checked)}
-                      type="checkbox"
-                    />
-                    <span>Show archived collections ({archivedCount})</span>
-                  </label>
-                ) : null}
                 <span className="collection-count">{availableCollections.length}</span>
               </div>
             </div>
@@ -175,7 +163,7 @@ export function CollectionSettings({
                         </button>
                       ) : null}
                       {collection.archived ? (
-                        <button disabled={busy} onClick={() => void onSetArchived(collection, false)} type="button">Restore</button>
+                        <button disabled={busy} onClick={() => void onSetArchived(collection, false)} type="button">Unarchive</button>
                       ) : (
                         <button
                           disabled={busy || collection.active || availableCollections.length === 1}
@@ -206,6 +194,19 @@ export function CollectionSettings({
                 );
               })}
             </div>
+            {archivedCount > 0 ? (
+              <div className="collection-registry-footer">
+                <label className="show-archived-option">
+                  <input
+                    checked={showArchived}
+                    disabled={busy}
+                    onChange={(event) => setShowArchived(event.target.checked)}
+                    type="checkbox"
+                  />
+                  <span>Show archived collections ({archivedCount})</span>
+                </label>
+              </div>
+            ) : null}
           </section>
 
           <section className="settings-section add-collection-section">
@@ -237,10 +238,13 @@ export function CollectionSettings({
                 <button disabled={busy || !url.trim()} type="submit">Add</button>
               </form>
             </div>
-            <label className="open-after-option">
-              <input checked={openAfter} disabled={busy} onChange={(event) => setOpenAfter(event.target.checked)} type="checkbox" />
-              <span>Open the collection after adding it</span>
-            </label>
+            <div className="settings-bottom-row">
+              <label className="open-after-option">
+                <input checked={openAfter} disabled={busy} onChange={(event) => setOpenAfter(event.target.checked)} type="checkbox" />
+                <span>Open the collection after adding it</span>
+              </label>
+              <span className="settings-version">Version {appVersion ?? "unavailable"}</span>
+            </div>
           </section>
 
           {busy ? <p className="settings-progress" role="status">Working…</p> : null}
