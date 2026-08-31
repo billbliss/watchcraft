@@ -43,3 +43,11 @@ test("loads the public directory from the blocker-resistant endpoint", () => {
   assert.match(app, /https:\/\/collections\.watchcraft\.stream\/directory\.json/);
   assert.doesNotMatch(app, /collections\.watchcraft\.stream\/collections\.json/);
 });
+
+test("describes platform signing accurately", () => {
+  const page = readFileSync(new URL("../site/index.html", import.meta.url), "utf8");
+
+  assert.match(page, /macOS beta is signed and notarized by Apple/);
+  assert.match(page, /Windows builds are currently unsigned/);
+  assert.doesNotMatch(page, /macOS Gatekeeper and Windows SmartScreen/);
+});

@@ -139,9 +139,9 @@ library.
 
 The `Desktop installers` GitHub Actions workflow builds unsigned Windows x64
 (`.exe` for betas; `.exe` and `.msi` for stable releases), Linux x64 (`.deb` and
-`.AppImage`), and macOS Apple Silicon (`.dmg`) packages. Prerelease tags publish
-**Watchcraft Beta** with a separate application identity and private data
-directory; stable tags publish the production identity. See the
+`.AppImage`), and signed and notarized macOS Apple Silicon (`.dmg`) packages.
+Prerelease tags publish **Watchcraft Beta** with a separate application identity
+and private data directory; stable tags publish the production identity. See the
 [release guide](docs/releases.md) for the exact tag conventions and the
 [cross-platform testing guide](docs/cross-platform-testing.md) for the
 compatibility smoke checklist.
