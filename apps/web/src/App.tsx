@@ -387,6 +387,7 @@ export function App({ onCollectionLoaded, repository, sidebarFooter }: AppProps)
         .slice(0, 10)
     : [];
   const mediaUrl = selectedItem ? repository.mediaUrl(selectedItem) : null;
+  const selectedLocation = selectedItem ? locationLabels(selectedItem)[0] : null;
   const youtubeMedia = selectedItem?.media.find((media) => media.type === "youtube") ?? null;
   const hasLocalMedia = Boolean(
     selectedItem?.media.some((media) => media.type === "local-file"),
@@ -640,9 +641,9 @@ export function App({ onCollectionLoaded, repository, sidebarFooter }: AppProps)
               <span>
                 {[
                   dateLabel(item) || "Date unknown",
-                  locationLabels(item)[0] || "Location unknown",
+                  locationLabels(item)[0],
                   `${item.chapter_count} ${item.chapter_count === 1 ? "chapter" : "chapters"}`,
-                ].join(" · ")}
+                ].filter(Boolean).join(" · ")}
               </span>
             </button>
           ))}
@@ -838,7 +839,7 @@ export function App({ onCollectionLoaded, repository, sidebarFooter }: AppProps)
                   </div>
                   <div className="detail-meta">
                     <span>{dateLabel(selectedItem) || "Date unknown"}</span>
-                    <span>{locationLabels(selectedItem)[0] || "Location unknown"}</span>
+                    {selectedLocation ? <span>{selectedLocation}</span> : null}
                   </div>
                 </div>
                 <div className="detail-columns">
