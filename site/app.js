@@ -52,6 +52,122 @@ const fallbackCollections = [
   },
 ];
 
+function setupGalleryCarousel() {
+  const carousel = document.querySelector(".gallery-preview");
+  if (!carousel) return;
+
+  const track = carousel.querySelector(".gallery-preview-track");
+  const slides = Array.from(track.children);
+  const dots = carousel.querySelector(".carousel-dots");
+  const previous = carousel.querySelector(".carousel-arrow.previous");
+  const next = carousel.querySelector(".carousel-arrow.next");
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+  let currentSlide = 0;
+  let physicalSlide = 1;
+  let autoAdvance;
+  let scrollFrame;
+  let scrollSettled;
+
+  const firstClone = slides[0].cloneNode(true);
+  const lastClone = slides.at(-1).cloneNode(true);
+  for (const clone of [firstClone, lastClone]) {
+    clone.setAttribute("aria-hidden", "true");
+    clone.tabIndex = -1;
+  }
+  track.prepend(lastClone);
+  track.append(firstClone);
+
+  function updateCarouselState(index) {
+    currentSlide = (index + slides.length) % slides.length;
+    Array.from(dots.children).forEach((dot, dotIndex) => {
+      dot.classList.toggle("is-active", dotIndex === currentSlide);
+      dot.setAttribute("aria-current", dotIndex === currentSlide ? "true" : "false");
+    });
+  }
+
+  function showSlide(index, behavior = "smooth") {
+    updateCarouselState(index);
+    physicalSlide = currentSlide + 1;
+    track.scrollTo({ left: physicalSlide * track.clientWidth, behavior });
+  }
+
+  function moveBy(amount) {
+    const movingPastEnd = amount > 0 && currentSlide === slides.length - 1;
+    const movingPastStart = amount < 0 && currentSlide === 0;
+    updateCarouselState(currentSlide + amount);
+    physicalSlide = movingPastEnd
+      ? slides.length + 1
+      : movingPastStart
+        ? 0
+        : currentSlide + 1;
+    track.scrollTo({ left: physicalSlide * track.clientWidth, behavior: "smooth" });
+  }
+
+  function settleCarousel() {
+    physicalSlide = Math.round(track.scrollLeft / track.clientWidth);
+    if (physicalSlide === 0) {
+      physicalSlide = slides.length;
+      track.scrollTo({ left: physicalSlide * track.clientWidth, behavior: "auto" });
+    } else if (physicalSlide === slides.length + 1) {
+      physicalSlide = 1;
+      track.scrollTo({ left: track.clientWidth, behavior: "auto" });
+    }
+    updateCarouselState(physicalSlide - 1);
+  }
+
+  function stopAutoAdvance() {
+    window.clearInterval(autoAdvance);
+  }
+
+  function startAutoAdvance() {
+    stopAutoAdvance();
+    if (reduceMotion.matches || document.hidden) return;
+    autoAdvance = window.setInterval(() => moveBy(1), 5000);
+  }
+
+  slides.forEach((_, index) => {
+    const dot = document.createElement("button");
+    dot.className = "carousel-dot";
+    dot.type = "button";
+    dot.setAttribute("aria-label", `Show screenshot ${index + 1} of ${slides.length}`);
+    dot.addEventListener("click", () => {
+      showSlide(index);
+      startAutoAdvance();
+    });
+    dots.append(dot);
+  });
+
+  previous.addEventListener("click", () => {
+    moveBy(-1);
+    startAutoAdvance();
+  });
+  next.addEventListener("click", () => {
+    moveBy(1);
+    startAutoAdvance();
+  });
+  track.addEventListener("scroll", () => {
+    window.cancelAnimationFrame(scrollFrame);
+    scrollFrame = window.requestAnimationFrame(() => {
+      window.clearTimeout(scrollSettled);
+      scrollSettled = window.setTimeout(settleCarousel, 120);
+    });
+  }, { passive: true });
+  carousel.addEventListener("pointerenter", stopAutoAdvance);
+  carousel.addEventListener("pointerleave", startAutoAdvance);
+  carousel.addEventListener("focusin", stopAutoAdvance);
+  carousel.addEventListener("focusout", () => {
+    window.setTimeout(() => {
+      if (!carousel.contains(document.activeElement)) startAutoAdvance();
+    });
+  });
+  reduceMotion.addEventListener("change", startAutoAdvance);
+  document.addEventListener("visibilitychange", startAutoAdvance);
+  window.addEventListener("resize", () => showSlide(currentSlide, "auto"));
+
+  showSlide(0, "auto");
+  startAutoAdvance();
+}
+
 function assetLabel(name) {
   if (/\.dmg$/i.test(name)) return "macOS — Apple Silicon";
   if (/\.exe$/i.test(name)) return "Windows installer";
@@ -253,4 +369,5 @@ async function loadCollections(stableAvailable) {
   renderCollections(collections, stableAvailable);
 }
 
+setupGalleryCarousel();
 void loadReleases().then(loadCollections);

@@ -28,7 +28,8 @@ jobs:
       - name: Assemble the public site
         run: |
           mkdir -p _site/assets
-          cp site/index.html site/app.js site/directory.mjs _site/
+          cp site/index.html site/gallery.html site/app.js site/directory.mjs _site/
+          cp -R site/gallery _site/gallery
           cp -R site/youtube-player _site/youtube-player
           cp apps/desktop/src-tauri/icons/128x128.png _site/assets/watchcraft.png
           touch _site/.nojekyll

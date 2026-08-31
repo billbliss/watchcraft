@@ -93,3 +93,27 @@ test("describes platform signing accurately", () => {
   assert.match(page, /Windows builds are currently unsigned/);
   assert.doesNotMatch(page, /macOS Gatekeeper and Windows SmartScreen/);
 });
+
+test("publishes a screenshot gallery and social sharing metadata", () => {
+  const page = readFileSync(new URL("../site/index.html", import.meta.url), "utf8");
+  const app = readFileSync(new URL("../site/app.js", import.meta.url), "utf8");
+  const gallery = readFileSync(new URL("../site/gallery.html", import.meta.url), "utf8");
+  const workflow = readFileSync(
+    new URL("../.github/workflows/pages.yml", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(page, /href="gallery\.html"/);
+  assert.match(page, /property="og:image"/);
+  assert.match(page, /name="twitter:card" content="summary_large_image"/);
+  assert.match(page, /class="carousel-arrow previous"/);
+  assert.match(page, /class="carousel-dots"/);
+  assert.match(app, /function setupGalleryCarousel\(\)/);
+  assert.match(gallery, /<h1>Gallery<\/h1>/);
+  assert.match(gallery, /class="caption-divider"/);
+  assert.doesNotMatch(gallery, /figure \+ figure/);
+  assert.match(app, /track\.prepend\(lastClone\)/);
+  assert.match(app, /track\.append\(firstClone\)/);
+  assert.match(gallery, /watchcraft-premiere-pro-beginner-tutorial\.png/);
+  assert.match(workflow, /cp -R site\/gallery _site\/gallery/);
+});
