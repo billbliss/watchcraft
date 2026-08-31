@@ -12,6 +12,8 @@ const LIBRARY_SCHEMA_VERSION: u64 = 1;
 const MANIFEST_SCAN_LIMIT: u64 = 64 * 1024 * 1024;
 const REMOTE_FILE_LIMIT: usize = 64 * 1024 * 1024;
 const REMOTE_TOTAL_LIMIT: usize = 256 * 1024 * 1024;
+const REMOTE_DOWNLOAD_MAX_RETRIES: usize = 3;
+const REMOTE_RETRY_BASE_DELAY_MS: u64 = 250;
 const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "webm", "mkv"];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -754,32 +756,102 @@ fn download_remote_file(
     limit: usize,
     label: &str,
 ) -> Result<(Vec<u8>, Url), String> {
-    let response = client
-        .get(url.clone())
-        .send()
-        .map_err(|error| format!("Could not download {label} from {url}: {error}"))?
-        .error_for_status()
-        .map_err(|error| format!("Could not download {label} from {url}: {error}"))?;
-    if response
-        .content_length()
-        .is_some_and(|length| length > limit as u64)
-    {
-        return Err(format!(
-            "The downloaded {label} is larger than Watchcraft permits."
-        ));
+    download_remote_file_with_retries(
+        client,
+        url,
+        limit,
+        label,
+        REMOTE_DOWNLOAD_MAX_RETRIES,
+        REMOTE_RETRY_BASE_DELAY_MS,
+    )
+}
+
+fn download_remote_file_with_retries(
+    client: &reqwest::blocking::Client,
+    url: Url,
+    limit: usize,
+    label: &str,
+    max_retries: usize,
+    base_delay_ms: u64,
+) -> Result<(Vec<u8>, Url), String> {
+    for attempt in 0..=max_retries {
+        let response = match client.get(url.clone()).send() {
+            Ok(response) => response,
+            Err(error) => {
+                let message = format!("Could not download {label} from {url}: {error}");
+                if attempt < max_retries && retryable_request_error(&error) {
+                    wait_before_remote_retry(label, &url, attempt, max_retries, base_delay_ms);
+                    continue;
+                }
+                return Err(message);
+            }
+        };
+
+        let status = response.status();
+        if !status.is_success() {
+            let error = response
+                .error_for_status()
+                .expect_err("a non-success response must produce an HTTP error");
+            let message = format!("Could not download {label} from {url}: {error}");
+            if attempt < max_retries && retryable_http_status(status) {
+                wait_before_remote_retry(label, &url, attempt, max_retries, base_delay_ms);
+                continue;
+            }
+            return Err(message);
+        }
+
+        if response
+            .content_length()
+            .is_some_and(|length| length > limit as u64)
+        {
+            return Err(format!(
+                "The downloaded {label} is larger than Watchcraft permits."
+            ));
+        }
+        let resolved_url = response.url().clone();
+        let mut bytes = Vec::new();
+        if let Err(error) = response.take((limit + 1) as u64).read_to_end(&mut bytes) {
+            let message = format!("Could not read the downloaded {label}: {error}");
+            if attempt < max_retries {
+                wait_before_remote_retry(label, &url, attempt, max_retries, base_delay_ms);
+                continue;
+            }
+            return Err(message);
+        }
+        if bytes.len() > limit {
+            return Err(format!(
+                "The downloaded {label} is larger than Watchcraft permits."
+            ));
+        }
+        return Ok((bytes, resolved_url));
     }
-    let resolved_url = response.url().clone();
-    let mut bytes = Vec::new();
-    response
-        .take((limit + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("Could not read the downloaded {label}: {error}"))?;
-    if bytes.len() > limit {
-        return Err(format!(
-            "The downloaded {label} is larger than Watchcraft permits."
-        ));
-    }
-    Ok((bytes, resolved_url))
+    unreachable!("the bounded download loop always returns on its final attempt")
+}
+
+fn retryable_http_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+}
+
+fn retryable_request_error(error: &reqwest::Error) -> bool {
+    error.is_timeout() || error.is_connect() || error.is_body() || error.is_request()
+}
+
+fn wait_before_remote_retry(
+    label: &str,
+    url: &Url,
+    attempt: usize,
+    max_retries: usize,
+    base_delay_ms: u64,
+) {
+    let delay_ms = base_delay_ms.saturating_mul(1_u64 << attempt.min(10));
+    eprintln!(
+        "Retrying {label} from {url} after a transient failure ({}/{}).",
+        attempt + 1,
+        max_retries
+    );
+    std::thread::sleep(Duration::from_millis(delay_ms));
 }
 
 impl MediaInventory {
@@ -1263,8 +1335,9 @@ fn replace_file(source: &Path, destination: &Path) -> Result<(), String> {
 mod tests {
     use super::{
         activate_collection, bind_collection_media, discover_manifest,
-        install_from_folder_with_activation, install_from_url, list_collections, load_current,
-        remove_collection, safe_component, set_collection_archived,
+        download_remote_file_with_retries, install_from_folder_with_activation, install_from_url,
+        list_collections, load_current, remove_collection, retryable_http_status, safe_component,
+        set_collection_archived,
     };
     use std::fs;
     use std::io::{Read, Write};
@@ -1566,6 +1639,81 @@ mod tests {
         assert_eq!(list_collections(&root).unwrap()[0].source_type, "url");
         server.join().unwrap();
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retries_transient_remote_download_failures() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for status in ["503 Service Unavailable", "429 Too Many Requests", "200 OK"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 2048];
+                stream.read(&mut request).unwrap();
+                let body = if status == "200 OK" { "metadata" } else { "" };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let client = reqwest::blocking::Client::new();
+        let (bytes, _) = download_remote_file_with_retries(
+            &client,
+            format!("http://{address}/analysis.json").parse().unwrap(),
+            1024,
+            "collection metadata",
+            3,
+            1,
+        )
+        .unwrap();
+        assert_eq!(bytes, b"metadata");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn stops_after_the_configured_number_of_remote_retries() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 2048];
+                stream.read(&mut request).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+            }
+        });
+        let client = reqwest::blocking::Client::new();
+        let error = download_remote_file_with_retries(
+            &client,
+            format!("http://{address}/analysis.json").parse().unwrap(),
+            1024,
+            "collection metadata",
+            2,
+            1,
+        )
+        .unwrap_err();
+        assert!(error.contains("503 Service Unavailable"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn retries_only_transient_http_statuses() {
+        assert!(retryable_http_status(reqwest::StatusCode::REQUEST_TIMEOUT));
+        assert!(retryable_http_status(
+            reqwest::StatusCode::TOO_MANY_REQUESTS
+        ));
+        assert!(retryable_http_status(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        ));
+        assert!(!retryable_http_status(reqwest::StatusCode::NOT_FOUND));
+        assert!(!retryable_http_status(reqwest::StatusCode::UNAUTHORIZED));
     }
 
     #[test]
