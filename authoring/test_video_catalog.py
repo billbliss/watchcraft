@@ -42,6 +42,7 @@ from normalize_topics import (
 )
 from process_catalog import select_work
 from watchcraft_author import (
+    YouTubeCaptionsUnavailable,
     YouTubeIpBlocked,
     build_parser as build_authoring_parser,
     create_playlist_collection,
@@ -71,6 +72,7 @@ class FormattingTests(unittest.TestCase):
                 "useful-lessons",
                 "--exclude",
                 "PjObX9XQvgI",
+                "--skip-missing-captions",
                 "--import-only",
                 "--unlisted",
             ]
@@ -79,6 +81,7 @@ class FormattingTests(unittest.TestCase):
         self.assertEqual(args.collection_command, "create")
         self.assertEqual(args.slug, "useful-lessons")
         self.assertEqual(args.exclude, ["PjObX9XQvgI"])
+        self.assertTrue(args.skip_missing_captions)
         self.assertTrue(args.import_only)
         self.assertTrue(args.unlisted)
         self.assertEqual(args.normalization_batch_size, 40)
@@ -228,9 +231,245 @@ class FormattingTests(unittest.TestCase):
             ):
                 create_playlist_collection(args)
 
-            workspace = collections_repo / "collections" / "useful-lessons"
+            workspace = (
+                collections_repo / "collections" / "useful-lessons"
+            ).resolve()
             self.assertTrue((workspace / "watchcraft-authoring.json").is_file())
             process_mock.assert_not_called()
+
+    @patch("watchcraft_author.require_playlist_complete")
+    @patch("watchcraft_author.process_and_normalize_collection", return_value=0)
+    @patch("watchcraft_author.import_youtube_playlist")
+    @patch("watchcraft_author.youtube_playlist")
+    def test_collection_create_can_exclude_terminal_caption_failures(
+        self, playlist_mock, import_mock, process_mock, require_complete_mock
+    ):
+        playlist = {
+            "playlist_id": "PL1234567890_example",
+            "url": "https://www.youtube.com/playlist?list=PL1234567890_example",
+            "title": "Useful Lessons",
+            "video_ids": ["PjObX9XQvgI", "abcdefghijk", "zyxwvutsrqp"],
+            "duplicate_count": 0,
+        }
+        playlist_mock.return_value = playlist
+
+        def import_playlist(workspace, *args, **kwargs):
+            (workspace / "watchcraft-authoring.json").write_text(
+                json.dumps(
+                    {
+                        "kind": "watchcraft.authoring",
+                        "schema_version": 1,
+                        "collection": {
+                            "source": {
+                                "type": "youtube-playlist",
+                                "playlist_id": playlist["playlist_id"],
+                                "url": playlist["url"],
+                            }
+                        },
+                        "sources": {
+                            "PjObX9XQvgI.youtube": {
+                                "video_id": "PjObX9XQvgI",
+                                "position": 1,
+                            },
+                            "zyxwvutsrqp.youtube": {
+                                "video_id": "zyxwvutsrqp",
+                                "position": 3,
+                            },
+                        },
+                    }
+                )
+            )
+            return {
+                **playlist,
+                "imported_count": 2,
+                "completed_count": 2,
+                "added_count": 2,
+                "cached_count": 0,
+                "failures": [
+                    {
+                        "video_id": "abcdefghijk",
+                        "error": "YouTube has no captions for 'en'",
+                        "type": "captions-unavailable",
+                        "reason": "requested-language-unavailable",
+                        "language": "en",
+                    }
+                ],
+            }
+
+        import_mock.side_effect = import_playlist
+        with tempfile.TemporaryDirectory() as directory:
+            collections_repo = Path(directory)
+            (collections_repo / "collections").mkdir()
+            args = build_authoring_parser().parse_args(
+                [
+                    "collection",
+                    "create",
+                    "--from-youtube-playlist",
+                    playlist["url"],
+                    "--collections-repo",
+                    str(collections_repo),
+                    "--skip-missing-captions",
+                ]
+            )
+
+            self.assertEqual(create_playlist_collection(args), 0)
+
+            workspace = collections_repo / "collections" / "useful-lessons"
+            config = json.loads(
+                (workspace / "watchcraft-authoring.json").read_text()
+            )
+            source = config["collection"]["source"]
+            self.assertEqual(source["excluded_video_ids"], ["abcdefghijk"])
+            self.assertEqual(
+                source["caption_exclusions"],
+                [
+                    {
+                        "video_id": "abcdefghijk",
+                        "language": "en",
+                        "reason": "requested-language-unavailable",
+                    }
+                ],
+            )
+            self.assertEqual(
+                config["sources"]["zyxwvutsrqp.youtube"]["position"], 2
+            )
+            require_complete_mock.assert_called_once_with(
+                workspace.resolve(),
+                ["PjObX9XQvgI", "zyxwvutsrqp"],
+                require_analysis=False,
+            )
+            self.assertEqual(
+                process_mock.call_args.kwargs["expected_video_ids"],
+                ["PjObX9XQvgI", "zyxwvutsrqp"],
+            )
+
+    @patch("watchcraft_author.process_and_normalize_collection")
+    @patch("watchcraft_author.import_youtube_playlist")
+    @patch("watchcraft_author.youtube_playlist")
+    def test_collection_create_still_fails_on_other_errors_when_skipping_captions(
+        self, playlist_mock, import_mock, process_mock
+    ):
+        playlist = {
+            "playlist_id": "PL1234567890_example",
+            "url": "https://www.youtube.com/playlist?list=PL1234567890_example",
+            "title": "Useful Lessons",
+            "video_ids": ["PjObX9XQvgI", "abcdefghijk"],
+            "duplicate_count": 0,
+        }
+        playlist_mock.return_value = playlist
+        import_mock.return_value = {
+            **playlist,
+            "imported_count": 1,
+            "completed_count": 1,
+            "added_count": 1,
+            "cached_count": 0,
+            "failures": [
+                {
+                    "video_id": "abcdefghijk",
+                    "error": "proxy timed out",
+                    "type": "import-error",
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            collections_repo = Path(directory)
+            (collections_repo / "collections").mkdir()
+            args = build_authoring_parser().parse_args(
+                [
+                    "collection",
+                    "create",
+                    "--from-youtube-playlist",
+                    playlist["url"],
+                    "--collections-repo",
+                    str(collections_repo),
+                    "--skip-missing-captions",
+                ]
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError, "Collection import is incomplete.*proxy timed out"
+            ):
+                create_playlist_collection(args)
+
+            process_mock.assert_not_called()
+
+    @patch("watchcraft_author.require_playlist_complete")
+    @patch("watchcraft_author.process_and_normalize_collection", return_value=0)
+    @patch("watchcraft_author.import_youtube_playlist")
+    @patch("watchcraft_author.youtube_playlist")
+    def test_collection_create_reuses_saved_caption_exclusions(
+        self, playlist_mock, import_mock, process_mock, require_complete_mock
+    ):
+        playlist = {
+            "playlist_id": "PL1234567890_example",
+            "url": "https://www.youtube.com/playlist?list=PL1234567890_example",
+            "title": "Useful Lessons",
+            "video_ids": ["PjObX9XQvgI", "abcdefghijk"],
+            "duplicate_count": 0,
+        }
+        playlist_mock.return_value = playlist
+        import_mock.return_value = {
+            **playlist,
+            "video_ids": ["PjObX9XQvgI"],
+            "imported_count": 1,
+            "completed_count": 1,
+            "added_count": 0,
+            "cached_count": 1,
+            "failures": [],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            collections_repo = Path(directory)
+            workspace = collections_repo / "collections" / "useful-lessons"
+            workspace.mkdir(parents=True)
+            (workspace / "watchcraft-authoring.json").write_text(
+                json.dumps(
+                    {
+                        "kind": "watchcraft.authoring",
+                        "schema_version": 1,
+                        "collection": {
+                            "source": {
+                                "type": "youtube-playlist",
+                                "playlist_id": playlist["playlist_id"],
+                                "url": playlist["url"],
+                                "excluded_video_ids": ["abcdefghijk"],
+                                "caption_exclusions": [
+                                    {
+                                        "video_id": "abcdefghijk",
+                                        "language": "en",
+                                        "reason": "captions-disabled",
+                                    }
+                                ],
+                            }
+                        },
+                        "sources": {},
+                    }
+                )
+            )
+            args = build_authoring_parser().parse_args(
+                [
+                    "collection",
+                    "create",
+                    "--from-youtube-playlist",
+                    playlist["url"],
+                    "--collections-repo",
+                    str(collections_repo),
+                    "--skip-missing-captions",
+                ]
+            )
+
+            self.assertEqual(create_playlist_collection(args), 0)
+
+            self.assertEqual(
+                import_mock.call_args.kwargs["playlist_data"]["video_ids"],
+                ["PjObX9XQvgI"],
+            )
+            source = json.loads(
+                (workspace / "watchcraft-authoring.json").read_text()
+            )["collection"]["source"]
+            self.assertEqual(source["excluded_video_ids"], ["abcdefghijk"])
+            self.assertEqual(
+                source["caption_exclusions"][0]["reason"], "captions-disabled"
+            )
 
     def test_youtube_video_id_accepts_watch_and_short_urls(self):
         self.assertEqual(
@@ -377,6 +616,49 @@ class FormattingTests(unittest.TestCase):
                 },
             )
 
+    def test_youtube_playlist_import_marks_terminal_caption_failures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            playlist = {
+                "playlist_id": "PL1234567890_example",
+                "url": "https://www.youtube.com/playlist?list=PL1234567890_example",
+                "title": "Editing Lessons",
+                "video_ids": ["PjObX9XQvgI", "abcdefghijk"],
+                "duplicate_count": 0,
+            }
+            unavailable = YouTubeCaptionsUnavailable(
+                "YouTube has no captions for the requested language 'en'",
+                reason="requested-language-unavailable",
+            )
+            with patch(
+                "watchcraft_author.youtube_transcript_client",
+                return_value=object(),
+            ), patch(
+                "watchcraft_author.import_youtube",
+                side_effect=[{"title": "First Lesson"}, unavailable],
+            ):
+                result = import_youtube_playlist(
+                    root,
+                    playlist["url"],
+                    collection_title=None,
+                    language="en",
+                    force=False,
+                    playlist_data=playlist,
+                )
+
+            self.assertEqual(
+                result["failures"],
+                [
+                    {
+                        "video_id": "abcdefghijk",
+                        "error": "YouTube has no captions for the requested language 'en'",
+                        "type": "captions-unavailable",
+                        "reason": "requested-language-unavailable",
+                        "language": "en",
+                    }
+                ],
+            )
+
     def test_youtube_playlist_import_stops_after_a_global_ip_block(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -441,6 +723,42 @@ class FormattingTests(unittest.TestCase):
             youtube_transcript(
                 "PjObX9XQvgI", "en", transcript_api=BlockedClient()
             )
+
+    def test_youtube_transcript_classifies_missing_language_as_unavailable(self):
+        from youtube_transcript_api import NoTranscriptFound
+
+        class TranscriptList:
+            def find_transcript(self, languages):
+                raise NoTranscriptFound("PjObX9XQvgI", languages, self)
+
+            def __str__(self):
+                return "Korean captions only"
+
+        class MissingLanguageClient:
+            def list(self, video_id):
+                return TranscriptList()
+
+        with self.assertRaises(YouTubeCaptionsUnavailable) as caught:
+            youtube_transcript(
+                "PjObX9XQvgI", "en", transcript_api=MissingLanguageClient()
+            )
+
+        self.assertEqual(caught.exception.reason, "requested-language-unavailable")
+        self.assertRegex(str(caught.exception), "requested language 'en'")
+
+    def test_youtube_transcript_classifies_disabled_captions_as_unavailable(self):
+        from youtube_transcript_api import TranscriptsDisabled
+
+        class DisabledClient:
+            def list(self, video_id):
+                raise TranscriptsDisabled(video_id)
+
+        with self.assertRaises(YouTubeCaptionsUnavailable) as caught:
+            youtube_transcript(
+                "PjObX9XQvgI", "en", transcript_api=DisabledClient()
+            )
+
+        self.assertEqual(caught.exception.reason, "captions-disabled")
 
     def test_resumed_playlist_import_refreshes_positions_without_renaming_collection(self):
         with tempfile.TemporaryDirectory() as directory:

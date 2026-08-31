@@ -118,6 +118,13 @@ Use `--dry-run` to inspect the playlist without writing files or making AI calls
 `--limit N` to work with the first `N` selected videos. Use `--unlisted` when the
 manifest should remain directly installable but absent from the website directory.
 
+Use `--skip-missing-captions` when a playlist contains videos without captions in
+the requested language. The command records those terminal caption failures as
+collection exclusions, continues with the successfully imported videos, and reuses
+the saved exclusions on later resumptions. Other import failures remain fatal so a
+network or proxy outage cannot be mistaken for a captionless video. Use `--force`
+with the flag to check previously excluded videos again.
+
 If YouTube blocks caption requests from the current IP, Watchcraft stops after
 the first blocked request and preserves completed work. Retry from another
 network, or configure a proxy without putting credentials in the command:

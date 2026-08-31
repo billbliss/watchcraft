@@ -55,6 +55,14 @@ class YouTubeIpBlocked(RuntimeError):
     """YouTube rejected caption traffic from the current egress IP."""
 
 
+class YouTubeCaptionsUnavailable(RuntimeError):
+    """The requested YouTube captions are not available for this video."""
+
+    def __init__(self, message: str, *, reason: str):
+        super().__init__(message)
+        self.reason = reason
+
+
 def workspace_path(value: str) -> Path:
     path = Path(value).expanduser().resolve()
     path.mkdir(parents=True, exist_ok=True)
@@ -402,7 +410,12 @@ def youtube_transcript(
     transcript_api: Any | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     try:
-        from youtube_transcript_api import IpBlocked, RequestBlocked
+        from youtube_transcript_api import (
+            IpBlocked,
+            NoTranscriptFound,
+            RequestBlocked,
+            TranscriptsDisabled,
+        )
     except ImportError as error:
         raise RuntimeError(
             "youtube-transcript-api is not installed. Install authoring/requirements.txt."
@@ -418,6 +431,16 @@ def youtube_transcript(
             f"network, set {YOUTUBE_PROXY_URL_ENV}, or set the two "
             "WATCHCRAFT_YOUTUBE_WEBSHARE_* credentials for rotating residential "
             "proxies. The import is resumable."
+        ) from error
+    except NoTranscriptFound as error:
+        raise YouTubeCaptionsUnavailable(
+            f"YouTube has no captions for the requested language {language!r}",
+            reason="requested-language-unavailable",
+        ) from error
+    except TranscriptsDisabled as error:
+        raise YouTubeCaptionsUnavailable(
+            "YouTube captions are disabled for this video",
+            reason="captions-disabled",
         ) from error
     except Exception as error:
         raise RuntimeError(f"Could not retrieve YouTube captions: {error}") from error
@@ -721,8 +744,25 @@ def import_youtube_playlist(
                 added += 1
         except YouTubeIpBlocked:
             raise
+        except YouTubeCaptionsUnavailable as error:
+            failures.append(
+                {
+                    "video_id": video_id,
+                    "error": str(error),
+                    "type": "captions-unavailable",
+                    "reason": error.reason,
+                    "language": language,
+                }
+            )
+            print(f"  skipped: {error}", file=sys.stderr, flush=True)
         except (RuntimeError, ValueError) as error:
-            failures.append({"video_id": video_id, "error": str(error)})
+            failures.append(
+                {
+                    "video_id": video_id,
+                    "error": str(error),
+                    "type": "import-error",
+                }
+            )
             print(f"  skipped: {error}", file=sys.stderr, flush=True)
     if not completed:
         raise RuntimeError("No videos from the YouTube playlist could be imported")
@@ -790,19 +830,49 @@ def create_playlist_collection(args: argparse.Namespace) -> int:
         if video_id not in excluded_video_ids:
             excluded_video_ids.append(video_id)
     excluded = set(excluded_video_ids)
-    selected_video_ids = [
+    candidate_video_ids = [
         video_id for video_id in playlist["video_ids"] if video_id not in excluded
+    ]
+    if not candidate_video_ids:
+        raise RuntimeError("No playlist videos remain to import")
+    workspace = collection_workspace_path(args.collections_repo, collection_slug)
+    existing = load_authoring_config(workspace)
+    existing_source = existing.get("collection", {}).get("source", {})
+    saved_caption_exclusions = []
+    if args.skip_missing_captions and not args.force and isinstance(
+        existing_source, dict
+    ):
+        raw_exclusions = existing_source.get("caption_exclusions", [])
+        if isinstance(raw_exclusions, list):
+            saved_caption_exclusions = [
+                exclusion
+                for exclusion in raw_exclusions
+                if isinstance(exclusion, dict)
+                and exclusion.get("video_id") in candidate_video_ids
+                and exclusion.get("language") == args.language
+            ]
+    saved_caption_ids = {
+        str(exclusion["video_id"]) for exclusion in saved_caption_exclusions
+    }
+    selected_video_ids = [
+        video_id
+        for video_id in candidate_video_ids
+        if video_id not in saved_caption_ids
     ]
     if args.limit is not None:
         selected_video_ids = selected_video_ids[: args.limit]
     if not selected_video_ids:
         raise RuntimeError("No playlist videos remain to import")
     playlist = {**playlist, "video_ids": selected_video_ids}
-    workspace = collection_workspace_path(args.collections_repo, collection_slug)
     print(
         f"{collection_title} | {len(selected_video_ids)} videos | {workspace}",
         flush=True,
     )
+    if saved_caption_exclusions:
+        print(
+            f"  reusing {len(saved_caption_exclusions)} saved caption exclusions",
+            flush=True,
+        )
     if args.dry_run:
         for index, video_id in enumerate(selected_video_ids, start=1):
             print(f"  {index:>3}. https://www.youtube.com/watch?v={video_id}")
@@ -815,8 +885,6 @@ def create_playlist_collection(args: argparse.Namespace) -> int:
             f"{AUTHORING_CONFIG_NAME}: {workspace}"
         )
     workspace.mkdir(parents=True, exist_ok=True)
-    existing = load_authoring_config(workspace)
-    existing_source = existing.get("collection", {}).get("source", {})
     existing_playlist_id = (
         existing_source.get("playlist_id")
         if isinstance(existing_source, dict)
@@ -839,6 +907,28 @@ def create_playlist_collection(args: argparse.Namespace) -> int:
         force=args.force,
         playlist_data=playlist,
     )
+    caption_failures = [
+        failure
+        for failure in result["failures"]
+        if failure.get("type") == "captions-unavailable"
+    ]
+    skipped_caption_failures = (
+        caption_failures if args.skip_missing_captions else []
+    )
+    skipped_caption_ids = {
+        str(failure["video_id"]) for failure in skipped_caption_failures
+    }
+    expected_video_ids = [
+        video_id
+        for video_id in selected_video_ids
+        if video_id not in skipped_caption_ids
+    ]
+    unresolved_failures = [
+        failure
+        for failure in result["failures"]
+        if failure not in skipped_caption_failures
+    ]
+
     config = load_authoring_config(workspace)
     collection = config.setdefault("collection", {})
     collection["collection_id"] = collection_slug
@@ -851,7 +941,43 @@ def create_playlist_collection(args: argparse.Namespace) -> int:
         "YouTube playlist."
     )
     source = collection.setdefault("source", {})
-    source["excluded_video_ids"] = excluded_video_ids
+    caption_exclusions_by_id = {
+        str(exclusion["video_id"]): exclusion
+        for exclusion in saved_caption_exclusions
+    }
+    for failure in skipped_caption_failures:
+        video_id = str(failure["video_id"])
+        caption_exclusions_by_id[video_id] = {
+            "video_id": video_id,
+            "language": str(failure["language"]),
+            "reason": str(failure["reason"]),
+        }
+    caption_exclusions = [
+        caption_exclusions_by_id[video_id]
+        for video_id in candidate_video_ids
+        if video_id in caption_exclusions_by_id
+    ]
+    all_excluded_video_ids = list(excluded_video_ids)
+    for exclusion in caption_exclusions:
+        video_id = str(exclusion["video_id"])
+        if video_id not in all_excluded_video_ids:
+            all_excluded_video_ids.append(video_id)
+    source["excluded_video_ids"] = all_excluded_video_ids
+    if caption_exclusions:
+        source["caption_exclusions"] = caption_exclusions
+    else:
+        source.pop("caption_exclusions", None)
+
+    positions = {
+        video_id: position
+        for position, video_id in enumerate(expected_video_ids, start=1)
+    }
+    for key, item in config.get("sources", {}).items():
+        if not isinstance(item, dict) or not key.endswith(".youtube"):
+            continue
+        video_id = str(item.get("video_id") or key.removesuffix(".youtube"))
+        if video_id in positions:
+            item["position"] = positions[video_id]
     first_source = next(iter(config.get("sources", {}).values()), {})
     publisher = str(first_source.get("publisher") or "")
     publisher_url = str(first_source.get("publisher_url") or "")
@@ -871,8 +997,15 @@ def create_playlist_collection(args: argparse.Namespace) -> int:
             result["imported_count"],
         ),
     )
-    if result["failures"]:
-        failures = result["failures"]
+    if skipped_caption_failures or saved_caption_exclusions:
+        print(
+            f"{result['imported_count']} imported; "
+            f"{len(caption_exclusions)} excluded because {args.language!r} "
+            "captions were unavailable",
+            flush=True,
+        )
+    if unresolved_failures:
+        failures = unresolved_failures
         preview = "; ".join(
             f"{failure['video_id']}: {failure['error']}"
             for failure in failures[:5]
@@ -884,13 +1017,13 @@ def create_playlist_collection(args: argparse.Namespace) -> int:
             "Rerun the same command to resume; completed imports were preserved."
         )
     require_playlist_complete(
-        workspace, selected_video_ids, require_analysis=False
+        workspace, expected_video_ids, require_analysis=False
     )
     if args.import_only:
         print("import complete; analysis was skipped")
         return 0
     return process_and_normalize_collection(
-        workspace, args, expected_video_ids=selected_video_ids
+        workspace, args, expected_video_ids=expected_video_ids
     )
 
 
@@ -1024,6 +1157,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="VIDEO",
         help="Omit a video URL or ID; may be repeated",
+    )
+    create.add_argument(
+        "--skip-missing-captions",
+        action="store_true",
+        help=(
+            "Exclude videos whose requested caption language is unavailable or "
+            "whose captions are disabled"
+        ),
     )
     create.add_argument("--limit", type=int)
     create.add_argument("--import-only", action="store_true")
