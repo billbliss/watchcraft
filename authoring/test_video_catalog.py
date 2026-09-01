@@ -49,6 +49,7 @@ from repair_timelines import pending_repairs
 from watchcraft_author import (
     CollectionDirectoryProposal,
     YouTubeCaptionsUnavailable,
+    YouTubeEmbeddingDisabled,
     YouTubeIpBlocked,
     build_parser as build_authoring_parser,
     collection_directory_categories,
@@ -59,6 +60,7 @@ from watchcraft_author import (
     process_and_normalize_collection,
     request_collection_directory_metadata,
     youtube_description_chapters,
+    youtube_metadata,
     youtube_playlist,
     youtube_playlist_id,
     youtube_transcript,
@@ -579,6 +581,104 @@ class FormattingTests(unittest.TestCase):
                 ["PjObX9XQvgI", "zyxwvutsrqp"],
             )
 
+    @patch("watchcraft_author.require_playlist_complete")
+    @patch("watchcraft_author.process_and_normalize_collection", return_value=0)
+    @patch("watchcraft_author.import_youtube_playlist")
+    @patch("watchcraft_author.youtube_playlist")
+    def test_collection_create_excludes_videos_with_embedding_disabled(
+        self, playlist_mock, import_mock, process_mock, require_complete_mock
+    ):
+        playlist = {
+            "playlist_id": "PL1234567890_example",
+            "url": "https://www.youtube.com/playlist?list=PL1234567890_example",
+            "title": "Useful Lessons",
+            "video_ids": ["PjObX9XQvgI", "T5QIqfrISTI", "zyxwvutsrqp"],
+            "duplicate_count": 0,
+        }
+        playlist_mock.return_value = playlist
+
+        def import_playlist(workspace, *args, **kwargs):
+            (workspace / "watchcraft-authoring.json").write_text(
+                json.dumps({
+                    "kind": "watchcraft.authoring",
+                    "schema_version": 1,
+                    "collection": {
+                        "source": {
+                            "type": "youtube-playlist",
+                            "playlist_id": playlist["playlist_id"],
+                            "url": playlist["url"],
+                        }
+                    },
+                    "sources": {
+                        "PjObX9XQvgI.youtube": {
+                            "video_id": "PjObX9XQvgI",
+                            "position": 1,
+                        },
+                        "zyxwvutsrqp.youtube": {
+                            "video_id": "zyxwvutsrqp",
+                            "position": 3,
+                        },
+                    },
+                }),
+                encoding="utf-8",
+            )
+            return {
+                **playlist,
+                "imported_count": 2,
+                "completed_count": 2,
+                "added_count": 2,
+                "cached_count": 0,
+                "failures": [{
+                    "video_id": "T5QIqfrISTI",
+                    "error": (
+                        "the video owner does not allow embedded playback in Watchcraft"
+                    ),
+                    "type": "embedding-disabled",
+                    "reason": "owner-disabled-embedding",
+                }],
+            }
+
+        import_mock.side_effect = import_playlist
+        with tempfile.TemporaryDirectory() as directory:
+            collections_repo = Path(directory)
+            (collections_repo / "collections").mkdir()
+            args = build_authoring_parser().parse_args([
+                "collection",
+                "create",
+                "--from-youtube-playlist",
+                playlist["url"],
+                "--collections-repo",
+                str(collections_repo),
+            ])
+
+            self.assertEqual(create_playlist_collection(args), 0)
+
+            workspace = collections_repo / "collections" / "useful-lessons"
+            config = json.loads(
+                (workspace / "watchcraft-authoring.json").read_text()
+            )
+            source = config["collection"]["source"]
+            self.assertEqual(source["excluded_video_ids"], ["T5QIqfrISTI"])
+            self.assertEqual(
+                source["embedding_exclusions"],
+                [{
+                    "video_id": "T5QIqfrISTI",
+                    "reason": "owner-disabled-embedding",
+                }],
+            )
+            self.assertEqual(
+                config["sources"]["zyxwvutsrqp.youtube"]["position"], 2
+            )
+            require_complete_mock.assert_called_once_with(
+                workspace.resolve(),
+                ["PjObX9XQvgI", "zyxwvutsrqp"],
+                require_analysis=False,
+            )
+            self.assertEqual(
+                process_mock.call_args.kwargs["expected_video_ids"],
+                ["PjObX9XQvgI", "zyxwvutsrqp"],
+            )
+
     @patch("watchcraft_author.process_and_normalize_collection")
     @patch("watchcraft_author.import_youtube_playlist")
     @patch("watchcraft_author.youtube_playlist")
@@ -642,7 +742,7 @@ class FormattingTests(unittest.TestCase):
             "playlist_id": "PL1234567890_example",
             "url": "https://www.youtube.com/playlist?list=PL1234567890_example",
             "title": "Useful Lessons",
-            "video_ids": ["PjObX9XQvgI", "abcdefghijk"],
+            "video_ids": ["PjObX9XQvgI", "abcdefghijk", "T5QIqfrISTI"],
             "duplicate_count": 0,
         }
         playlist_mock.return_value = playlist
@@ -669,12 +769,21 @@ class FormattingTests(unittest.TestCase):
                                 "type": "youtube-playlist",
                                 "playlist_id": playlist["playlist_id"],
                                 "url": playlist["url"],
-                                "excluded_video_ids": ["abcdefghijk"],
+                                "excluded_video_ids": [
+                                    "abcdefghijk",
+                                    "T5QIqfrISTI",
+                                ],
                                 "caption_exclusions": [
                                     {
                                         "video_id": "abcdefghijk",
                                         "language": "en",
                                         "reason": "captions-disabled",
+                                    }
+                                ],
+                                "embedding_exclusions": [
+                                    {
+                                        "video_id": "T5QIqfrISTI",
+                                        "reason": "owner-disabled-embedding",
                                     }
                                 ],
                             }
@@ -706,9 +815,16 @@ class FormattingTests(unittest.TestCase):
             source = json.loads(
                 (workspace / "watchcraft-authoring.json").read_text()
             )["collection"]["source"]
-            self.assertEqual(source["excluded_video_ids"], ["abcdefghijk"])
+            self.assertEqual(
+                source["excluded_video_ids"],
+                ["abcdefghijk", "T5QIqfrISTI"],
+            )
             self.assertEqual(
                 source["caption_exclusions"][0]["reason"], "captions-disabled"
+            )
+            self.assertEqual(
+                source["embedding_exclusions"][0]["reason"],
+                "owner-disabled-embedding",
             )
 
     @patch("watchcraft_author.require_playlist_complete")
@@ -848,6 +964,31 @@ class FormattingTests(unittest.TestCase):
                 f"https://www.youtube.com/watch?v=PjObX9XQvgI&list={playlist_id}"
             ),
             playlist_id,
+        )
+
+    def test_youtube_metadata_rejects_owner_disabled_embedding(self):
+        video_id = "T5QIqfrISTI"
+        page = (
+            "<script>var ytInitialPlayerResponse = "
+            + json.dumps({
+                "playabilityStatus": {
+                    "status": "OK",
+                    "playableInEmbed": False,
+                }
+            })
+            + ";</script>"
+        )
+        with patch(
+            "watchcraft_author.request_text", return_value=page
+        ) as request_text:
+            with self.assertRaisesRegex(
+                YouTubeEmbeddingDisabled,
+                "owner does not allow embedded playback",
+            ):
+                youtube_metadata(video_id)
+
+        request_text.assert_called_once_with(
+            f"https://www.youtube.com/watch?v={video_id}"
         )
 
     def test_youtube_playlist_follows_continuations_without_yt_dlp(self):
@@ -1021,6 +1162,45 @@ class FormattingTests(unittest.TestCase):
                         "language": "en",
                     }
                 ],
+            )
+
+    def test_youtube_playlist_import_marks_disabled_embedding_as_terminal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            playlist = {
+                "playlist_id": "PL1234567890_example",
+                "url": "https://www.youtube.com/playlist?list=PL1234567890_example",
+                "title": "Editing Lessons",
+                "video_ids": ["PjObX9XQvgI", "T5QIqfrISTI"],
+                "duplicate_count": 0,
+            }
+            with patch(
+                "watchcraft_author.import_youtube",
+                side_effect=[
+                    {"title": "First Lesson"},
+                    YouTubeEmbeddingDisabled(),
+                ],
+            ):
+                result = import_youtube_playlist(
+                    root,
+                    playlist["url"],
+                    collection_title=None,
+                    language="en",
+                    force=False,
+                    playlist_data=playlist,
+                )
+
+            self.assertEqual(result["imported_count"], 1)
+            self.assertEqual(
+                result["failures"],
+                [{
+                    "video_id": "T5QIqfrISTI",
+                    "error": (
+                        "the video owner does not allow embedded playback in Watchcraft"
+                    ),
+                    "type": "embedding-disabled",
+                    "reason": "owner-disabled-embedding",
+                }],
             )
 
     def test_youtube_playlist_import_stops_after_a_global_ip_block(self):

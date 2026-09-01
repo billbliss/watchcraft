@@ -89,6 +89,15 @@ class YouTubeCaptionsUnavailable(RuntimeError):
         self.reason = reason
 
 
+class YouTubeEmbeddingDisabled(RuntimeError):
+    """The video owner does not permit Watchcraft's embedded playback."""
+
+    def __init__(self):
+        super().__init__(
+            "the video owner does not allow embedded playback in Watchcraft"
+        )
+
+
 def workspace_path(value: str) -> Path:
     path = Path(value).expanduser().resolve()
     path.mkdir(parents=True, exist_ok=True)
@@ -184,6 +193,21 @@ def youtube_initial_data(page: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise RuntimeError("YouTube returned invalid public playlist data")
     return payload
+
+
+def youtube_initial_player_response(page: str) -> dict[str, Any] | None:
+    match = re.search(
+        r'(?:var\s+ytInitialPlayerResponse|window\["ytInitialPlayerResponse"\])'
+        r"\s*=\s*",
+        page,
+    )
+    if not match:
+        return None
+    try:
+        payload, _ = json.JSONDecoder().raw_decode(page[match.end() :])
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def first_nested_mapping(value: Any, key: str) -> dict[str, Any] | None:
@@ -379,6 +403,15 @@ def youtube_description_chapters(
 
 def youtube_metadata(video_id: str) -> dict[str, Any]:
     canonical_url = f"https://www.youtube.com/watch?v={video_id}"
+    page = request_text(canonical_url)
+    player_response = youtube_initial_player_response(page)
+    playability = (
+        player_response.get("playabilityStatus", {})
+        if isinstance(player_response, dict)
+        else {}
+    )
+    if isinstance(playability, dict) and playability.get("playableInEmbed") is False:
+        raise YouTubeEmbeddingDisabled()
     oembed_url = "https://www.youtube.com/oembed?" + urllib.parse.urlencode(
         {"url": canonical_url, "format": "json"}
     )
@@ -386,7 +419,6 @@ def youtube_metadata(video_id: str) -> dict[str, Any]:
         embed = json.loads(request_text(oembed_url))
     except json.JSONDecodeError as error:
         raise RuntimeError("YouTube returned invalid embed metadata") from error
-    page = request_text(canonical_url)
     duration = first_json_string(page, "lengthSeconds")
     duration_seconds = int(duration) if duration.isdigit() else None
     published_at = first_json_string(page, "publishDate") or first_json_string(
@@ -967,6 +999,16 @@ def import_youtube_playlist(
                 added += 1
         except YouTubeIpBlocked:
             raise
+        except YouTubeEmbeddingDisabled as error:
+            failures.append(
+                {
+                    "video_id": video_id,
+                    "error": str(error),
+                    "type": "embedding-disabled",
+                    "reason": "owner-disabled-embedding",
+                }
+            )
+            print(f"  skipped: {error}", file=sys.stderr, flush=True)
         except YouTubeCaptionsUnavailable as error:
             failures.append(
                 {
@@ -1000,6 +1042,16 @@ def import_youtube_playlist(
             )
             print(f"  skipped: {error}", file=sys.stderr, flush=True)
     if not completed:
+        embedding_failures = [
+            failure
+            for failure in failures
+            if failure.get("type") == "embedding-disabled"
+        ]
+        if embedding_failures and len(embedding_failures) == len(failures):
+            raise RuntimeError(
+                "No videos from the YouTube playlist could be imported: "
+                "all selected videos have embedded playback disabled by their owners"
+            )
         raise RuntimeError("No videos from the YouTube playlist could be imported")
     return {
         **playlist,
@@ -1075,6 +1127,16 @@ def create_playlist_collection(args: argparse.Namespace) -> int:
     existing_source = existing.get("collection", {}).get("source", {})
     saved_caption_exclusions = []
     saved_audio_exclusions = []
+    saved_embedding_exclusions = []
+    if not args.force and isinstance(existing_source, dict):
+        raw_exclusions = existing_source.get("embedding_exclusions", [])
+        if isinstance(raw_exclusions, list):
+            saved_embedding_exclusions = [
+                exclusion
+                for exclusion in raw_exclusions
+                if isinstance(exclusion, dict)
+                and exclusion.get("video_id") in candidate_video_ids
+            ]
     if (
         args.transcript_source == "captions"
         and args.skip_missing_captions
@@ -1105,7 +1167,11 @@ def create_playlist_collection(args: argparse.Namespace) -> int:
             ]
     saved_exclusion_ids = {
         str(exclusion["video_id"])
-        for exclusion in [*saved_caption_exclusions, *saved_audio_exclusions]
+        for exclusion in [
+            *saved_caption_exclusions,
+            *saved_audio_exclusions,
+            *saved_embedding_exclusions,
+        ]
     }
     selected_video_ids = [
         video_id
@@ -1129,6 +1195,12 @@ def create_playlist_collection(args: argparse.Namespace) -> int:
     if saved_audio_exclusions:
         print(
             f"  reusing {len(saved_audio_exclusions)} saved no-speech exclusions",
+            flush=True,
+        )
+    if saved_embedding_exclusions:
+        print(
+            "  reusing "
+            f"{len(saved_embedding_exclusions)} saved embedding exclusions",
             flush=True,
         )
     if args.dry_run:
@@ -1181,9 +1253,18 @@ def create_playlist_collection(args: argparse.Namespace) -> int:
         if failure.get("type") == "no-speech"
         and args.transcript_source == "audio"
     ]
+    skipped_embedding_failures = [
+        failure
+        for failure in result["failures"]
+        if failure.get("type") == "embedding-disabled"
+    ]
     newly_skipped_ids = {
         str(failure["video_id"])
-        for failure in [*skipped_caption_failures, *skipped_audio_failures]
+        for failure in [
+            *skipped_caption_failures,
+            *skipped_audio_failures,
+            *skipped_embedding_failures,
+        ]
     }
     expected_video_ids = [
         video_id
@@ -1195,6 +1276,7 @@ def create_playlist_collection(args: argparse.Namespace) -> int:
         for failure in result["failures"]
         if failure not in skipped_caption_failures
         and failure not in skipped_audio_failures
+        and failure not in skipped_embedding_failures
     ]
 
     config = load_authoring_config(workspace)
@@ -1239,8 +1321,27 @@ def create_playlist_collection(args: argparse.Namespace) -> int:
         for video_id in candidate_video_ids
         if video_id in audio_exclusions_by_id
     ]
+    embedding_exclusions_by_id = {
+        str(exclusion["video_id"]): exclusion
+        for exclusion in saved_embedding_exclusions
+    }
+    for failure in skipped_embedding_failures:
+        video_id = str(failure["video_id"])
+        embedding_exclusions_by_id[video_id] = {
+            "video_id": video_id,
+            "reason": str(failure["reason"]),
+        }
+    embedding_exclusions = [
+        embedding_exclusions_by_id[video_id]
+        for video_id in candidate_video_ids
+        if video_id in embedding_exclusions_by_id
+    ]
     all_excluded_video_ids = list(excluded_video_ids)
-    for exclusion in [*caption_exclusions, *audio_exclusions]:
+    for exclusion in [
+        *caption_exclusions,
+        *audio_exclusions,
+        *embedding_exclusions,
+    ]:
         video_id = str(exclusion["video_id"])
         if video_id not in all_excluded_video_ids:
             all_excluded_video_ids.append(video_id)
@@ -1253,6 +1354,10 @@ def create_playlist_collection(args: argparse.Namespace) -> int:
         source["audio_exclusions"] = audio_exclusions
     else:
         source.pop("audio_exclusions", None)
+    if embedding_exclusions:
+        source["embedding_exclusions"] = embedding_exclusions
+    else:
+        source.pop("embedding_exclusions", None)
 
     positions = {
         video_id: position
@@ -1294,6 +1399,13 @@ def create_playlist_collection(args: argparse.Namespace) -> int:
         print(
             f"{result['imported_count']} imported; "
             f"{len(audio_exclusions)} excluded because insufficient speech was detected",
+            flush=True,
+        )
+    if skipped_embedding_failures or saved_embedding_exclusions:
+        print(
+            f"{result['imported_count']} imported; "
+            f"{len(embedding_exclusions)} excluded because their owners disabled "
+            "embedded playback",
             flush=True,
         )
     if unresolved_failures:

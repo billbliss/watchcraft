@@ -150,12 +150,14 @@ manifest, and writes a collection README. It is resumable: rerun the same comman
 to reuse completed imports, analyses, and normalization work. It does not stage,
 commit, push, fork, or open a pull request.
 
-Resumed imports are reported as `cached`. If any selected video cannot be
-imported, the command preserves completed work, exits with an error, and stops
-before analysis. It also verifies that every selected video has a matching source,
-transcript, and analysis before normalization. The publishable collection manifest
-is rebuilt only after normalization reaches `complete`; failed label batches save
-their valid results and report the exact unresolved topics for the next run.
+Resumed imports are reported as `cached`. Videos whose owners disable embedded
+playback are excluded with a clear warning and remembered on later resumptions;
+use `--force` to check them again. Other unexpected import failures preserve
+completed work, exit with an error, and stop before analysis. The command also
+verifies that every selected video has a matching source, transcript, and analysis
+before normalization. The publishable collection manifest is rebuilt only after
+normalization reaches `complete`; failed label batches save their valid results and
+report the exact unresolved topics for the next run.
 The durable phase boundaries and failure guarantees are recorded in
 [ADR 0003](../docs/architecture/0003-resumable-fail-closed-authoring.md).
 
