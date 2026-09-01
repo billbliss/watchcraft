@@ -81,6 +81,8 @@ class FormattingTests(unittest.TestCase):
                 "useful-lessons",
                 "--exclude",
                 "PjObX9XQvgI",
+                "--transcript-source",
+                "captions",
                 "--skip-missing-captions",
                 "--import-only",
                 "--unlisted",
@@ -90,11 +92,25 @@ class FormattingTests(unittest.TestCase):
         self.assertEqual(args.collection_command, "create")
         self.assertEqual(args.slug, "useful-lessons")
         self.assertEqual(args.exclude, ["PjObX9XQvgI"])
+        self.assertEqual(args.transcript_source, "captions")
         self.assertTrue(args.skip_missing_captions)
         self.assertTrue(args.import_only)
         self.assertTrue(args.unlisted)
         self.assertIsNone(args.category)
         self.assertEqual(args.normalization_batch_size, 40)
+
+    def test_youtube_transcript_source_defaults_to_audio(self):
+        args = build_authoring_parser().parse_args(
+            [
+                "youtube",
+                "add",
+                "--workspace",
+                "/tmp/watchcraft-audio-default-test",
+                "https://www.youtube.com/watch?v=PjObX9XQvgI",
+            ]
+        )
+
+        self.assertEqual(args.transcript_source, "audio")
 
     def test_collection_directory_lists_new_collection_and_preserves_description(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -284,7 +300,7 @@ class FormattingTests(unittest.TestCase):
             "playlist_id": "PL1234567890_example",
             "url": "https://www.youtube.com/playlist?list=PL1234567890_example",
             "title": "Useful Lessons",
-            "video_ids": ["PjObX9XQvgI", "abcdefghijk"],
+            "video_ids": ["PjObX9XQvgI", "abcdefghijk", "zyxwvutsrqp"],
             "duplicate_count": 0,
         }
         playlist_mock.return_value = playlist
@@ -394,6 +410,8 @@ class FormattingTests(unittest.TestCase):
                     playlist["url"],
                     "--collections-repo",
                     str(collections_repo),
+                    "--transcript-source",
+                    "captions",
                     "--skip-missing-captions",
                 ]
             )
@@ -468,6 +486,8 @@ class FormattingTests(unittest.TestCase):
                     playlist["url"],
                     "--collections-repo",
                     str(collections_repo),
+                    "--transcript-source",
+                    "captions",
                     "--skip-missing-captions",
                 ]
             )
@@ -539,6 +559,8 @@ class FormattingTests(unittest.TestCase):
                     playlist["url"],
                     "--collections-repo",
                     str(collections_repo),
+                    "--transcript-source",
+                    "captions",
                     "--skip-missing-captions",
                 ]
             )
@@ -555,6 +577,119 @@ class FormattingTests(unittest.TestCase):
             self.assertEqual(source["excluded_video_ids"], ["abcdefghijk"])
             self.assertEqual(
                 source["caption_exclusions"][0]["reason"], "captions-disabled"
+            )
+
+    @patch("watchcraft_author.require_playlist_complete")
+    @patch("watchcraft_author.process_and_normalize_collection", return_value=0)
+    @patch("watchcraft_author.import_youtube_playlist")
+    @patch("watchcraft_author.youtube_playlist")
+    def test_audio_mode_retries_and_clears_saved_caption_exclusions(
+        self, playlist_mock, import_mock, process_mock, require_complete_mock
+    ):
+        playlist = {
+            "playlist_id": "PL1234567890_example",
+            "url": "https://www.youtube.com/playlist?list=PL1234567890_example",
+            "title": "Useful Lessons",
+            "video_ids": ["PjObX9XQvgI", "abcdefghijk", "zyxwvutsrqp"],
+            "duplicate_count": 0,
+        }
+        playlist_mock.return_value = playlist
+
+        def import_playlist(workspace, *args, **kwargs):
+            config = json.loads(
+                (workspace / "watchcraft-authoring.json").read_text()
+            )
+            config["sources"] = {
+                f"{video_id}.youtube": {"video_id": video_id}
+                for video_id in playlist["video_ids"][:2]
+            }
+            (workspace / "watchcraft-authoring.json").write_text(
+                json.dumps(config), encoding="utf-8"
+            )
+            return {
+                **playlist,
+                "imported_count": 2,
+                "completed_count": 2,
+                "added_count": 1,
+                "cached_count": 1,
+                "failures": [
+                    {
+                        "video_id": "zyxwvutsrqp",
+                        "error": "only 1.0s of speech detected in 60.0s of audio",
+                        "type": "no-speech",
+                        "reason": "no-speech-detected",
+                        "audio_seconds": 60.0,
+                        "speech_seconds": 1.0,
+                    }
+                ],
+            }
+
+        import_mock.side_effect = import_playlist
+        with tempfile.TemporaryDirectory() as directory:
+            collections_repo = Path(directory)
+            workspace = collections_repo / "collections" / "useful-lessons"
+            workspace.mkdir(parents=True)
+            (workspace / "watchcraft-authoring.json").write_text(
+                json.dumps(
+                    {
+                        "kind": "watchcraft.authoring",
+                        "schema_version": 1,
+                        "collection": {
+                            "source": {
+                                "type": "youtube-playlist",
+                                "playlist_id": playlist["playlist_id"],
+                                "url": playlist["url"],
+                                "excluded_video_ids": ["abcdefghijk"],
+                                "caption_exclusions": [
+                                    {
+                                        "video_id": "abcdefghijk",
+                                        "language": "en",
+                                        "reason": "captions-disabled",
+                                    }
+                                ],
+                            }
+                        },
+                        "sources": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = build_authoring_parser().parse_args(
+                [
+                    "collection",
+                    "create",
+                    "--from-youtube-playlist",
+                    playlist["url"],
+                    "--collections-repo",
+                    str(collections_repo),
+                ]
+            )
+
+            self.assertEqual(create_playlist_collection(args), 0)
+
+            self.assertEqual(
+                import_mock.call_args.kwargs["playlist_data"]["video_ids"],
+                playlist["video_ids"],
+            )
+            source = json.loads(
+                (workspace / "watchcraft-authoring.json").read_text()
+            )["collection"]["source"]
+            self.assertEqual(source["excluded_video_ids"], ["zyxwvutsrqp"])
+            self.assertNotIn("caption_exclusions", source)
+            self.assertEqual(
+                source["audio_exclusions"],
+                [
+                    {
+                        "video_id": "zyxwvutsrqp",
+                        "reason": "no-speech-detected",
+                        "audio_seconds": 60.0,
+                        "speech_seconds": 1.0,
+                    }
+                ],
+            )
+            self.assertEqual(
+                process_mock.call_args.kwargs["expected_video_ids"],
+                playlist["video_ids"][:2],
             )
 
     def test_youtube_video_id_accepts_watch_and_short_urls(self):
@@ -1178,6 +1313,7 @@ class FormattingTests(unittest.TestCase):
                     language="en",
                     force=False,
                     position=2,
+                    transcript_source="captions",
                 )
             self.assertEqual(video_catalog.catalog_root(root), root)
             self.assertTrue((root / "transcripts/PjObX9XQvgI.transcript.json").is_file())
@@ -1213,6 +1349,56 @@ class FormattingTests(unittest.TestCase):
                 ["PjObX9XQvgI.youtube"]["position"],
                 2,
             )
+
+    def test_youtube_import_uses_local_audio_transcription_by_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            metadata = {
+                "source_id": "youtube:PjObX9XQvgI",
+                "type": "youtube",
+                "video_id": "PjObX9XQvgI",
+                "url": "https://www.youtube.com/watch?v=PjObX9XQvgI",
+                "title": "Audio Lesson",
+                "publisher": "Teacher",
+                "publisher_url": "",
+                "thumbnail_url": "",
+                "duration_seconds": 60,
+                "published_at": "2026-01-01",
+            }
+            segments = [{"start": 0.0, "end": 4.0, "text": "Local transcript."}]
+            provenance = {
+                "source": "youtube-audio",
+                "language": "en",
+                "model": "test-whisper",
+                "yt_dlp_version": "2026.08.19",
+                "audio_retained": False,
+            }
+            with patch(
+                "watchcraft_author.youtube_metadata", return_value=metadata
+            ), patch(
+                "watchcraft_author.youtube_audio_transcript",
+                return_value=(segments, provenance, []),
+            ) as audio_mock:
+                imported = import_youtube(
+                    root,
+                    "PjObX9XQvgI",
+                    collection_title="Audio Course",
+                    language="en",
+                    force=False,
+                    transcription_model="test-whisper",
+                )
+
+            audio_mock.assert_called_once_with(
+                "PjObX9XQvgI", "en", "test-whisper"
+            )
+            self.assertEqual(imported["transcript"]["source"], "youtube-audio")
+            self.assertNotIn("captions", imported)
+            state = json.loads(
+                (root / "transcripts/PjObX9XQvgI.transcript.json").read_text()
+            )
+            self.assertEqual(state["model"], "test-whisper")
+            self.assertEqual(state["provenance"]["source"], "youtube-audio")
+            self.assertFalse(state["provenance"]["audio_retained"])
 
     def test_youtube_source_positions_control_root_lesson_order(self):
         with tempfile.TemporaryDirectory() as directory:

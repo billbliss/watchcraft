@@ -35,14 +35,21 @@ for the boundary and update model.
 
 ```sh
 cd authoring
-python3 -m venv .venv
+python3.13 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
 python -m unittest -v
 ```
 
+Python 3.13 is the supported authoring runtime and is recorded in
+`authoring/.python-version`. The requirements install the authoring toolchain's
+own current `yt-dlp`; authoring does not depend on a separately installed system
+copy.
+
 The authoring tools generate versioned collection metadata and CSV exports. They
-do not generate or serve reader UI.
+do not generate or serve reader UI. YouTube authoring generates transcripts locally
+from streamed audio by default; pass `--transcript-source captions` to use YouTube's
+caption track instead.
 
 From the repository root, generate a collection from a public YouTube playlist:
 

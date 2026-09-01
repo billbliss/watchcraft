@@ -4,3 +4,5 @@ pydantic>=2.8,<3
 python-dotenv>=1.0,<2
 youtube-transcript-api>=1.2,<2
 jsonschema>=4.23,<5
+silero-vad==6.2.1
+yt-dlp[default]==2026.8.19

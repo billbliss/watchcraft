@@ -42,12 +42,15 @@ from video_catalog import (
     AUTHORING_CONFIG_NAME,
     atomic_write_text,
     default_analysis_model,
+    default_model,
     render_readable_transcript,
     render_srt,
 )
+from youtube_audio import NoSpeechDetected, youtube_audio_transcript
 
 AUTHORING_SCHEMA_VERSION = 1
 MIN_USEFUL_TIMELINE_SECTIONS = 3
+TRANSCRIPT_SOURCES = ("audio", "captions")
 USER_AGENT = "Mozilla/5.0 (compatible; WatchcraftAuthor/0.1; +https://watchcraft.dev)"
 YOUTUBE_PROXY_URL_ENV = "WATCHCRAFT_YOUTUBE_PROXY_URL"
 YOUTUBE_WEBSHARE_USERNAME_ENV = "WATCHCRAFT_YOUTUBE_WEBSHARE_USERNAME"
@@ -669,8 +672,8 @@ def render_collection_readme(
         f"- Publisher: {publisher_label}\n"
         f"- Videos: {video_count}\n\n"
         "The published collection contains YouTube references, generated summaries, "
-        "topics, and navigable chapters. Retrieved captions remain private authoring "
-        "inputs and are intentionally excluded from Git.\n"
+        "topics, and navigable chapters. Transcripts remain private authoring inputs "
+        "and are intentionally excluded from Git.\n"
     )
 
 
@@ -682,6 +685,8 @@ def import_youtube(
     language: str,
     force: bool,
     position: int | None = None,
+    transcript_source: str = "audio",
+    transcription_model: str | None = None,
     transcript_api: Any | None = None,
 ) -> dict[str, Any]:
     video_id = youtube_video_id(url)
@@ -695,11 +700,27 @@ def import_youtube(
         if position < 1:
             raise ValueError("YouTube source position must be at least 1")
         metadata["position"] = position
-    segments, caption_metadata = youtube_transcript(
-        video_id, language, transcript_api=transcript_api
-    )
+    if transcript_source == "audio":
+        model = transcription_model or default_model()
+        segments, transcript_metadata, discarded_segments = youtube_audio_transcript(
+            video_id,
+            language,
+            model,
+        )
+        transcript_model = model
+    elif transcript_source == "captions":
+        segments, transcript_metadata = youtube_transcript(
+            video_id, language, transcript_api=transcript_api
+        )
+        discarded_segments = []
+        transcript_model = "youtube-captions"
+    else:
+        raise ValueError(
+            f"Unknown transcript source {transcript_source!r}; "
+            f"choose one of {', '.join(TRANSCRIPT_SOURCES)}"
+        )
     if not segments:
-        raise RuntimeError("YouTube returned an empty transcript")
+        raise RuntimeError(f"YouTube {transcript_source} produced an empty transcript")
     config.setdefault("collection", {})
     if collection_title:
         config["collection"]["title"] = collection_title
@@ -714,7 +735,9 @@ def import_youtube(
     config["collection"].setdefault(
         "source", {"type": "youtube", "publisher": metadata["publisher"]}
     )
-    metadata["captions"] = caption_metadata
+    metadata["transcript"] = transcript_metadata
+    if transcript_source == "captions":
+        metadata["captions"] = transcript_metadata
     config.setdefault("sources", {})[key] = metadata
     write_authoring_config(workspace, config)
 
@@ -727,12 +750,12 @@ def import_youtube(
     transcript_state = {
         "schema_version": 1,
         "video": key,
-        "model": "youtube-captions",
-        "language": caption_metadata["language"],
+        "model": transcript_model,
+        "language": transcript_metadata["language"],
         "text": " ".join(segment["text"] for segment in segments),
         "segments": segments,
-        "discarded_segments": [],
-        "provenance": caption_metadata,
+        "discarded_segments": discarded_segments,
+        "provenance": transcript_metadata,
     }
     atomic_write_text(
         state_path,
@@ -826,6 +849,8 @@ def import_youtube_playlist(
     language: str,
     force: bool,
     start_position: int = 1,
+    transcript_source: str = "audio",
+    transcription_model: str | None = None,
     playlist_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if start_position < 1:
@@ -844,11 +869,15 @@ def import_youtube_playlist(
         "description", "A Watchcraft collection of public instructional videos."
     )
     effective_collection_title = str(collection["title"])
-    collection["source"] = {
+    source = collection.get("source")
+    if not isinstance(source, dict):
+        source = {}
+        collection["source"] = source
+    source.update({
         "type": "youtube-playlist",
         "playlist_id": playlist["playlist_id"],
         "url": playlist["url"],
-    }
+    })
     write_authoring_config(workspace, config)
 
     completed = 0
@@ -856,7 +885,9 @@ def import_youtube_playlist(
     cached = 0
     failures = []
     video_ids = playlist["video_ids"]
-    transcript_api = youtube_transcript_client()
+    transcript_api = (
+        youtube_transcript_client() if transcript_source == "captions" else None
+    )
     for offset, video_id in enumerate(video_ids):
         position = start_position + offset
         print(f"[{offset + 1}/{len(video_ids)}] {video_id}", flush=True)
@@ -869,6 +900,8 @@ def import_youtube_playlist(
                 language=language,
                 force=force,
                 position=position,
+                transcript_source=transcript_source,
+                transcription_model=transcription_model,
                 transcript_api=transcript_api,
             )
             latest_config = load_authoring_config(workspace)
@@ -893,6 +926,18 @@ def import_youtube_playlist(
                     "type": "captions-unavailable",
                     "reason": error.reason,
                     "language": language,
+                }
+            )
+            print(f"  skipped: {error}", file=sys.stderr, flush=True)
+        except NoSpeechDetected as error:
+            failures.append(
+                {
+                    "video_id": video_id,
+                    "error": str(error),
+                    "type": "no-speech",
+                    "reason": "no-speech-detected",
+                    "audio_seconds": round(error.audio_seconds, 3),
+                    "speech_seconds": round(error.speech_seconds, 3),
                 }
             )
             print(f"  skipped: {error}", file=sys.stderr, flush=True)
@@ -980,8 +1025,12 @@ def create_playlist_collection(args: argparse.Namespace) -> int:
     existing = load_authoring_config(workspace)
     existing_source = existing.get("collection", {}).get("source", {})
     saved_caption_exclusions = []
-    if args.skip_missing_captions and not args.force and isinstance(
-        existing_source, dict
+    saved_audio_exclusions = []
+    if (
+        args.transcript_source == "captions"
+        and args.skip_missing_captions
+        and not args.force
+        and isinstance(existing_source, dict)
     ):
         raw_exclusions = existing_source.get("caption_exclusions", [])
         if isinstance(raw_exclusions, list):
@@ -992,13 +1041,27 @@ def create_playlist_collection(args: argparse.Namespace) -> int:
                 and exclusion.get("video_id") in candidate_video_ids
                 and exclusion.get("language") == args.language
             ]
-    saved_caption_ids = {
-        str(exclusion["video_id"]) for exclusion in saved_caption_exclusions
+    if (
+        args.transcript_source == "audio"
+        and not args.force
+        and isinstance(existing_source, dict)
+    ):
+        raw_exclusions = existing_source.get("audio_exclusions", [])
+        if isinstance(raw_exclusions, list):
+            saved_audio_exclusions = [
+                exclusion
+                for exclusion in raw_exclusions
+                if isinstance(exclusion, dict)
+                and exclusion.get("video_id") in candidate_video_ids
+            ]
+    saved_exclusion_ids = {
+        str(exclusion["video_id"])
+        for exclusion in [*saved_caption_exclusions, *saved_audio_exclusions]
     }
     selected_video_ids = [
         video_id
         for video_id in candidate_video_ids
-        if video_id not in saved_caption_ids
+        if video_id not in saved_exclusion_ids
     ]
     if args.limit is not None:
         selected_video_ids = selected_video_ids[: args.limit]
@@ -1012,6 +1075,11 @@ def create_playlist_collection(args: argparse.Namespace) -> int:
     if saved_caption_exclusions:
         print(
             f"  reusing {len(saved_caption_exclusions)} saved caption exclusions",
+            flush=True,
+        )
+    if saved_audio_exclusions:
+        print(
+            f"  reusing {len(saved_audio_exclusions)} saved no-speech exclusions",
             flush=True,
         )
     if args.dry_run:
@@ -1046,6 +1114,8 @@ def create_playlist_collection(args: argparse.Namespace) -> int:
         collection_title=collection_title,
         language=args.language,
         force=args.force,
+        transcript_source=args.transcript_source,
+        transcription_model=args.transcription_model,
         playlist_data=playlist,
     )
     caption_failures = [
@@ -1056,18 +1126,26 @@ def create_playlist_collection(args: argparse.Namespace) -> int:
     skipped_caption_failures = (
         caption_failures if args.skip_missing_captions else []
     )
-    skipped_caption_ids = {
-        str(failure["video_id"]) for failure in skipped_caption_failures
+    skipped_audio_failures = [
+        failure
+        for failure in result["failures"]
+        if failure.get("type") == "no-speech"
+        and args.transcript_source == "audio"
+    ]
+    newly_skipped_ids = {
+        str(failure["video_id"])
+        for failure in [*skipped_caption_failures, *skipped_audio_failures]
     }
     expected_video_ids = [
         video_id
         for video_id in selected_video_ids
-        if video_id not in skipped_caption_ids
+        if video_id not in newly_skipped_ids
     ]
     unresolved_failures = [
         failure
         for failure in result["failures"]
         if failure not in skipped_caption_failures
+        and failure not in skipped_audio_failures
     ]
 
     config = load_authoring_config(workspace)
@@ -1098,8 +1176,25 @@ def create_playlist_collection(args: argparse.Namespace) -> int:
         for video_id in candidate_video_ids
         if video_id in caption_exclusions_by_id
     ]
+    audio_exclusions_by_id = {
+        str(exclusion["video_id"]): exclusion
+        for exclusion in saved_audio_exclusions
+    }
+    for failure in skipped_audio_failures:
+        video_id = str(failure["video_id"])
+        audio_exclusions_by_id[video_id] = {
+            "video_id": video_id,
+            "reason": str(failure["reason"]),
+            "audio_seconds": float(failure["audio_seconds"]),
+            "speech_seconds": float(failure["speech_seconds"]),
+        }
+    audio_exclusions = [
+        audio_exclusions_by_id[video_id]
+        for video_id in candidate_video_ids
+        if video_id in audio_exclusions_by_id
+    ]
     all_excluded_video_ids = list(excluded_video_ids)
-    for exclusion in caption_exclusions:
+    for exclusion in [*caption_exclusions, *audio_exclusions]:
         video_id = str(exclusion["video_id"])
         if video_id not in all_excluded_video_ids:
             all_excluded_video_ids.append(video_id)
@@ -1108,6 +1203,10 @@ def create_playlist_collection(args: argparse.Namespace) -> int:
         source["caption_exclusions"] = caption_exclusions
     else:
         source.pop("caption_exclusions", None)
+    if audio_exclusions:
+        source["audio_exclusions"] = audio_exclusions
+    else:
+        source.pop("audio_exclusions", None)
 
     positions = {
         video_id: position
@@ -1143,6 +1242,12 @@ def create_playlist_collection(args: argparse.Namespace) -> int:
             f"{result['imported_count']} imported; "
             f"{len(caption_exclusions)} excluded because {args.language!r} "
             "captions were unavailable",
+            flush=True,
+        )
+    if skipped_audio_failures or saved_audio_exclusions:
+        print(
+            f"{result['imported_count']} imported; "
+            f"{len(audio_exclusions)} excluded because insufficient speech was detected",
             flush=True,
         )
     if unresolved_failures:
@@ -1289,6 +1394,16 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--workspace", required=True, type=workspace_path)
     add.add_argument("--collection-title")
     add.add_argument("--language", default="en")
+    add.add_argument(
+        "--transcript-source",
+        choices=TRANSCRIPT_SOURCES,
+        default="audio",
+        help=(
+            "Generate a local transcript from streamed audio (default), or retrieve "
+            "YouTube captions"
+        ),
+    )
+    add.add_argument("--transcription-model", default=default_model())
     add.add_argument("--force", action="store_true")
     add.add_argument(
         "--unlisted",
@@ -1317,6 +1432,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use this public-directory category instead of choosing one automatically",
     )
     create.add_argument("--language", default="en")
+    create.add_argument(
+        "--transcript-source",
+        choices=TRANSCRIPT_SOURCES,
+        default="audio",
+        help=(
+            "Generate local transcripts from streamed audio (default), or retrieve "
+            "YouTube captions"
+        ),
+    )
+    create.add_argument("--transcription-model", default=default_model())
     create.add_argument(
         "--exclude",
         action="append",
@@ -1381,6 +1506,8 @@ def main(argv: list[str] | None = None) -> int:
                 language=args.language,
                 force=args.force,
                 start_position=args.position or 1,
+                transcript_source=args.transcript_source,
+                transcription_model=args.transcription_model,
             )
             skipped = len(result["failures"])
             duplicates = result["duplicate_count"]
@@ -1404,6 +1531,8 @@ def main(argv: list[str] | None = None) -> int:
             language=args.language,
             force=args.force,
             position=args.position,
+            transcript_source=args.transcript_source,
+            transcription_model=args.transcription_model,
         )
         set_collection_listing(args.workspace, unlisted=args.unlisted)
         duration = metadata.get("duration_seconds")
@@ -1415,6 +1544,10 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("--limit must be at least 1")
         if args.normalization_batch_size < 1 or args.normalization_batch_size > 100:
             raise ValueError("--normalization-batch-size must be between 1 and 100")
+        if args.skip_missing_captions and args.transcript_source != "captions":
+            raise ValueError(
+                "--skip-missing-captions requires --transcript-source captions"
+            )
         return create_playlist_collection(args)
     if args.command == "process":
         return process_workspace(args)
