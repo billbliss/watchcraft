@@ -103,11 +103,14 @@ jobs:
 
       - name: Build native installer
         if: runner.os != 'macOS' || env.WATCHCRAFT_APPLE_SIGNING != 'true'
+        env:
+          CI: ${{ runner.os == 'macOS' && 'false' || 'true' }}
         run: npm exec --workspace @watchcraft/desktop -- tauri build --config src-tauri/tauri.workflow.conf.json --bundles ${{ steps.release.outputs.bundles }}
 
       - name: Build signed and notarized macOS installer
         if: runner.os == 'macOS' && env.WATCHCRAFT_APPLE_SIGNING == 'true'
         env:
+          CI: "false"
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
