@@ -168,17 +168,5 @@ when transcription succeeds. Other import failures remain fatal. Use `--force`
 with caption mode to check previously excluded videos again.
 
 If YouTube blocks caption requests in caption mode, Watchcraft stops after
-the first blocked request and preserves completed work. Retry from another
-network, or configure a proxy without putting credentials in the command:
-
-```bash
-# Any HTTP/HTTPS proxy URL (credentials may be embedded in the URL)
-export WATCHCRAFT_YOUTUBE_PROXY_URL="http://user:password@proxy.example:8080"
-
-# Or youtube-transcript-api's built-in Webshare rotating-residential integration
-export WATCHCRAFT_YOUTUBE_WEBSHARE_USERNAME="proxy username"
-export WATCHCRAFT_YOUTUBE_WEBSHARE_PASSWORD="proxy password"
-```
-
-Use only one proxy method. Proxy credentials are read from the environment and
-are never written to the collection workspace.
+the first blocked request and preserves completed work. Retry later to resume
+from the completed imports.

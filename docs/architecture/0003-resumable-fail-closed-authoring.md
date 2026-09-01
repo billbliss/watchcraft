@@ -72,7 +72,7 @@ rather than accepting an arbitrary label.
 
 Secrets are operational inputs, never collection content. Local authoring may load
 `.env.local`, which is ignored by Git; explicitly exported shell variables take
-precedence. API keys and proxy credentials must not be written to authoring state,
+precedence. API keys and other credentials must not be written to authoring state,
 transcripts, analyses, manifests, logs, or committed examples.
 
 Regression tests are required at every failure boundary. They cover partial imports,

@@ -474,7 +474,7 @@ class FormattingTests(unittest.TestCase):
             "failures": [
                 {
                     "video_id": "abcdefghijk",
-                    "error": "proxy timed out",
+                    "error": "network timed out",
                     "type": "import-error",
                 }
             ],
@@ -497,7 +497,7 @@ class FormattingTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(
-                RuntimeError, "Collection import is incomplete.*proxy timed out"
+                RuntimeError, "Collection import is incomplete.*network timed out"
             ):
                 create_playlist_collection(args)
 
@@ -913,29 +913,11 @@ class FormattingTests(unittest.TestCase):
 
             self.assertEqual(import_one.call_count, 1)
 
-    def test_youtube_transcript_client_uses_environment_proxy_without_persisting_it(self):
-        proxy_url = "http://user:secret@proxy.example:8080"
-        with patch.dict(
-            "watchcraft_author.os.environ",
-            {"WATCHCRAFT_YOUTUBE_PROXY_URL": proxy_url},
-            clear=True,
-        ), patch("youtube_transcript_api.YouTubeTranscriptApi") as api:
+    def test_youtube_transcript_client_uses_default_configuration(self):
+        with patch("youtube_transcript_api.YouTubeTranscriptApi") as api:
             youtube_transcript_client()
 
-        proxy_config = api.call_args.kwargs["proxy_config"]
-        self.assertEqual(
-            proxy_config.to_requests_dict(),
-            {"http": proxy_url, "https": proxy_url},
-        )
-
-    def test_youtube_transcript_client_requires_both_webshare_credentials(self):
-        with patch.dict(
-            "watchcraft_author.os.environ",
-            {"WATCHCRAFT_YOUTUBE_WEBSHARE_USERNAME": "only-a-username"},
-            clear=True,
-        ):
-            with self.assertRaisesRegex(ValueError, "Set both"):
-                youtube_transcript_client()
+        api.assert_called_once_with()
 
     def test_youtube_transcript_maps_library_ip_block_to_global_failure(self):
         from youtube_transcript_api import IpBlocked

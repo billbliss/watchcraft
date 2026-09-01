@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import html
 import json
-import os
 import re
 import sys
 import time
@@ -52,9 +51,6 @@ AUTHORING_SCHEMA_VERSION = 1
 MIN_USEFUL_TIMELINE_SECTIONS = 3
 TRANSCRIPT_SOURCES = ("audio", "captions")
 USER_AGENT = "Mozilla/5.0 (compatible; WatchcraftAuthor/0.1; +https://watchcraft.dev)"
-YOUTUBE_PROXY_URL_ENV = "WATCHCRAFT_YOUTUBE_PROXY_URL"
-YOUTUBE_WEBSHARE_USERNAME_ENV = "WATCHCRAFT_YOUTUBE_WEBSHARE_USERNAME"
-YOUTUBE_WEBSHARE_PASSWORD_ENV = "WATCHCRAFT_YOUTUBE_WEBSHARE_PASSWORD"
 CATEGORY_SYSTEM_PROMPT = """Classify an instructional-video collection into one broad, durable category.
 
 Reuse one of the supplied existing categories exactly whenever it reasonably fits. Create a new
@@ -382,43 +378,10 @@ def youtube_metadata(video_id: str) -> dict[str, Any]:
 def youtube_transcript_client() -> Any:
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
-        from youtube_transcript_api.proxies import (
-            GenericProxyConfig,
-            WebshareProxyConfig,
-        )
     except ImportError as error:
         raise RuntimeError(
             "youtube-transcript-api is not installed. Install authoring/requirements.txt."
         ) from error
-    proxy_url = os.environ.get(YOUTUBE_PROXY_URL_ENV, "").strip()
-    webshare_username = os.environ.get(YOUTUBE_WEBSHARE_USERNAME_ENV, "").strip()
-    webshare_password = os.environ.get(YOUTUBE_WEBSHARE_PASSWORD_ENV, "")
-    if bool(webshare_username) != bool(webshare_password):
-        raise ValueError(
-            f"Set both {YOUTUBE_WEBSHARE_USERNAME_ENV} and "
-            f"{YOUTUBE_WEBSHARE_PASSWORD_ENV}"
-        )
-    if proxy_url and webshare_username:
-        raise ValueError(
-            f"Use either {YOUTUBE_PROXY_URL_ENV} or the Webshare credentials, not both"
-        )
-    if webshare_username:
-        print("YouTube captions: using rotating residential proxies", flush=True)
-        return YouTubeTranscriptApi(
-            proxy_config=WebshareProxyConfig(
-                proxy_username=webshare_username,
-                proxy_password=webshare_password,
-                filter_ip_locations=["us"],
-            )
-        )
-    if proxy_url:
-        print("YouTube captions: using configured proxy", flush=True)
-        return YouTubeTranscriptApi(
-            proxy_config=GenericProxyConfig(
-                http_url=proxy_url,
-                https_url=proxy_url,
-            )
-        )
     return YouTubeTranscriptApi()
 
 
@@ -446,10 +409,8 @@ def youtube_transcript(
         fetched = transcript.fetch()
     except (IpBlocked, RequestBlocked) as error:
         raise YouTubeIpBlocked(
-            "YouTube blocked caption requests from this IP. Retry from another "
-            f"network, set {YOUTUBE_PROXY_URL_ENV}, or set the two "
-            "WATCHCRAFT_YOUTUBE_WEBSHARE_* credentials for rotating residential "
-            "proxies. The import is resumable."
+            "YouTube blocked caption requests from this IP. Retry later; the import "
+            "is resumable."
         ) from error
     except NoTranscriptFound as error:
         raise YouTubeCaptionsUnavailable(
