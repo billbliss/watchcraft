@@ -24,12 +24,24 @@ export function joinLocalPath(root: string, relativePath: string): string {
   return `${cleanRoot}${separator}${cleanRelative}`;
 }
 
+function portableComponents(path: string): string[] {
+  return path.split(/[\\/]+/).filter(Boolean);
+}
+
+export function boundMediaRelativePath(relativePath: string, pathPrefix: string): string {
+  const relative = portableComponents(relativePath);
+  const prefix = portableComponents(pathPrefix);
+  const matches = prefix.every((component, index) => relative[index] === component);
+  return (matches ? relative.slice(prefix.length) : relative).join("/");
+}
+
 export interface DesktopLibraryLocation {
   selectedRoot: string | null;
   collectionId: string;
   manifestPath: string;
   metadataRoot: string;
   mediaRoot: string | null;
+  mediaPathPrefix: string;
   managedMediaRoot: string | null;
   mediaExpected: number;
   mediaFound: number;
@@ -84,16 +96,22 @@ export class DesktopCatalogRepository implements CatalogRepository {
     }
     const root = localMediaRoot(this.location, media.delivery);
     if (!root) return null;
-    return convertFileSrc(joinLocalPath(root, media.relative_path), "stream");
+    const relativePath = media.delivery === "managed-local"
+      ? media.relative_path
+      : boundMediaRelativePath(media.relative_path, this.location.mediaPathPrefix);
+    return convertFileSrc(joinLocalPath(root, relativePath), "stream");
   }
 
   async defaultPlayerName(item: CatalogItem): Promise<string | null> {
     const media = item.media.find((candidate) => candidate.type === "local-file");
     const root = media && localMediaRoot(this.location, media.delivery);
     if (!media || !root) return null;
+    const relativePath = media.delivery === "managed-local"
+      ? media.relative_path
+      : boundMediaRelativePath(media.relative_path, this.location.mediaPathPrefix);
     try {
       return await invoke<string | null>("default_video_player", {
-        path: joinLocalPath(root, media.relative_path),
+        path: joinLocalPath(root, relativePath),
       });
     } catch {
       return null;
@@ -104,9 +122,12 @@ export class DesktopCatalogRepository implements CatalogRepository {
     const media = item.media.find((candidate) => candidate.type === "local-file");
     const root = media && localMediaRoot(this.location, media.delivery);
     if (!media || !root) return false;
+    const relativePath = media.delivery === "managed-local"
+      ? media.relative_path
+      : boundMediaRelativePath(media.relative_path, this.location.mediaPathPrefix);
     try {
       return await invoke<boolean>("open_video", {
-        path: joinLocalPath(root, media.relative_path),
+        path: joinLocalPath(root, relativePath),
       });
     } catch {
       return false;
