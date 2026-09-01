@@ -1,5 +1,7 @@
 # Watchcraft
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-72cf91.svg)](LICENSE)
+
 **Learn a craft by watching.**
 
 Watchcraft is a local-first catalog for instructional video. It makes a video
@@ -150,3 +152,7 @@ The public landing page is deployed from `site/` to
 <https://watchcraft.stream/>. It discovers permanent installer
 assets from GitHub Releases and the optional advertised collection directory
 from `watchcraft-collections`.
+
+## License
+
+Watchcraft is available under the [MIT License](LICENSE).
