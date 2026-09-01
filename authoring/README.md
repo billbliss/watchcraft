@@ -98,8 +98,10 @@ python poc_youtube_audio_transcript.py \
 
 The Python 3.13 authoring environment installs a pinned current `yt-dlp` release
 from `requirements.txt`, and the importer invokes that module with the same Python
-interpreter instead of relying on a system copy. FFmpeg remains a host prerequisite.
-Comparison reports and all transcripts are private authoring outputs. Pass
+interpreter instead of relying on a system copy. It explicitly makes the repository's
+Node.js 22+ prerequisite available to `yt-dlp` for YouTube JavaScript challenges.
+FFmpeg remains a host prerequisite. Comparison reports and all transcripts are
+private authoring outputs. Pass
 `--yt-dlp /path/to/yt-dlp` to the comparison tool only when deliberately testing
 another executable.
 
@@ -110,9 +112,12 @@ descriptions are preserved. Pass `--unlisted` to `youtube add` or `collection
 create` to publish a collection by URL without advertising it; the choice is
 stored in `watchcraft-authoring.json` and respected by later builds.
 
-For a listed `collection create`, the authoring tool also chooses a public-directory
-category after import. It reuses an existing directory category when suitable and
-prints `(new category)` when it creates one. The choice is saved in
+For a listed `collection create`, the authoring tool also creates the public-directory
+description and chooses its category after import, using the topic-normalization model.
+The description is based on the playlist's YouTube description, publisher, and video
+titles. Existing hand-written collection descriptions are preserved. Category selection
+reuses an existing directory category when suitable and prints `(new category)` when it
+creates one. The results are saved in
 `watchcraft-authoring.json` and copied only to the public directory, not the
 installable collection manifest. Directory entries also carry the collection's
 video count for the website's collection cards. Pass `--category "Category Name"`

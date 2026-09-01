@@ -49,6 +49,23 @@ def command_version(command: list[str]) -> str:
     return result.stdout.strip()
 
 
+def yt_dlp_audio_command(url: str, command: list[str]) -> list[str]:
+    """Build a yt-dlp stream command with Node available for YouTube challenges."""
+    return [
+        *command,
+        "--quiet",
+        "--no-warnings",
+        "--no-playlist",
+        "--js-runtimes",
+        "node",
+        "--format",
+        "bestaudio/best",
+        "--output",
+        "-",
+        url,
+    ]
+
+
 def stream_youtube_audio(url: str, command: list[str]) -> Any:
     """Decode a remote audio stream into an in-memory mono float32 waveform."""
     try:
@@ -56,17 +73,7 @@ def stream_youtube_audio(url: str, command: list[str]) -> Any:
     except ImportError as error:
         raise RuntimeError("numpy is required by the Whisper environment") from error
 
-    source_command = [
-        *command,
-        "--quiet",
-        "--no-warnings",
-        "--no-playlist",
-        "--format",
-        "bestaudio/best",
-        "--output",
-        "-",
-        url,
-    ]
+    source_command = yt_dlp_audio_command(url, command)
     decode_command = [
         "ffmpeg",
         "-hide_banner",

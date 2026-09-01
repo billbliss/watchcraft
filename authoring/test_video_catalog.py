@@ -47,17 +47,17 @@ from normalize_topics import (
 from process_catalog import select_work
 from repair_timelines import pending_repairs
 from watchcraft_author import (
-    CategoryProposal,
+    CollectionDirectoryProposal,
     YouTubeCaptionsUnavailable,
     YouTubeIpBlocked,
     build_parser as build_authoring_parser,
     collection_directory_categories,
     create_playlist_collection,
-    ensure_collection_category,
+    ensure_collection_directory_metadata,
     import_youtube,
     import_youtube_playlist,
     process_and_normalize_collection,
-    request_collection_category,
+    request_collection_directory_metadata,
     youtube_description_chapters,
     youtube_playlist,
     youtube_playlist_id,
@@ -174,24 +174,42 @@ class FormattingTests(unittest.TestCase):
             self.assertEqual(updated["description"], "Hand-edited description.")
             self.assertEqual(updated["video_count"], 2)
 
-    def test_collection_category_reuses_existing_case_insensitively(self):
+    def test_collection_metadata_reuses_category_and_uses_playlist_description(self):
         client = Mock()
-        client.responses.parse.return_value.output_parsed = CategoryProposal(
+        client.responses.parse.return_value.output_parsed = CollectionDirectoryProposal(
             category="video editing",
-            rationale="The lessons teach a video editor.",
+            description="Jane Smith teaches practical editing and color workflows.",
         )
 
-        category, reused = request_collection_category(
+        category, reused, description = request_collection_directory_metadata(
             client,
             model="test-model",
-            collection={"title": "Learn an Editor"},
+            collection={
+                "title": "Learn an Editor",
+                "publisher": "Jane Smith",
+                "source": {
+                    "playlist_description": "Lessons on editing, color, and exports."
+                },
+            },
             sources={"one.youtube": {"title": "Editing lesson"}},
             existing_categories=["Image Editing", "Video Editing"],
+            required_category="",
             retries=0,
         )
 
         self.assertEqual(category, "Video Editing")
         self.assertTrue(reused)
+        self.assertEqual(
+            description,
+            "Jane Smith teaches practical editing and color workflows.",
+        )
+        payload = json.loads(
+            client.responses.parse.call_args.kwargs["input"][1]["content"]
+        )
+        self.assertEqual(
+            payload["youtube_playlist_description"],
+            "Lessons on editing, color, and exports.",
+        )
 
     def test_collection_category_reports_when_an_explicit_category_is_new(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -212,7 +230,10 @@ class FormattingTests(unittest.TestCase):
                 json.dumps({
                     "kind": "watchcraft.authoring",
                     "schema_version": 1,
-                    "collection": {"title": "Garden Lessons"},
+                    "collection": {
+                        "title": "Garden Lessons",
+                        "description": "A gardener explains practical planting techniques.",
+                    },
                     "sources": {},
                 }),
                 encoding="utf-8",
@@ -222,12 +243,13 @@ class FormattingTests(unittest.TestCase):
                 category="Gardening",
                 timeout=30,
                 analysis_model="test-model",
+                normalization_model="normalization-test-model",
                 retries=0,
             )
             output = io.StringIO()
 
             with redirect_stdout(output):
-                chosen = ensure_collection_category(repo, workspace, args)
+                chosen = ensure_collection_directory_metadata(repo, workspace, args)
 
             self.assertEqual(chosen, "Gardening")
             self.assertIn("category: Gardening (new category)", output.getvalue())
@@ -238,6 +260,112 @@ class FormattingTests(unittest.TestCase):
             self.assertEqual(
                 collection_directory_categories(repo),
                 ["Cooking", "Music"],
+            )
+
+    def test_collection_metadata_generates_description_with_normalization_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            workspace = repo / "collections" / "garden-lessons"
+            workspace.mkdir(parents=True)
+            (repo / "site").mkdir()
+            (repo / "site" / "collections.json").write_text(
+                json.dumps({"collections": []}), encoding="utf-8"
+            )
+            (workspace / "watchcraft-authoring.json").write_text(
+                json.dumps({
+                    "kind": "watchcraft.authoring",
+                    "schema_version": 1,
+                    "collection": {
+                        "title": "Garden Lessons",
+                        "description": "A Watchcraft collection of public instructional videos.",
+                        "source": {
+                            "playlist_description": "Alice shows how to sow, prune, and harvest."
+                        },
+                    },
+                    "sources": {
+                        "one.youtube": {"title": "Pruning fruit trees"}
+                    },
+                }),
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                unlisted=False,
+                category="Gardening",
+                timeout=30,
+                normalization_model="normalization-test-model",
+                retries=0,
+            )
+            client = Mock()
+            client.responses.parse.return_value.output_parsed = (
+                CollectionDirectoryProposal(
+                    category="Gardening",
+                    description=(
+                        "Alice teaches practical sowing, pruning, and harvesting "
+                        "techniques for home gardeners."
+                    ),
+                )
+            )
+
+            with patch(
+                "watchcraft_author.create_openai_client", return_value=client
+            ):
+                chosen = ensure_collection_directory_metadata(repo, workspace, args)
+
+            self.assertEqual(chosen, "Gardening")
+            self.assertEqual(
+                client.responses.parse.call_args.kwargs["model"],
+                "normalization-test-model",
+            )
+            config = json.loads(
+                (workspace / "watchcraft-authoring.json").read_text()
+            )
+            self.assertEqual(
+                config["collection"]["description"],
+                "Alice teaches practical sowing, pruning, and harvesting techniques "
+                "for home gardeners.",
+            )
+
+    def test_collection_metadata_preserves_hand_written_description(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            workspace = repo / "collections" / "garden-lessons"
+            workspace.mkdir(parents=True)
+            (repo / "site").mkdir()
+            (repo / "site" / "collections.json").write_text(
+                json.dumps({"collections": []}), encoding="utf-8"
+            )
+            (workspace / "watchcraft-authoring.json").write_text(
+                json.dumps({
+                    "kind": "watchcraft.authoring",
+                    "schema_version": 1,
+                    "collection": {
+                        "title": "Garden Lessons",
+                        "description": "A hand-written description worth keeping.",
+                        "category": "Gardening",
+                    },
+                    "sources": {},
+                }),
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                unlisted=False,
+                category=None,
+                timeout=30,
+                normalization_model="normalization-test-model",
+                retries=0,
+            )
+
+            with patch("watchcraft_author.create_openai_client") as create_client:
+                chosen = ensure_collection_directory_metadata(repo, workspace, args)
+
+            self.assertEqual(chosen, "Gardening")
+            create_client.assert_not_called()
+            config = json.loads(
+                (workspace / "watchcraft-authoring.json").read_text()
+            )
+            self.assertEqual(
+                config["collection"]["description"],
+                "A hand-written description worth keeping.",
             )
 
     def test_collection_directory_removes_explicitly_unlisted_collection(self):
@@ -758,7 +886,10 @@ class FormattingTests(unittest.TestCase):
         }
         initial = {
             "metadata": {
-                "playlistMetadataRenderer": {"title": "Editing Lessons"}
+                "playlistMetadataRenderer": {
+                    "title": "Editing Lessons",
+                    "description": "Jane Smith teaches editing and color workflows.",
+                }
             },
             "contents": {
                 "itemSectionRenderer": {
@@ -786,6 +917,10 @@ class FormattingTests(unittest.TestCase):
             playlist = youtube_playlist(playlist_id)
 
         self.assertEqual(playlist["title"], "Editing Lessons")
+        self.assertEqual(
+            playlist["description"],
+            "Jane Smith teaches editing and color workflows.",
+        )
         self.assertEqual(playlist["video_ids"], ["PjObX9XQvgI", "abcdefghijk"])
         request_url, request_payload = request_json.call_args.args
         self.assertEqual(
@@ -801,6 +936,7 @@ class FormattingTests(unittest.TestCase):
                 "playlist_id": "PL1234567890_example",
                 "url": "https://www.youtube.com/playlist?list=PL1234567890_example",
                 "title": "Editing Lessons",
+                "description": "Jane Smith teaches editing and color workflows.",
                 "video_ids": ["PjObX9XQvgI", "abcdefghijk"],
                 "duplicate_count": 0,
             }
@@ -838,6 +974,9 @@ class FormattingTests(unittest.TestCase):
                     "type": "youtube-playlist",
                     "playlist_id": "PL1234567890_example",
                     "url": playlist["url"],
+                    "playlist_description": (
+                        "Jane Smith teaches editing and color workflows."
+                    ),
                 },
             )
 

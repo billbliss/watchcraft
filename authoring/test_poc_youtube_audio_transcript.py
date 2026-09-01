@@ -6,7 +6,7 @@ from poc_youtube_audio_transcript import (
     normalized_words,
     transcript_comparison,
 )
-from youtube_audio import merge_speech_ranges, yt_dlp_command
+from youtube_audio import merge_speech_ranges, yt_dlp_audio_command, yt_dlp_command
 
 
 class YouTubeAudioTranscriptPocTests(unittest.TestCase):
@@ -17,6 +17,17 @@ class YouTubeAudioTranscriptPocTests(unittest.TestCase):
 
     def test_allows_an_explicit_yt_dlp_executable(self) -> None:
         self.assertEqual(yt_dlp_command("/tmp/yt-dlp"), ["/tmp/yt-dlp"])
+
+    def test_enables_node_for_youtube_javascript_challenges(self) -> None:
+        command = yt_dlp_audio_command(
+            "https://www.youtube.com/watch?v=PjObX9XQvgI",
+            ["yt-dlp"],
+        )
+
+        self.assertEqual(
+            command[command.index("--js-runtimes") + 1],
+            "node",
+        )
 
     def test_merges_nearby_speech_ranges_but_preserves_music_gaps(self) -> None:
         self.assertEqual(

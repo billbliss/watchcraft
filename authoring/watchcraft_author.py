@@ -51,19 +51,30 @@ AUTHORING_SCHEMA_VERSION = 1
 MIN_USEFUL_TIMELINE_SECTIONS = 3
 TRANSCRIPT_SOURCES = ("audio", "captions")
 USER_AGENT = "Mozilla/5.0 (compatible; WatchcraftAuthor/0.1; +https://watchcraft.dev)"
-CATEGORY_SYSTEM_PROMPT = """Classify an instructional-video collection into one broad, durable category.
+DEFAULT_COLLECTION_DESCRIPTION = (
+    "A Watchcraft collection of public instructional videos."
+)
+COLLECTION_DIRECTORY_SYSTEM_PROMPT = """Create public-directory metadata for an instructional-video collection.
 
-Reuse one of the supplied existing categories exactly whenever it reasonably fits. Create a new
-category only when none of the existing choices describes the collection well. New category labels
-must be concise Title Case noun phrases, no more than 40 characters, and broad enough to reuse for
-future collections. Return only the structured result."""
+Choose one broad, durable category. Reuse one of the supplied existing categories exactly whenever
+it reasonably fits. Create a new category only when none of the existing choices describes the
+collection well. New category labels must be concise Title Case noun phrases, no more than 40
+characters, and broad enough to reuse for future collections. If required_category is non-empty,
+return it exactly instead of choosing another category.
+
+Write a compelling, factual description of no more than 240 characters. Name the creator or source
+when the supplied publisher identifies one, and describe the subjects or skills viewers will learn.
+Use the YouTube playlist description as source material when supplied, but rewrite it for a concise
+collection catalog. Do not mention the number of videos, Watchcraft, importing, generation, or the
+metadata process. Do not invent claims or use generic promotional filler. Return only the structured
+result."""
 
 
-class CategoryProposal(BaseModel):
+class CollectionDirectoryProposal(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     category: str
-    rationale: str
+    description: str
 
 
 class YouTubeIpBlocked(RuntimeError):
@@ -192,6 +203,26 @@ def first_nested_mapping(value: Any, key: str) -> dict[str, Any] | None:
     return None
 
 
+def youtube_text(value: Any) -> str:
+    """Extract and normalize text from common YouTube renderer shapes."""
+    if isinstance(value, str):
+        return " ".join(value.split())
+    if not isinstance(value, dict):
+        return ""
+    simple_text = value.get("simpleText")
+    if isinstance(simple_text, str):
+        return " ".join(simple_text.split())
+    runs = value.get("runs")
+    if isinstance(runs, list):
+        text = "".join(
+            str(run.get("text") or "")
+            for run in runs
+            if isinstance(run, dict)
+        )
+        return " ".join(text.split())
+    return ""
+
+
 def playlist_watch_endpoint(value: Any, playlist_id: str) -> dict[str, Any] | None:
     if isinstance(value, dict):
         endpoint = value.get("watchEndpoint")
@@ -269,7 +300,8 @@ def youtube_playlist(value: str) -> dict[str, Any]:
     page = request_text(f"{canonical_url}&hl=en")
     initial_data = youtube_initial_data(page)
     metadata = first_nested_mapping(initial_data, "playlistMetadataRenderer") or {}
-    title = " ".join(str(metadata.get("title") or "").split())
+    title = youtube_text(metadata.get("title"))
+    description = youtube_text(metadata.get("description"))
     video_ids, continuation = youtube_playlist_batch(initial_data, playlist_id)
     if not video_ids:
         raise RuntimeError(
@@ -314,6 +346,7 @@ def youtube_playlist(value: str) -> dict[str, Any]:
         "playlist_id": playlist_id,
         "url": canonical_url,
         "title": title or playlist_id,
+        "description": description,
         "video_ids": unique_video_ids,
         "duplicate_count": len(video_ids) - len(unique_video_ids),
     }
@@ -513,25 +546,48 @@ def collection_directory_categories(collections_repo: Path) -> list[str]:
     )
 
 
-def request_collection_category(
+def collection_description_needs_generation(
+    collection: dict[str, Any],
+) -> bool:
+    description = " ".join(str(collection.get("description") or "").split())
+    if not description or description == DEFAULT_COLLECTION_DESCRIPTION:
+        return True
+    return bool(
+        re.fullmatch(
+            r"A Watchcraft collection generated from the .+ YouTube playlist\.",
+            description,
+        )
+    )
+
+
+def request_collection_directory_metadata(
     client: Any,
     *,
     model: str,
     collection: dict[str, Any],
     sources: dict[str, Any],
     existing_categories: list[str],
+    required_category: str,
     retries: int,
-) -> tuple[str, bool]:
+) -> tuple[str, bool, str]:
+    source = collection.get("source")
+    playlist_description = (
+        str(source.get("playlist_description") or "")
+        if isinstance(source, dict)
+        else ""
+    )
     payload = {
         "title": str(collection.get("title") or ""),
-        "description": str(collection.get("description") or ""),
+        "current_description": str(collection.get("description") or ""),
         "publisher": str(collection.get("publisher") or ""),
+        "youtube_playlist_description": playlist_description,
         "video_titles": [
             str(source.get("title"))
             for source in sources.values()
             if isinstance(source, dict) and source.get("title")
         ][:50],
         "existing_categories": existing_categories,
+        "required_category": required_category,
     }
     last_error: Exception | None = None
     for attempt in range(retries + 1):
@@ -539,44 +595,58 @@ def request_collection_category(
             response = client.responses.parse(
                 model=model,
                 input=[
-                    {"role": "system", "content": CATEGORY_SYSTEM_PROMPT},
+                    {
+                        "role": "system",
+                        "content": COLLECTION_DIRECTORY_SYSTEM_PROMPT,
+                    },
                     {
                         "role": "user",
                         "content": json.dumps(payload, ensure_ascii=False),
                     },
                 ],
-                text_format=CategoryProposal,
+                text_format=CollectionDirectoryProposal,
             )
             proposal = response.output_parsed
             if proposal is None:
-                raise RuntimeError("The category model returned no structured output")
+                raise RuntimeError(
+                    "The collection metadata model returned no structured output"
+                )
             category = " ".join(proposal.category.split())
             if not category or len(category) > 40:
                 raise RuntimeError(
-                    "The category model returned an empty or overly long category"
+                    "The collection metadata model returned an empty or overly long category"
+                )
+            if required_category and category != required_category:
+                raise RuntimeError(
+                    "The collection metadata model changed the required category"
+                )
+            description = " ".join(proposal.description.split())
+            if not description or len(description) > 240:
+                raise RuntimeError(
+                    "The collection metadata model returned an empty or overly long description"
                 )
             existing_by_key = {
                 existing.casefold(): existing for existing in existing_categories
             }
             reused = existing_by_key.get(category.casefold())
-            return (reused or category, reused is not None)
+            return (reused or category, reused is not None, description)
         except Exception as error:  # SDK error classes vary between releases.
             last_error = error
             if attempt >= retries:
                 break
             delay = min(30, 2**attempt)
             print(
-                f"  category API attempt {attempt + 1} failed; "
+                f"  collection metadata API attempt {attempt + 1} failed; "
                 f"retrying in {delay}s",
                 flush=True,
             )
             time.sleep(delay)
     raise RuntimeError(
-        f"Category request failed after {retries + 1} attempts: {last_error}"
+        f"Collection metadata request failed after {retries + 1} attempts: {last_error}"
     )
 
 
-def ensure_collection_category(
+def ensure_collection_directory_metadata(
     collections_repo: Path,
     workspace: Path,
     args: argparse.Namespace,
@@ -588,7 +658,8 @@ def ensure_collection_category(
     collection = config.setdefault("collection", {})
     explicit = " ".join(str(args.category or "").split())
     saved = " ".join(str(collection.get("category") or "").split())
-    if saved and not explicit:
+    needs_description = collection_description_needs_generation(collection)
+    if saved and not explicit and not needs_description:
         return saved
     existing_categories = collection_directory_categories(collections_repo)
     existing_by_key = {
@@ -599,16 +670,26 @@ def ensure_collection_category(
             raise ValueError("--category must be 40 characters or fewer")
         category = existing_by_key.get(explicit.casefold(), explicit)
         reused = category.casefold() in existing_by_key
+    elif saved:
+        category = existing_by_key.get(saved.casefold(), saved)
+        reused = category.casefold() in existing_by_key
     else:
-        print("Choosing collection category…", flush=True)
-        category, reused = request_collection_category(
+        category = ""
+        reused = False
+    if needs_description or not category:
+        print("Creating collection directory details…", flush=True)
+        category, reused, description = request_collection_directory_metadata(
             create_openai_client(args.timeout),
-            model=args.analysis_model,
+            model=args.normalization_model,
             collection=collection,
             sources=config.get("sources", {}),
             existing_categories=existing_categories,
+            required_category=category,
             retries=args.retries,
         )
+        if needs_description:
+            collection["description"] = description
+            print(f"description: {description}", flush=True)
     collection["category"] = category
     write_authoring_config(workspace, config)
     disposition = "existing category" if reused else "new category"
@@ -827,7 +908,7 @@ def import_youtube_playlist(
         re.sub(r"[^a-z0-9]+", "-", collection["title"].casefold()).strip("-"),
     )
     collection.setdefault(
-        "description", "A Watchcraft collection of public instructional videos."
+        "description", DEFAULT_COLLECTION_DESCRIPTION
     )
     effective_collection_title = str(collection["title"])
     source = collection.get("source")
@@ -839,6 +920,13 @@ def import_youtube_playlist(
         "playlist_id": playlist["playlist_id"],
         "url": playlist["url"],
     })
+    playlist_description = " ".join(
+        str(playlist.get("description") or "").split()
+    )
+    if playlist_description:
+        source["playlist_description"] = playlist_description
+    else:
+        source.pop("playlist_description", None)
     write_authoring_config(workspace, config)
 
     completed = 0
@@ -1116,10 +1204,7 @@ def create_playlist_collection(args: argparse.Namespace) -> int:
         collection["listed"] = False
     else:
         collection.setdefault("listed", True)
-    collection["description"] = (
-        f"A Watchcraft collection generated from the {collection_title} "
-        "YouTube playlist."
-    )
+    collection.setdefault("description", DEFAULT_COLLECTION_DESCRIPTION)
     source = collection.setdefault("source", {})
     caption_exclusions_by_id = {
         str(exclusion["video_id"]): exclusion
@@ -1226,7 +1311,7 @@ def create_playlist_collection(args: argparse.Namespace) -> int:
     require_playlist_complete(
         workspace, expected_video_ids, require_analysis=False
     )
-    ensure_collection_category(args.collections_repo, workspace, args)
+    ensure_collection_directory_metadata(args.collections_repo, workspace, args)
     if args.import_only:
         print("import complete; analysis was skipped")
         return 0
