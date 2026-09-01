@@ -1,8 +1,11 @@
 import {
+  collectionBrowseCopy,
   collectionCategories,
   collectionDeepLink,
   collectionsInCategory,
+  developerInfoEnabled,
   newestRelease,
+  videoCountLabel,
   withFallbackCategories,
 } from "./directory.mjs";
 
@@ -29,24 +32,27 @@ const FALLBACK_CATEGORIES = {
 const fallbackCollections = [
   {
     title: "Hello, Watchcraft! — Managed",
-    description: "A tiny self-contained video downloaded into Watchcraft’s private storage.",
+    description: "A Watchcraft-made example showing how a collection can keep its video in app-managed storage.",
     category: "Examples",
+    video_count: 1,
     media_modes: ["managed-local"],
     manifest_url: "https://collections.watchcraft.stream/collections/hello-world-managed/collection.json",
     archived: true,
   },
   {
     title: "Hello, Watchcraft! — Referenced",
-    description: "The same tiny video kept in a folder that remains under your control.",
+    description: "A Watchcraft-made example showing how a collection can play video from a folder you control.",
     category: "Examples",
+    video_count: 1,
     media_modes: ["referenced-local"],
     package_url: "https://collections.watchcraft.stream/downloads/hello-world-referenced.zip",
     archived: true,
   },
   {
     title: "Learning Adobe Premiere Pro",
-    description: "Four public YouTube lessons with searchable topics and chapter navigation.",
-    category: "Creative Software",
+    description: "A practical Premiere Pro learning path from Adobe Video, Think Media, Primal Video, and Gavin Herman, spanning first edits through AI-assisted workflows.",
+    category: "Video Editing",
+    video_count: 4,
     media_modes: ["remote"],
     manifest_url: "https://collections.watchcraft.stream/collections/premiere-pro-ai-tools/collection.json",
   },
@@ -257,7 +263,7 @@ async function copyText(text) {
   }
 }
 
-function collectionCard(collection, stableAvailable) {
+function collectionCard(collection, showDeveloperInfo) {
   const card = document.createElement("article");
   card.className = "collection-card";
 
@@ -296,11 +302,14 @@ function collectionCard(collection, stableAvailable) {
       copy.textContent = copied ? "Copied" : "Copy unavailable";
       setTimeout(() => { copy.textContent = "Copy collection URL"; }, 1600);
     });
-    const inspect = document.createElement("a");
-    inspect.className = "button secondary";
-    inspect.href = collection.manifest_url;
-    inspect.textContent = "View manifest";
-    actions.append(copy, inspect);
+    actions.append(copy);
+    if (showDeveloperInfo) {
+      const inspect = document.createElement("a");
+      inspect.className = "button secondary";
+      inspect.href = collection.manifest_url;
+      inspect.textContent = "View manifest";
+      actions.append(inspect);
+    }
   } else if (collection.package_url) {
     const download = document.createElement("a");
     download.className = "button";
@@ -309,15 +318,22 @@ function collectionCard(collection, stableAvailable) {
     actions.append(download);
   }
 
-  card.append(meta, title, description, actions);
+  const footer = document.createElement("div");
+  footer.className = "collection-card-footer";
+  const videoCount = document.createElement("span");
+  videoCount.className = "collection-video-count";
+  videoCount.textContent = videoCountLabel(collection.video_count);
+  footer.append(actions, videoCount);
+
+  card.append(meta, title, description, footer);
   return card;
 }
 
-function renderCollections(collections, stableAvailable, category = "") {
+function renderCollections(collections, category = "", showDeveloperInfo = false) {
   const grid = document.querySelector("#collection-grid");
   const filtered = collectionsInCategory(collections, category);
   grid.replaceChildren(
-    ...filtered.map((collection) => collectionCard(collection, stableAvailable)),
+    ...filtered.map((collection) => collectionCard(collection, showDeveloperInfo)),
   );
   if (!filtered.length) {
     const empty = document.createElement("p");
@@ -343,7 +359,7 @@ function sizeCategorySelect(select) {
   );
 }
 
-async function loadCollections(stableAvailable) {
+async function loadCollections() {
   let collections = fallbackCollections;
   try {
     const response = await fetch(COLLECTIONS_URL);
@@ -355,6 +371,8 @@ async function loadCollections(stableAvailable) {
   } catch {
     // The embedded directory keeps the page useful if the optional public index is unavailable.
   }
+  const showDeveloperInfo = developerInfoEnabled(window.location.search);
+  document.querySelector("#collection-intro").textContent = collectionBrowseCopy(collections);
   const categorySelect = document.querySelector("#collection-category");
   for (const category of collectionCategories(collections)) {
     const option = document.createElement("option");
@@ -364,10 +382,11 @@ async function loadCollections(stableAvailable) {
   }
   sizeCategorySelect(categorySelect);
   categorySelect.addEventListener("change", () => {
-    renderCollections(collections, stableAvailable, categorySelect.value);
+    renderCollections(collections, categorySelect.value, showDeveloperInfo);
   });
-  renderCollections(collections, stableAvailable);
+  renderCollections(collections, "", showDeveloperInfo);
 }
 
 setupGalleryCarousel();
-void loadReleases().then(loadCollections);
+void loadReleases();
+void loadCollections();

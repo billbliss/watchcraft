@@ -122,7 +122,7 @@ class FormattingTests(unittest.TestCase):
             directory_path.write_text(
                 json.dumps({
                     "kind": "watchcraft.collection-directory",
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "base_url": "https://example.com/library",
                     "collections": [],
                 }),
@@ -132,6 +132,7 @@ class FormattingTests(unittest.TestCase):
                 "collection_id": "useful-lessons",
                 "title": "Useful Lessons",
                 "description": "Generated description.",
+                "stats": {"video_count": 1},
                 "items": {
                     "lesson": {"media": [{"delivery": "remote"}]},
                 },
@@ -150,6 +151,7 @@ class FormattingTests(unittest.TestCase):
             entry = json.loads(directory_path.read_text())["collections"][0]
             self.assertEqual(entry["media_modes"], ["remote"])
             self.assertEqual(entry["category"], "Video Editing")
+            self.assertEqual(entry["video_count"], 1)
             self.assertEqual(
                 entry["manifest_url"],
                 "https://example.com/library/collections/useful-lessons/collection.json",
@@ -158,17 +160,19 @@ class FormattingTests(unittest.TestCase):
             directory_path.write_text(
                 json.dumps({
                     "kind": "watchcraft.collection-directory",
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "base_url": "https://example.com/library",
                     "collections": [entry],
                 }),
                 encoding="utf-8",
             )
             manifest["title"] = "Better Lessons"
+            manifest["stats"]["video_count"] = 2
             update_collection_directory(workspace, manifest)
             updated = json.loads(directory_path.read_text())["collections"][0]
             self.assertEqual(updated["title"], "Better Lessons")
             self.assertEqual(updated["description"], "Hand-edited description.")
+            self.assertEqual(updated["video_count"], 2)
 
     def test_collection_category_reuses_existing_case_insensitively(self):
         client = Mock()

@@ -2,10 +2,13 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
+  collectionBrowseCopy,
   collectionCategories,
   collectionDeepLink,
   collectionsInCategory,
+  developerInfoEnabled,
   newestRelease,
+  videoCountLabel,
   visibleCollections,
   withFallbackCategories,
 } from "../site/directory.mjs";
@@ -28,6 +31,36 @@ test("omits archived collections from the public directory", () => {
   ];
 
   assert.deepEqual(visibleCollections(collections), [{ collection_id: "course" }]);
+});
+
+test("describes the number of visible featured collections", () => {
+  const collections = [
+    { collection_id: "one" },
+    { collection_id: "two" },
+    { collection_id: "archived", archived: true },
+  ];
+
+  assert.equal(
+    collectionBrowseCopy(collections),
+    "Browse 2 featured collections below, or install any compatible collection by URL.",
+  );
+  assert.equal(
+    collectionBrowseCopy([{ collection_id: "one" }]),
+    "Browse 1 featured collection below, or install any compatible collection by URL.",
+  );
+});
+
+test("shows developer information only when the debug parameter is present", () => {
+  assert.equal(developerInfoEnabled(""), false);
+  assert.equal(developerInfoEnabled("?category=Music"), false);
+  assert.equal(developerInfoEnabled("?debug"), true);
+  assert.equal(developerInfoEnabled("?debug=1"), true);
+});
+
+test("formats directory video counts", () => {
+  assert.equal(videoCountLabel(1), "1 video");
+  assert.equal(videoCountLabel(12), "12 videos");
+  assert.equal(videoCountLabel(undefined), "Video count unavailable");
 });
 
 test("lists and filters collection categories while ignoring archived entries", () => {
@@ -84,6 +117,8 @@ test("loads the public directory from the blocker-resistant endpoint", () => {
 
   assert.match(app, /https:\/\/collections\.watchcraft\.stream\/directory\.json/);
   assert.doesNotMatch(app, /collections\.watchcraft\.stream\/collections\.json/);
+  assert.match(app, /developerInfoEnabled\(window\.location\.search\)/);
+  assert.match(app, /videoCountLabel\(collection\.video_count\)/);
 });
 
 test("describes platform signing accurately", () => {

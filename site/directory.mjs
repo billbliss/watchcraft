@@ -13,6 +13,22 @@ export function visibleCollections(collections) {
   return collections.filter((collection) => collection.archived !== true);
 }
 
+export function collectionBrowseCopy(collections) {
+  const count = visibleCollections(collections).length;
+  const noun = count === 1 ? "collection" : "collections";
+  return `Browse ${count} featured ${noun} below, or install any compatible collection by URL.`;
+}
+
+export function developerInfoEnabled(search) {
+  return new URLSearchParams(search).has("debug");
+}
+
+export function videoCountLabel(value) {
+  const count = Number(value);
+  if (!Number.isInteger(count) || count < 0) return "Video count unavailable";
+  return `${count} ${count === 1 ? "video" : "videos"}`;
+}
+
 export function collectionCategories(collections) {
   return [...new Set(
     visibleCollections(collections)

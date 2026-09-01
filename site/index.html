@@ -112,7 +112,9 @@
       .mode { color: var(--accent); font-size: .78rem; font-weight: 750; text-transform: uppercase; letter-spacing: .07em; }
       .collection-category { display: -webkit-box; overflow: hidden; color: var(--muted); font-size: .72rem; font-weight: 400; line-height: 1.25; letter-spacing: .07em; text-align: right; text-transform: uppercase; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
       .collection-card p { margin: .85rem 0; font-size: .9rem; }
-      .collection-actions { display: flex; flex-wrap: wrap; gap: .45rem; margin-top: auto; padding-top: .7rem; }
+      .collection-card-footer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .75rem; align-items: end; margin-top: auto; padding-top: .7rem; }
+      .collection-actions { display: flex; flex-wrap: wrap; gap: .45rem; }
+      .collection-video-count { padding-bottom: .75rem; color: var(--muted); font-size: .78rem; line-height: 1; white-space: nowrap; }
       .collection-card .button { min-height: 2.3rem; padding: .5rem .7rem; font-size: .84rem; }
       .collection-empty { grid-column: 1 / -1; color: var(--muted); }
       .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; counter-reset: steps; }
@@ -208,7 +210,7 @@
         <div class="section-heading collection-section-heading">
           <h2>Available collections</h2>
           <div class="collection-heading-copy">
-            <p>Browse featured collections below, or install any compatible collection by URL.</p>
+            <p id="collection-intro">Loading featured collections…</p>
             <label class="category-filter" for="collection-category">
               <span>Category</span>
               <select id="collection-category">
@@ -229,6 +231,6 @@
       <p>Watchcraft is an open-source project.</p>
       <p><a href="https://github.com/billbliss/watchcraft">Application source</a> · <a href="https://github.com/billbliss/watchcraft-collections">Collection source</a></p>
     </footer>
-    <script type="module" src="app.js?v=directory-v6"></script>
+    <script type="module" src="app.js?v=directory-v7"></script>
   </body>
 </html>

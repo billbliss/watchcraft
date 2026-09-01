@@ -114,8 +114,9 @@ For a listed `collection create`, the authoring tool also chooses a public-direc
 category after import. It reuses an existing directory category when suitable and
 prints `(new category)` when it creates one. The choice is saved in
 `watchcraft-authoring.json` and copied only to the public directory, not the
-installable collection manifest. Pass `--category "Category Name"` to choose it
-explicitly.
+installable collection manifest. Directory entries also carry the collection's
+video count for the website's collection cards. Pass `--category "Category Name"`
+to choose the category explicitly.
 
 Legacy local-media libraries continue to use the `Video Catalog/` metadata folder.
 

@@ -340,6 +340,9 @@ def update_collection_directory(root: Path, manifest: dict) -> None:
             manifest.get("description")
             or f"A Watchcraft collection with {len(manifest.get('items', {}))} videos."
         ),
+        "video_count": int(
+            manifest.get("stats", {}).get("video_count", len(manifest.get("items", {})))
+        ),
         "media_modes": media_modes,
         "manifest_url": f"{base_url}/collections/{root.name}/collection.json",
     }
