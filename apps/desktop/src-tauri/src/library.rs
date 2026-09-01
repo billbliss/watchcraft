@@ -24,6 +24,7 @@ pub(crate) struct LibraryLocation {
     pub(crate) manifest_path: PathBuf,
     pub(crate) metadata_root: PathBuf,
     pub(crate) media_root: Option<PathBuf>,
+    pub(crate) media_path_prefix: PathBuf,
     pub(crate) managed_media_root: Option<PathBuf>,
     pub(crate) media_expected: usize,
     pub(crate) media_found: usize,
@@ -177,6 +178,8 @@ struct DirectoryBinding {
     #[serde(rename = "type")]
     binding_type: String,
     path: PathBuf,
+    #[serde(default)]
+    path_prefix: PathBuf,
 }
 
 pub(crate) fn install_from_folder_with_activation(
@@ -250,6 +253,7 @@ pub(crate) fn install_from_folder_with_activation(
         media_binding: media_root.clone().map(|path| DirectoryBinding {
             binding_type: "directory".into(),
             path,
+            path_prefix: PathBuf::new(),
         }),
         media_expected,
         media_found,
@@ -342,12 +346,16 @@ pub(crate) fn install_from_url(
         .iter()
         .filter(|relative| managed_media_root.join(relative).is_file())
         .count();
-    let (_, referenced_found, media_extra) = media_stats(
-        previous_binding
-            .as_ref()
-            .map(|binding| binding.path.as_path()),
-        &media.referenced_local,
-    );
+    let (_, referenced_found, media_extra) = previous_binding
+        .as_ref()
+        .map(|binding| {
+            media_stats_with_prefix(
+                Some(binding.path.as_path()),
+                &binding.path_prefix,
+                &media.referenced_local,
+            )
+        })
+        .unwrap_or((media.referenced_local.len(), 0, 0));
     let media_expected = media.managed_local.len() + media.referenced_local.len();
     let installed = InstalledCollection {
         collection_id: collection_id.clone(),
@@ -473,8 +481,9 @@ pub(crate) fn bind_collection_media(
     if media.referenced_local.is_empty() {
         return Err("This collection does not reference videos from a local folder.".into());
     }
+    let path_prefix = detect_media_path_prefix(&media_root, &media.referenced_local)?;
     let (_, referenced_found, media_extra) =
-        media_stats(Some(&media_root), &media.referenced_local);
+        media_stats_with_prefix(Some(&media_root), &path_prefix, &media.referenced_local);
     if referenced_found == 0 {
         return Err(format!(
             "None of the collection's {} expected videos were found in that folder.",
@@ -494,6 +503,7 @@ pub(crate) fn bind_collection_media(
     installed.media_binding = Some(DirectoryBinding {
         binding_type: "directory".into(),
         path: media_root,
+        path_prefix,
     });
     installed.media_expected = media.managed_local.len() + media.referenced_local.len();
     installed.media_found = managed_found + referenced_found;
@@ -629,6 +639,11 @@ fn location_for_id(
             .as_ref()
             .map(|binding| binding.path.clone())
             .filter(|path| path.is_dir()),
+        media_path_prefix: installed
+            .media_binding
+            .as_ref()
+            .map(|binding| binding.path_prefix.clone())
+            .unwrap_or_default(),
         managed_media_root,
         media_expected: installed.media_expected,
         media_found: installed.media_found,
@@ -997,13 +1012,94 @@ fn validate_media_root_hint(path: &Path) -> Result<(), String> {
 }
 
 fn media_stats(media_root: Option<&Path>, local_paths: &[PathBuf]) -> (usize, usize, usize) {
+    media_stats_with_prefix(media_root, Path::new(""), local_paths)
+}
+
+fn detect_media_path_prefix(
+    selected_root: &Path,
+    local_paths: &[PathBuf],
+) -> Result<PathBuf, String> {
+    let shared_parent_depth = local_paths
+        .iter()
+        .map(|path| path.components().count().saturating_sub(1))
+        .min()
+        .unwrap_or(0);
+    let first = local_paths
+        .first()
+        .ok_or("This collection does not reference videos from a local folder.")?;
+    let first_components = first.components().collect::<Vec<_>>();
+    let mut common_depth = 0;
+    for depth in 0..shared_parent_depth {
+        let component = first_components[depth];
+        if local_paths
+            .iter()
+            .all(|path| path.components().nth(depth) == Some(component))
+        {
+            common_depth += 1;
+        } else {
+            break;
+        }
+    }
+
+    let mut candidates = Vec::new();
+    for depth in 0..=common_depth {
+        let prefix =
+            first_components
+                .iter()
+                .take(depth)
+                .fold(PathBuf::new(), |mut path, component| {
+                    path.push(component.as_os_str());
+                    path
+                });
+        let found = local_paths
+            .iter()
+            .filter(|relative| bound_media_path(selected_root, &prefix, relative).is_file())
+            .count();
+        candidates.push((found, prefix));
+    }
+    let best_count = candidates
+        .iter()
+        .map(|(found, _)| *found)
+        .max()
+        .unwrap_or(0);
+    if best_count == 0 {
+        return Err(format!(
+            "None of the collection's {} expected videos were found in that folder.",
+            local_paths.len()
+        ));
+    }
+    let mut best = candidates
+        .into_iter()
+        .filter(|(found, _)| *found == best_count)
+        .map(|(_, prefix)| prefix)
+        .collect::<Vec<_>>();
+    if best.len() != 1 {
+        return Err("The selected folder matches the collection in more than one way. Choose the most specific folder containing the video tree.".into());
+    }
+    Ok(best.remove(0))
+}
+
+fn bound_media_path(media_root: &Path, path_prefix: &Path, relative: &Path) -> PathBuf {
+    let bound_relative = if path_prefix.as_os_str().is_empty() {
+        relative
+    } else {
+        relative.strip_prefix(path_prefix).unwrap_or(relative)
+    };
+    media_root.join(bound_relative)
+}
+
+fn media_stats_with_prefix(
+    media_root: Option<&Path>,
+    path_prefix: &Path,
+    local_paths: &[PathBuf],
+) -> (usize, usize, usize) {
     let expected = local_paths.len();
     let Some(media_root) = media_root else {
         return (expected, 0, 0);
     };
     let found = local_paths
         .iter()
-        .filter(|relative| media_root.join(relative).is_file())
+        .filter(|relative| bound_media_path(media_root, path_prefix, relative).is_file())
         .count();
     let total_video_files = count_video_files(media_root);
     (expected, found, total_video_files.saturating_sub(found))
@@ -1718,14 +1814,17 @@ mod tests {
 
     #[test]
     fn preserves_late_bound_media_across_remote_revisions() {
-        let first_manifest = remote_referenced_fixture(1, &["media/lesson.mp4"], '0');
+        let first_manifest =
+            remote_referenced_fixture(1, &["archive/MarcAdamusVideos_ByYear/lesson.mp4"], '0');
         let (first_address, first_server) = serve_remote_manifest(first_manifest, 2);
         let root = temporary_root("remote-revisions");
         let app_data = root.join("private");
-        let media_root = root.join("Adamus Videos");
-        fs::create_dir_all(media_root.join("media")).unwrap();
-        fs::write(media_root.join("media/lesson.mp4"), "video one").unwrap();
-        fs::write(media_root.join("media/second.mp4"), "video two").unwrap();
+        let media_root = root.join("MarcAdamusVideos_ByYear");
+        fs::create_dir_all(&media_root).unwrap();
+        fs::write(media_root.join("lesson.mp4"), "video one").unwrap();
+        fs::write(media_root.join("second.mp4"), "video two").unwrap();
+        fs::write(media_root.join("lesson.srt"), "subtitles").unwrap();
+        fs::write(media_root.join("lesson.json"), "metadata").unwrap();
         let media_root = media_root.canonicalize().unwrap();
 
         let first = install_from_url(
@@ -1737,11 +1836,22 @@ mod tests {
         assert_eq!((first.media_expected, first.media_found), (1, 0));
         let bound = bind_collection_media(&app_data, "remote-referenced", &media_root).unwrap();
         assert_eq!(bound.media_root.as_deref(), Some(media_root.as_path()));
+        assert_eq!(
+            bound.media_path_prefix,
+            PathBuf::from("archive/MarcAdamusVideos_ByYear")
+        );
         assert_eq!((bound.media_expected, bound.media_found), (1, 1));
+        assert_eq!(bound.media_extra, 1);
         first_server.join().unwrap();
 
-        let second_manifest =
-            remote_referenced_fixture(2, &["media/lesson.mp4", "media/second.mp4"], '1');
+        let second_manifest = remote_referenced_fixture(
+            2,
+            &[
+                "archive/MarcAdamusVideos_ByYear/lesson.mp4",
+                "archive/MarcAdamusVideos_ByYear/second.mp4",
+            ],
+            '1',
+        );
         let (second_address, second_server) = serve_remote_manifest(second_manifest, 2);
         let updated = install_from_url(
             &app_data,
@@ -1768,8 +1878,14 @@ mod tests {
         );
         second_server.join().unwrap();
 
-        let changed_revision =
-            remote_referenced_fixture(2, &["media/lesson.mp4", "media/second.mp4"], '2');
+        let changed_revision = remote_referenced_fixture(
+            2,
+            &[
+                "archive/MarcAdamusVideos_ByYear/lesson.mp4",
+                "archive/MarcAdamusVideos_ByYear/second.mp4",
+            ],
+            '2',
+        );
         let (changed_address, changed_server) = serve_remote_manifest(changed_revision, 1);
         assert!(install_from_url(
             &app_data,
@@ -1780,7 +1896,8 @@ mod tests {
         .contains("without a revision increase"));
         changed_server.join().unwrap();
 
-        let older_revision = remote_referenced_fixture(1, &["media/lesson.mp4"], '0');
+        let older_revision =
+            remote_referenced_fixture(1, &["archive/MarcAdamusVideos_ByYear/lesson.mp4"], '0');
         let (older_address, older_server) = serve_remote_manifest(older_revision, 1);
         assert!(install_from_url(
             &app_data,
