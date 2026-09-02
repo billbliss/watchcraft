@@ -5,6 +5,17 @@ export interface SavedWebCollection {
 }
 
 export const WEB_COLLECTIONS_KEY = "watchcraft.web.collections.v1";
+export const WEB_LAST_COLLECTION_KEY = "watchcraft.web.lastCollection.v1";
+
+export function readLastWebCollectionUrl(raw: string | null): string | null {
+  const url = raw?.trim();
+  if (!url) return null;
+  try {
+    return new URL(url).href;
+  } catch {
+    return null;
+  }
+}
 
 export function readWebCollections(raw: string | null): SavedWebCollection[] {
   if (!raw) return [];

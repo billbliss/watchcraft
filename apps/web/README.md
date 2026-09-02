@@ -12,8 +12,13 @@ Pass `?catalog=<manifest-url>` to use a collection published by any ordinary
 HTTP server:
 
 ```text
-?catalog=https://example.com/courses/collection.json
+https://watchcraft.stream/app/?catalog=https://example.com/courses/collection.json
 ```
+
+The production build is published beneath `/app/` as part of the same GitHub
+Pages artifact as the Watchcraft homepage. It remembers the most recently opened
+collection in browser storage. Video selection uses a query parameter so shared
+and refreshed URLs continue to work on static hosting without a rewrite rule.
 
 Local filesystem collections are tested through the Tauri desktop adapter, not
 through a Python web server.

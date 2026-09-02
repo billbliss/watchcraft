@@ -90,7 +90,7 @@ export class HttpCatalogRepository implements CatalogRepository {
 export function repositoryFromLocation(location: Location): HttpCatalogRepository {
   const params = new URLSearchParams(location.search);
   return new HttpCatalogRepository({
-    manifestUrl: params.get("catalog") ?? "/demo/collection.json",
+    manifestUrl: params.get("catalog") ?? new URL("demo/collection.json", location.href).href,
     mediaRootUrl: params.get("mediaRoot") ?? undefined,
   });
 }

@@ -158,7 +158,9 @@ compatibility smoke checklist.
 The public landing page is deployed from `site/` to
 <https://watchcraft.stream/>. It discovers permanent installer
 assets from GitHub Releases and the optional advertised collection directory
-from `watchcraft-collections`.
+from `watchcraft-collections`. The same Pages deployment publishes the remote-media
+web reader at <https://watchcraft.stream/app/>; desktop installers remain separately
+versioned GitHub Release assets.
 
 ## License
 

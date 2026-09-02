@@ -5,6 +5,8 @@ import {
   collectionBrowseCopy,
   collectionCategories,
   collectionDeepLink,
+  collectionSupportsWeb,
+  collectionWebLink,
   collectionsInCategory,
   developerInfoEnabled,
   newestRelease,
@@ -42,11 +44,11 @@ test("describes the number of visible featured collections", () => {
 
   assert.equal(
     collectionBrowseCopy(collections),
-    "Browse 2 featured collections below, or install any compatible collection by URL.",
+    "Browse 2 featured collections below, or open any compatible collection by URL.",
   );
   assert.equal(
     collectionBrowseCopy([{ collection_id: "one" }]),
-    "Browse 1 featured collection below, or install any compatible collection by URL.",
+    "Browse 1 featured collection below, or open any compatible collection by URL.",
   );
 });
 
@@ -112,6 +114,18 @@ test("builds stable public collection install links", () => {
   );
 });
 
+test("builds browser links only for collections with remote media", () => {
+  const manifestUrl = "https://example.com/courses/collection.json";
+
+  assert.equal(collectionSupportsWeb({ media_modes: ["remote"] }), true);
+  assert.equal(collectionSupportsWeb({ media_modes: ["managed-local"] }), false);
+  assert.equal(collectionSupportsWeb({}), false);
+  assert.equal(
+    collectionWebLink(manifestUrl),
+    `https://watchcraft.stream/app/?catalog=${encodeURIComponent(manifestUrl)}`,
+  );
+});
+
 test("loads the public directory from the blocker-resistant endpoint", () => {
   const app = readFileSync(new URL("../site/app.js", import.meta.url), "utf8");
 
@@ -119,6 +133,8 @@ test("loads the public directory from the blocker-resistant endpoint", () => {
   assert.doesNotMatch(app, /collections\.watchcraft\.stream\/collections\.json/);
   assert.match(app, /developerInfoEnabled\(window\.location\.search\)/);
   assert.match(app, /videoCountLabel\(collection\.video_count\)/);
+  assert.match(app, /collectionWebLink\(collection\.manifest_url\)/);
+  assert.match(app, /Continue in Watchcraft/);
 });
 
 test("describes platform signing accurately", () => {
@@ -151,4 +167,14 @@ test("publishes a screenshot gallery and social sharing metadata", () => {
   assert.match(app, /track\.append\(firstClone\)/);
   assert.match(gallery, /watchcraft-premiere-pro-beginner-tutorial\.png/);
   assert.match(workflow, /cp -R site\/gallery _site\/gallery/);
+  assert.match(workflow, /npm run build --workspace @watchcraft\/web/);
+  assert.match(workflow, /cp -R apps\/web\/dist _site\/app/);
+});
+
+test("links the public homepage to the web reader and desktop downloads", () => {
+  const page = readFileSync(new URL("../site/index.html", import.meta.url), "utf8");
+
+  assert.match(page, /data-web-app-link href="app\/"/);
+  assert.match(page, /Get the desktop app/);
+  assert.match(page, /Remote collections can open in your browser/);
 });

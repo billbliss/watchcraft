@@ -64,6 +64,7 @@
         max-width: 42rem;
         font-size: clamp(1.05rem, 1.7vw, 1.25rem);
       }
+      .hero-actions { display: flex; flex-wrap: wrap; gap: .7rem; margin-top: 1.5rem; }
       .gallery-preview { position: relative; min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 1.25rem; background: #050806; box-shadow: 0 1.2rem 3rem #0005; }
       .gallery-preview-track { display: flex; overflow-x: auto; scroll-snap-type: x mandatory; overscroll-behavior-inline: contain; scrollbar-width: none; }
       .gallery-preview-track::-webkit-scrollbar { display: none; }
@@ -140,6 +141,7 @@
       <nav aria-label="Primary navigation">
         <a class="brand" href="#top"><img src="assets/watchcraft.png" alt="">Watchcraft</a>
         <div class="nav-links">
+          <a data-web-app-link href="app/">Open web app</a>
           <a href="#download">Download</a>
           <a href="#collections">Collections</a>
           <a href="gallery.html">Gallery</a>
@@ -151,6 +153,10 @@
           <p class="eyebrow">Watchcraft</p>
           <h1>Learn a craft by watching.</h1>
           <p class="lede">Find the exact lesson where a technique is taught, move directly to its chapter, and turn a folder of videos—or a public video course—into a searchable learning library.</p>
+          <div class="hero-actions">
+            <a class="button" data-web-app-link href="app/">Open web app</a>
+            <a class="button secondary" href="#download">Get the desktop app</a>
+          </div>
         </div>
         <div class="gallery-preview">
           <div class="gallery-preview-track" aria-label="Watchcraft screenshot preview">
@@ -179,9 +185,9 @@
           <p>A collection can carry a small managed video, refer to videos already on your computer, or play remote sources such as YouTube.</p>
         </div>
         <div class="steps">
-          <div class="step">Download the version of Watchcraft for your computer and install it.</div>
-          <div class="step">Choose a collection below and open it directly in Watchcraft, or copy its URL and paste it into Watchcraft Settings.</div>
-          <div class="step">Browse the collection in Watchcraft, locate any local videos it needs, and begin learning.</div>
+          <div class="step">Open a remote collection instantly in your browser—there is nothing to install.</div>
+          <div class="step">For collections that use videos on your computer, download the desktop app for macOS, Windows, or Linux.</div>
+          <div class="step">Choose a featured collection below, or add any compatible collection URL from Watchcraft Settings.</div>
         </div>
       </section>
 
@@ -222,7 +228,7 @@
         <div class="collection-grid" id="collection-grid" aria-live="polite">
           <article class="collection-card"><p>Loading available collections…</p></article>
         </div>
-        <p class="fine-print" style="margin-top: 1rem">If an app link does not open, install Watchcraft first or use the collection's copy-URL button and add it from Settings.</p>
+        <p class="fine-print" style="margin-top: 1rem">Remote collections can open in your browser or the desktop app. Collections using local videos require the desktop app.</p>
       </section>
 
     </main>

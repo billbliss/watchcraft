@@ -24,7 +24,9 @@ import {
 interface AppProps {
   repository: CatalogRepository;
   onCollectionLoaded?: (manifest: CollectionManifest) => void;
+  routeBasePath?: string;
   sidebarFooter?: ReactElement;
+  videoRouteMode?: "path" | "query";
 }
 
 const MIN_SIDEBAR_WIDTH = 270;
@@ -68,8 +70,19 @@ function initialPlayerHeight(): number {
     : defaultPlayerHeight();
 }
 
-function routeVideoId(): string | null {
-  const match = window.location.pathname.match(/^\/video\/([^/]+)\/?$/);
+function normalizedRouteBasePath(routeBasePath: string): string {
+  const withLeadingSlash = routeBasePath.startsWith("/") ? routeBasePath : `/${routeBasePath}`;
+  return withLeadingSlash.endsWith("/") ? withLeadingSlash : `${withLeadingSlash}/`;
+}
+
+function routeVideoId(videoRouteMode: "path" | "query", routeBasePath: string): string | null {
+  if (videoRouteMode === "query") {
+    return new URLSearchParams(window.location.search).get("video");
+  }
+  const basePath = normalizedRouteBasePath(routeBasePath);
+  if (!window.location.pathname.startsWith(basePath)) return null;
+  const relativePath = window.location.pathname.slice(basePath.length);
+  const match = relativePath.match(/^video\/([^/]+)\/?$/);
   return match ? decodeURIComponent(match[1]) : null;
 }
 
@@ -151,11 +164,14 @@ function writeRoute(
   query: string,
   selectedTopics: Set<string>,
   selectedFamilies: Set<string>,
+  routeBasePath: string,
+  videoRouteMode: "path" | "query",
 ): void {
   const params = new URLSearchParams(window.location.search);
   params.delete("q");
   params.delete("topic");
   params.delete("family");
+  params.delete("video");
   if (query.trim()) params.set("q", query.trim());
   for (const topicId of [...selectedTopics].sort()) {
     params.append("topic", topicId);
@@ -163,7 +179,11 @@ function writeRoute(
   for (const familyId of [...selectedFamilies].sort()) {
     params.append("family", familyId);
   }
-  const path = itemId ? `/video/${encodeURIComponent(itemId)}` : "/";
+  const basePath = normalizedRouteBasePath(routeBasePath);
+  if (itemId && videoRouteMode === "query") params.set("video", itemId);
+  const path = itemId && videoRouteMode === "path"
+    ? `${basePath}video/${encodeURIComponent(itemId)}`
+    : basePath;
   const search = params.toString();
   window.history.replaceState(null, "", `${path}${search ? `?${search}` : ""}`);
 }
@@ -179,10 +199,18 @@ function LoadingScreen(): ReactElement {
   );
 }
 
-export function App({ onCollectionLoaded, repository, sidebarFooter }: AppProps): ReactElement {
+export function App({
+  onCollectionLoaded,
+  repository,
+  routeBasePath = "/",
+  sidebarFooter,
+  videoRouteMode = "path",
+}: AppProps): ReactElement {
   const [manifest, setManifest] = useState<CollectionManifest | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(routeVideoId);
+  const [selectedId, setSelectedId] = useState<string | null>(
+    () => routeVideoId(videoRouteMode, routeBasePath),
+  );
   const [query, setQuery] = useState(
     () => new URLSearchParams(window.location.search).get("q") ?? "",
   );
@@ -273,8 +301,15 @@ export function App({ onCollectionLoaded, repository, sidebarFooter }: AppProps)
   const selectedOrdered = items.find(({ item }) => item.item_id === selectedId);
 
   useEffect(() => {
-    writeRoute(selectedId, query, selectedTopics, selectedFamilies);
-  }, [query, selectedFamilies, selectedId, selectedTopics]);
+    writeRoute(
+      selectedId,
+      query,
+      selectedTopics,
+      selectedFamilies,
+      routeBasePath,
+      videoRouteMode,
+    );
+  }, [query, routeBasePath, selectedFamilies, selectedId, selectedTopics, videoRouteMode]);
 
   useEffect(() => {
     if (!selectedItem) {

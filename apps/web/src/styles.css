@@ -438,6 +438,15 @@ h3 { margin: 27px 0 11px; font-size: 1rem; }
 .status-card code { display: block; margin-top: 15px; overflow-wrap: anywhere; color: var(--accent); }
 .error-card { border-color: #6a3f38; }
 
+.web-sidebar-actions {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.web-home-link { padding: 7px 9px; color: var(--muted); font-size: .76rem; text-decoration: none; }
+.web-home-link:hover { color: var(--accent); }
 .web-settings-button {
   display: grid;
   width: 34px;
@@ -551,6 +560,8 @@ h3 { margin: 27px 0 11px; font-size: 1rem; }
 .web-open-after-option input { accent-color: #77b188; }
 .web-settings-error { margin: 14px 0 0; color: #ffb5aa; }
 .web-settings-progress { margin: 14px 0 0; color: var(--muted); }
+.web-settings-note { margin: 18px 0 0; color: var(--muted); font-size: .78rem; line-height: 1.5; }
+.web-settings-note a { color: var(--accent); }
 
 @media (max-width: 900px) {
   body { overflow: auto; }

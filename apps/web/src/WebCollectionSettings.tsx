@@ -131,6 +131,11 @@ export function WebCollectionSettings({
             </label>
           </section>
 
+          <p className="web-settings-note">
+            Watchcraft Web plays remote media. Collections that use videos on your computer
+            require the <a href="/#download">desktop app</a>.
+          </p>
+
           {error ? <p className="web-settings-error" role="alert">{error}</p> : null}
           {busy ? <p className="web-settings-progress" role="status">Loading collection…</p> : null}
         </div>

@@ -7,6 +7,10 @@ on:
       - main
     paths:
       - ".github/workflows/pages.yml"
+      - "apps/web/**"
+      - "packages/catalog-core/**"
+      - "package.json"
+      - "package-lock.json"
       - "site/**"
       - "apps/desktop/src-tauri/icons/128x128.png"
 
@@ -25,12 +29,22 @@ jobs:
     steps:
       - name: Check out Watchcraft
         uses: actions/checkout@v7
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install JavaScript dependencies
+        run: npm ci
+      - name: Build Watchcraft Web
+        run: npm run build --workspace @watchcraft/web
       - name: Assemble the public site
         run: |
           mkdir -p _site/assets
           cp site/index.html site/gallery.html site/app.js site/directory.mjs _site/
           cp -R site/gallery _site/gallery
           cp -R site/youtube-player _site/youtube-player
+          cp -R apps/web/dist _site/app
           cp apps/desktop/src-tauri/icons/128x128.png _site/assets/watchcraft.png
           touch _site/.nojekyll
       - name: Configure GitHub Pages

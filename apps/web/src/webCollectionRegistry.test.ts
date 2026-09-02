@@ -1,10 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  readLastWebCollectionUrl,
   readWebCollections,
   removeWebCollection,
   saveWebCollection,
 } from "./webCollectionRegistry.ts";
+
+test("reads only absolute URLs for the most recently opened collection", () => {
+  assert.equal(
+    readLastWebCollectionUrl("https://example.com/course.json"),
+    "https://example.com/course.json",
+  );
+  assert.equal(readLastWebCollectionUrl("/course.json"), null);
+  assert.equal(readLastWebCollectionUrl("not a URL"), null);
+  assert.equal(readLastWebCollectionUrl(null), null);
+});
 
 test("reads only valid saved browser collections and de-duplicates URLs", () => {
   const collections = readWebCollections(JSON.stringify([

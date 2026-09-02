@@ -8,6 +8,8 @@ import {
 } from "./catalog/httpCatalogRepository";
 import {
   WEB_COLLECTIONS_KEY,
+  WEB_LAST_COLLECTION_KEY,
+  readLastWebCollectionUrl,
   readWebCollections,
   removeWebCollection,
   saveWebCollection,
@@ -27,6 +29,23 @@ function locationState(): WebLocationState {
   };
 }
 
+function initialLocationState(): WebLocationState {
+  const location = locationState();
+  if (new URLSearchParams(window.location.search).has("catalog")) return location;
+  try {
+    const savedUrl = readLastWebCollectionUrl(
+      window.localStorage.getItem(WEB_LAST_COLLECTION_KEY),
+    );
+    if (!savedUrl) return location;
+    const url = new URL(window.location.href);
+    url.searchParams.set("catalog", savedUrl);
+    window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+    return { catalogUrl: savedUrl, mediaRootUrl: null };
+  } catch {
+    return location;
+  }
+}
+
 function readSavedCollections(): SavedWebCollection[] {
   try {
     return readWebCollections(window.localStorage.getItem(WEB_COLLECTIONS_KEY));
@@ -43,6 +62,14 @@ function persistSavedCollections(collections: SavedWebCollection[]): void {
   }
 }
 
+function persistLastCollection(url: string): void {
+  try {
+    window.localStorage.setItem(WEB_LAST_COLLECTION_KEY, url);
+  } catch {
+    // Remembering the active collection is optional.
+  }
+}
+
 function isCollectionManifest(value: unknown): value is CollectionManifest {
   if (!value || typeof value !== "object") return false;
   const manifest = value as Partial<CollectionManifest>;
@@ -53,7 +80,7 @@ function isCollectionManifest(value: unknown): value is CollectionManifest {
 }
 
 export function WebApp(): ReactElement {
-  const [currentLocation, setCurrentLocation] = useState<WebLocationState>(locationState);
+  const [currentLocation, setCurrentLocation] = useState<WebLocationState>(initialLocationState);
   const [collections, setCollections] = useState<SavedWebCollection[]>(readSavedCollections);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsBusy, setSettingsBusy] = useState(false);
@@ -72,14 +99,18 @@ export function WebApp(): ReactElement {
         url: repository.manifestLocation,
       });
       persistSavedCollections(next);
+      persistLastCollection(repository.manifestLocation);
       return next;
     });
   }, [repository.manifestLocation]);
 
   const switchCollection = useCallback((collection: SavedWebCollection): void => {
-    const url = new URL("/", window.location.href);
+    const url = new URL(window.location.href);
+    url.search = "";
+    url.hash = "";
     url.searchParams.set("catalog", collection.url);
     window.history.pushState(null, "", `${url.pathname}${url.search}${url.hash}`);
+    persistLastCollection(collection.url);
     setCurrentLocation({ catalogUrl: collection.url, mediaRootUrl: null });
     setSettingsError(null);
     setSettingsOpen(false);
@@ -148,21 +179,24 @@ export function WebApp(): ReactElement {
   }
 
   const settingsButton = (
-    <button
-      aria-label="Open settings"
-      className="web-settings-button"
-      onClick={() => {
-        setSettingsError(null);
-        setSettingsOpen(true);
-      }}
-      title="Settings"
-      type="button"
-    >
-      <svg aria-hidden="true" viewBox="0 0 24 24">
-        <path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z" />
-        <path d="M19.1 13.5a7.8 7.8 0 0 0 0-3l2-1.6-2-3.5-2.5 1a8.8 8.8 0 0 0-2.6-1.5L13.6 2h-4l-.4 2.9a8.8 8.8 0 0 0-2.6 1.5l-2.5-1-2 3.5 2 1.6a7.8 7.8 0 0 0 0 3l-2 1.6 2 3.5 2.5-1a8.8 8.8 0 0 0 2.6 1.5l.4 2.9h4l.4-2.9a8.8 8.8 0 0 0 2.6-1.5l2.5 1 2-3.5-2-1.6Z" />
-      </svg>
-    </button>
+    <div className="web-sidebar-actions">
+      <a className="web-home-link" href="/">Watchcraft home</a>
+      <button
+        aria-label="Open settings"
+        className="web-settings-button"
+        onClick={() => {
+          setSettingsError(null);
+          setSettingsOpen(true);
+        }}
+        title="Settings"
+        type="button"
+      >
+        <svg aria-hidden="true" viewBox="0 0 24 24">
+          <path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z" />
+          <path d="M19.1 13.5a7.8 7.8 0 0 0 0-3l2-1.6-2-3.5-2.5 1a8.8 8.8 0 0 0-2.6-1.5L13.6 2h-4l-.4 2.9a8.8 8.8 0 0 0-2.6 1.5l-2.5-1-2 3.5 2 1.6a7.8 7.8 0 0 0 0 3l-2 1.6 2 3.5 2.5-1a8.8 8.8 0 0 0 2.6 1.5l.4 2.9h4l.4-2.9a8.8 8.8 0 0 0 2.6-1.5l2.5 1 2-3.5-2-1.6Z" />
+        </svg>
+      </button>
+    </div>
   );
 
   return (
@@ -171,7 +205,9 @@ export function WebApp(): ReactElement {
         key={repository.manifestLocation}
         onCollectionLoaded={rememberLoadedCollection}
         repository={repository}
+        routeBasePath={import.meta.env.BASE_URL}
         sidebarFooter={settingsButton}
+        videoRouteMode="query"
       />
       {settingsOpen ? (
         <WebCollectionSettings

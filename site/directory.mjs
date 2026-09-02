@@ -16,7 +16,7 @@ export function visibleCollections(collections) {
 export function collectionBrowseCopy(collections) {
   const count = visibleCollections(collections).length;
   const noun = count === 1 ? "collection" : "collections";
-  return `Browse ${count} featured ${noun} below, or install any compatible collection by URL.`;
+  return `Browse ${count} featured ${noun} below, or open any compatible collection by URL.`;
 }
 
 export function developerInfoEnabled(search) {
@@ -53,4 +53,17 @@ export function withFallbackCategories(collections, categoriesById) {
 
 export function collectionDeepLink(manifestUrl) {
   return `watchcraft://install?url=${encodeURIComponent(manifestUrl)}`;
+}
+
+export function collectionSupportsWeb(collection) {
+  return Array.isArray(collection.media_modes) && collection.media_modes.includes("remote");
+}
+
+export function collectionWebLink(
+  manifestUrl,
+  appUrl = "https://watchcraft.stream/app/",
+) {
+  const url = new URL(appUrl);
+  url.searchParams.set("catalog", manifestUrl);
+  return url.href;
 }

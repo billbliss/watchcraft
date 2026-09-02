@@ -2,6 +2,8 @@ import {
   collectionBrowseCopy,
   collectionCategories,
   collectionDeepLink,
+  collectionSupportsWeb,
+  collectionWebLink,
   collectionsInCategory,
   developerInfoEnabled,
   newestRelease,
@@ -12,6 +14,7 @@ import {
 const RELEASES_URL = "https://api.github.com/repos/billbliss/watchcraft/releases?per_page=20";
 const RELEASES_PAGE = "https://github.com/billbliss/watchcraft/releases";
 const COLLECTIONS_URL = "https://collections.watchcraft.stream/directory.json";
+const WEB_COLLECTIONS_KEY = "watchcraft.web.collections.v1";
 const FALLBACK_CATEGORIES = {
   "hello-world-managed": "Examples",
   "hello-world-referenced": "Examples",
@@ -245,6 +248,20 @@ function modeLabel(mode) {
   }[mode] || mode;
 }
 
+function setupWebAppLinks() {
+  let hasSavedCollections = false;
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(WEB_COLLECTIONS_KEY) || "[]");
+    hasSavedCollections = Array.isArray(saved) && saved.length > 0;
+  } catch {
+    // The ordinary Open web app label works when browser storage is unavailable.
+  }
+  if (!hasSavedCollections) return;
+  for (const link of document.querySelectorAll("[data-web-app-link]")) {
+    link.textContent = "Continue in Watchcraft";
+  }
+}
+
 async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text);
@@ -287,11 +304,18 @@ function collectionCard(collection, showDeveloperInfo) {
   actions.className = "collection-actions";
 
   if (collection.manifest_url) {
+    const supportsWeb = collectionSupportsWeb(collection);
+    if (supportsWeb) {
+      const openWeb = document.createElement("a");
+      openWeb.className = "button";
+      openWeb.href = collectionWebLink(collection.manifest_url);
+      openWeb.textContent = "Open in browser";
+      actions.append(openWeb);
+    }
     const open = document.createElement("a");
-    open.className = "button";
+    open.className = supportsWeb ? "button secondary" : "button";
     open.href = collectionDeepLink(collection.manifest_url);
-    // open.textContent = stableAvailable ? "Open in Watchcraft" : "Open in Watchcraft Beta";
-    open.textContent = "Open in Watchcraft";
+    open.textContent = "Open in desktop app";
     actions.append(open);
     const copy = document.createElement("button");
     copy.className = "button secondary";
@@ -388,5 +412,6 @@ async function loadCollections() {
 }
 
 setupGalleryCarousel();
+setupWebAppLinks();
 void loadReleases();
 void loadCollections();
