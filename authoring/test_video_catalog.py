@@ -59,6 +59,7 @@ from watchcraft_author import (
     import_youtube_playlist,
     process_and_normalize_collection,
     request_collection_directory_metadata,
+    shared_collection_publisher,
     youtube_description_chapters,
     youtube_metadata,
     youtube_playlist,
@@ -170,11 +171,65 @@ class FormattingTests(unittest.TestCase):
             )
             manifest["title"] = "Better Lessons"
             manifest["stats"]["video_count"] = 2
-            update_collection_directory(workspace, manifest)
+            update_collection_directory(
+                workspace,
+                manifest,
+                previous_manifest={"description": "Generated description."},
+            )
             updated = json.loads(directory_path.read_text())["collections"][0]
             self.assertEqual(updated["title"], "Better Lessons")
             self.assertEqual(updated["description"], "Hand-edited description.")
             self.assertEqual(updated["video_count"], 2)
+
+    def test_collection_directory_refreshes_an_unedited_generated_description(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            workspace = repo / "collections" / "useful-lessons"
+            workspace.mkdir(parents=True)
+            (repo / "site").mkdir()
+            directory_path = repo / "site" / "collections.json"
+            directory_path.write_text(
+                json.dumps({
+                    "base_url": "https://example.com/library",
+                    "collections": [{
+                        "collection_id": "useful-lessons",
+                        "description": "Old generated description.",
+                    }],
+                }),
+                encoding="utf-8",
+            )
+
+            update_collection_directory(
+                workspace,
+                {
+                    "collection_id": "useful-lessons",
+                    "title": "Useful Lessons",
+                    "description": "Playlist description from YouTube.",
+                    "stats": {"video_count": 1},
+                    "items": {},
+                },
+                previous_manifest={"description": "Old generated description."},
+            )
+
+            entry = json.loads(directory_path.read_text())["collections"][0]
+            self.assertEqual(
+                entry["description"], "Playlist description from YouTube."
+            )
+
+    def test_mixed_source_playlist_has_no_single_publisher(self):
+        self.assertEqual(
+            shared_collection_publisher({
+                "one.youtube": {
+                    "publisher": "Hafu Go",
+                    "publisher_url": "https://www.youtube.com/@HafuGo",
+                },
+                "two.youtube": {
+                    "publisher": "Another Magician",
+                    "publisher_url": "https://www.youtube.com/@AnotherMagician",
+                },
+            }),
+            ("", ""),
+        )
 
     def test_collection_metadata_reuses_category_and_uses_playlist_description(self):
         client = Mock()
@@ -280,9 +335,6 @@ class FormattingTests(unittest.TestCase):
                     "collection": {
                         "title": "Garden Lessons",
                         "description": "A Watchcraft collection of public instructional videos.",
-                        "source": {
-                            "playlist_description": "Alice shows how to sow, prune, and harvest."
-                        },
                     },
                     "sources": {
                         "one.youtube": {"title": "Pruning fruit trees"}
@@ -325,6 +377,54 @@ class FormattingTests(unittest.TestCase):
                 config["collection"]["description"],
                 "Alice teaches practical sowing, pruning, and harvesting techniques "
                 "for home gardeners.",
+            )
+
+    def test_collection_metadata_uses_youtube_playlist_description_verbatim(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            workspace = repo / "collections" / "garden-lessons"
+            workspace.mkdir(parents=True)
+            (repo / "site").mkdir()
+            (repo / "site" / "collections.json").write_text(
+                json.dumps({"collections": []}), encoding="utf-8"
+            )
+            playlist_description = (
+                "Alice's own description of her practical gardening playlist."
+            )
+            (workspace / "watchcraft-authoring.json").write_text(
+                json.dumps({
+                    "kind": "watchcraft.authoring",
+                    "schema_version": 1,
+                    "collection": {
+                        "title": "Garden Lessons",
+                        "description": (
+                            "A Watchcraft collection of public instructional videos."
+                        ),
+                        "source": {
+                            "playlist_description": playlist_description,
+                        },
+                    },
+                    "sources": {},
+                }),
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                unlisted=False,
+                category="Gardening",
+                timeout=30,
+                normalization_model="normalization-test-model",
+                retries=0,
+            )
+
+            with patch("watchcraft_author.create_openai_client") as create_client:
+                ensure_collection_directory_metadata(repo, workspace, args)
+
+            create_client.assert_not_called()
+            config = json.loads(
+                (workspace / "watchcraft-authoring.json").read_text()
+            )
+            self.assertEqual(
+                config["collection"]["description"], playlist_description
             )
 
     def test_collection_metadata_preserves_hand_written_description(self):
@@ -1109,6 +1209,10 @@ class FormattingTests(unittest.TestCase):
             )
             config = json.loads((root / "watchcraft-authoring.json").read_text())
             self.assertEqual(config["collection"]["title"], "Editing Lessons")
+            self.assertEqual(
+                config["collection"]["description"],
+                "Jane Smith teaches editing and color workflows.",
+            )
             self.assertEqual(
                 config["collection"]["source"],
                 {

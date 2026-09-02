@@ -274,7 +274,12 @@ def load_authoring_config(root: Path) -> dict:
     return payload
 
 
-def update_collection_directory(root: Path, manifest: dict) -> None:
+def update_collection_directory(
+    root: Path,
+    manifest: dict,
+    *,
+    previous_manifest: dict | None = None,
+) -> None:
     """Advertise a repository collection unless its authoring config opts out."""
     if root.parent.name != "collections":
         return
@@ -352,9 +357,17 @@ def update_collection_directory(root: Path, manifest: dict) -> None:
     if matching_indexes:
         first = matching_indexes[0]
         existing = entries[first]
-        generated_entry["description"] = str(
-            existing.get("description") or generated_entry["description"]
+        existing_description = str(existing.get("description") or "")
+        previous_description = (
+            str(previous_manifest.get("description") or "")
+            if previous_manifest is not None
+            else None
         )
+        if existing_description and (
+            previous_description is None
+            or existing_description != previous_description
+        ):
+            generated_entry["description"] = existing_description
         entries[first] = {**existing, **generated_entry}
         for index in reversed(matching_indexes[1:]):
             del entries[index]
@@ -729,7 +742,11 @@ def write_collection(root: Path) -> dict:
         metadata_root / "catalog.csv", render_csv(analyses, collection_manifest)
     )
     (metadata_root / "catalog.html").unlink(missing_ok=True)
-    update_collection_directory(root, collection_manifest)
+    update_collection_directory(
+        root,
+        collection_manifest,
+        previous_manifest=previous_manifest,
+    )
     print(
         f"built {collection_manifest['title']} revision "
         f"{collection_manifest['revision']} for {len(analyses)} videos"

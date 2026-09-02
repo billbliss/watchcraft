@@ -578,6 +578,21 @@ def collection_directory_categories(collections_repo: Path) -> list[str]:
     )
 
 
+def shared_collection_publisher(
+    sources: dict[str, Any],
+) -> tuple[str, str]:
+    publishers: dict[str, tuple[str, str]] = {}
+    for source in sources.values():
+        if not isinstance(source, dict):
+            continue
+        publisher = " ".join(str(source.get("publisher") or "").split())
+        if not publisher:
+            continue
+        publisher_url = str(source.get("publisher_url") or "").strip()
+        publishers.setdefault(publisher.casefold(), (publisher, publisher_url))
+    return next(iter(publishers.values())) if len(publishers) == 1 else ("", "")
+
+
 def collection_description_needs_generation(
     collection: dict[str, Any],
 ) -> bool:
@@ -691,7 +706,22 @@ def ensure_collection_directory_metadata(
     explicit = " ".join(str(args.category or "").split())
     saved = " ".join(str(collection.get("category") or "").split())
     needs_description = collection_description_needs_generation(collection)
+    collection_source = collection.get("source")
+    playlist_description = (
+        " ".join(
+            str(collection_source.get("playlist_description") or "").split()
+        )
+        if isinstance(collection_source, dict)
+        else ""
+    )
+    imported_description = needs_description and bool(playlist_description)
+    if imported_description:
+        collection["description"] = playlist_description
+        needs_description = False
+        print(f"description: {playlist_description} (from YouTube)", flush=True)
     if saved and not explicit and not needs_description:
+        if imported_description:
+            write_authoring_config(workspace, config)
         return saved
     existing_categories = collection_directory_categories(collections_repo)
     existing_by_key = {
@@ -957,6 +987,7 @@ def import_youtube_playlist(
     )
     if playlist_description:
         source["playlist_description"] = playlist_description
+        collection["description"] = playlist_description
     else:
         source.pop("playlist_description", None)
     write_authoring_config(workspace, config)
@@ -1369,14 +1400,19 @@ def create_playlist_collection(args: argparse.Namespace) -> int:
         video_id = str(item.get("video_id") or key.removesuffix(".youtube"))
         if video_id in positions:
             item["position"] = positions[video_id]
-    first_source = next(iter(config.get("sources", {}).values()), {})
-    publisher = str(first_source.get("publisher") or "")
-    publisher_url = str(first_source.get("publisher_url") or "")
+    publisher, publisher_url = shared_collection_publisher(
+        config.get("sources", {})
+    )
     if publisher:
         collection["publisher"] = publisher
         source["publisher"] = publisher
+    else:
+        collection.pop("publisher", None)
+        source.pop("publisher", None)
     if publisher_url:
         source["publisher_url"] = publisher_url
+    else:
+        source.pop("publisher_url", None)
     write_authoring_config(workspace, config)
     atomic_write_text(
         workspace / "README.md",

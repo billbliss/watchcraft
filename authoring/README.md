@@ -114,10 +114,11 @@ stored in `watchcraft-authoring.json` and respected by later builds.
 
 For a listed `collection create`, the authoring tool also creates the public-directory
 description and chooses its category after import, using the topic-normalization model.
-The description is based on the playlist's YouTube description, publisher, and video
-titles. Existing hand-written collection descriptions are preserved. Category selection
-reuses an existing directory category when suitable and prints `(new category)` when it
-creates one. The results are saved in
+When YouTube supplies a playlist description, Watchcraft uses that text verbatim;
+otherwise it generates a description from the available publisher and video titles.
+Existing hand-written directory descriptions are preserved. Category selection reuses
+an existing directory category when suitable and prints `(new category)` when it creates
+one. The results are saved in
 `watchcraft-authoring.json` and copied only to the public directory, not the
 installable collection manifest. Directory entries also carry the collection's
 video count for the website's collection cards. Pass `--category "Category Name"`
