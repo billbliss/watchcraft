@@ -144,6 +144,11 @@ test("Linux packages retain the media runtime required for embedded playback", (
   ]);
 });
 
+test("desktop media policy permits the private Linux loopback stream", () => {
+  assert.match(tauriConfig.app.security.csp["media-src"], /http:\/\/127\.0\.0\.1:\*/);
+  assert.match(tauriConfig.app.security.devCsp["media-src"], /http:\/\/127\.0\.0\.1:\*/);
+});
+
 test("Linux Debian packages include channel-specific AppStream metadata", () => {
   const stableDestination = "/usr/share/metainfo/app.watchcraft.reader.metainfo.xml";
   const betaDestination = "/usr/share/metainfo/app.watchcraft.reader.beta.metainfo.xml";

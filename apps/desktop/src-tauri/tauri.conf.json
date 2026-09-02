@@ -27,7 +27,7 @@
         "default-src": "'self' customprotocol: asset:",
         "connect-src": "ipc: http://ipc.localhost asset: http://asset.localhost",
         "img-src": "'self' asset: http://asset.localhost data:",
-        "media-src": "'self' asset: http://asset.localhost stream: http://stream.localhost",
+        "media-src": "'self' asset: http://asset.localhost stream: http://stream.localhost http://127.0.0.1:*",
         "frame-src": "https://watchcraft.stream https://www.youtube-nocookie.com https://www.youtube.com",
         "style-src": "'self' 'unsafe-inline'"
       },
@@ -35,7 +35,7 @@
         "default-src": "'self' http://127.0.0.1:1420 customprotocol: asset:",
         "connect-src": "ipc: http://ipc.localhost http://127.0.0.1:1420 ws://127.0.0.1:1420 asset: http://asset.localhost",
         "img-src": "'self' asset: http://asset.localhost data:",
-        "media-src": "'self' asset: http://asset.localhost stream: http://stream.localhost",
+        "media-src": "'self' asset: http://asset.localhost stream: http://stream.localhost http://127.0.0.1:*",
         "frame-src": "https://watchcraft.stream https://www.youtube-nocookie.com https://www.youtube.com",
         "style-src": "'self' 'unsafe-inline'"
       },

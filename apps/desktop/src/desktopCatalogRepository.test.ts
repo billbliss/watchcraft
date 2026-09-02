@@ -5,6 +5,7 @@ import {
   DesktopCatalogRepository,
   joinLocalPath,
   localMediaRoot,
+  localVideoUrl,
   type DesktopLibraryLocation,
 } from "./desktopCatalogRepository.ts";
 
@@ -56,6 +57,20 @@ test("selects the correct local root for each delivery mode", () => {
   assert.equal(localMediaRoot(localLocation, "managed-local"), "/private/managed-media");
   assert.equal(localMediaRoot(localLocation, "referenced-local"), "/user/course");
   assert.equal(localMediaRoot(localLocation), "/user/course");
+});
+
+test("builds a private localhost media URL without losing the local path", () => {
+  const url = localVideoUrl(
+    "/mnt/watchcraft-nas/Part 3 (2022)/Clements Fireweed.mp4",
+    "http://127.0.0.1:41234/session-token",
+  );
+  const parsed = new URL(url);
+  assert.equal(parsed.origin, "http://127.0.0.1:41234");
+  assert.equal(parsed.pathname, "/session-token");
+  assert.equal(
+    parsed.searchParams.get("path"),
+    "/mnt/watchcraft-nas/Part 3 (2022)/Clements Fireweed.mp4",
+  );
 });
 
 test("routes desktop YouTube playback through the HTTPS player bridge", () => {

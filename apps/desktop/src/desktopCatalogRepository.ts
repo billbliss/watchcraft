@@ -55,6 +55,13 @@ export function localMediaRoot(
   return delivery === "managed-local" ? location.managedMediaRoot : location.mediaRoot;
 }
 
+export function localVideoUrl(path: string, streamBaseUrl?: string | null): string {
+  if (!streamBaseUrl) return convertFileSrc(path, "stream");
+  const url = new URL(streamBaseUrl);
+  url.searchParams.set("path", path);
+  return url.toString();
+}
+
 async function fetchLocalJson<T>(path: string): Promise<T> {
   const response = await fetch(convertFileSrc(path), { cache: "no-store" });
   if (!response.ok) {
@@ -67,10 +74,16 @@ export class DesktopCatalogRepository implements CatalogRepository {
   readonly canOpenInDefaultPlayer = true;
   readonly location: DesktopLibraryLocation;
   readonly youtubeBridgeBaseUrl: string;
+  readonly videoStreamBaseUrl: string | null;
 
-  constructor(location: DesktopLibraryLocation, youtubeBridgeBaseUrl?: string) {
+  constructor(
+    location: DesktopLibraryLocation,
+    youtubeBridgeBaseUrl?: string,
+    videoStreamBaseUrl?: string | null,
+  ) {
     this.location = location;
     this.youtubeBridgeBaseUrl = youtubeBridgeBaseUrl ?? DEFAULT_YOUTUBE_BRIDGE_URL;
+    this.videoStreamBaseUrl = videoStreamBaseUrl ?? null;
   }
 
   get manifestLocation(): string {
@@ -99,7 +112,10 @@ export class DesktopCatalogRepository implements CatalogRepository {
     const relativePath = media.delivery === "managed-local"
       ? media.relative_path
       : boundMediaRelativePath(media.relative_path, this.location.mediaPathPrefix);
-    return convertFileSrc(joinLocalPath(root, relativePath), "stream");
+    return localVideoUrl(
+      joinLocalPath(root, relativePath),
+      this.videoStreamBaseUrl,
+    );
   }
 
   async defaultPlayerName(item: CatalogItem): Promise<string | null> {

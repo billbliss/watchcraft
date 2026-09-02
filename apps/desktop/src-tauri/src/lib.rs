@@ -5,10 +5,16 @@ use http::{
 use http_range::HttpRange;
 use percent_encoding::percent_decode_str;
 use std::error::Error;
+#[cfg(any(target_os = "linux", test))]
+use std::io::Write;
 use std::io::{Read, Seek, SeekFrom};
+#[cfg(any(target_os = "linux", test))]
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::RwLock;
+#[cfg(any(target_os = "linux", test))]
+use std::time::Duration;
 use tauri::{Manager, Runtime};
 use tauri_plugin_dialog::DialogExt;
 use url::Url;
@@ -25,6 +31,9 @@ const HOSTED_YOUTUBE_BRIDGE_URL: &str = "https://watchcraft.stream/youtube-playe
 struct ApprovedLibraryRoots(RwLock<Vec<PathBuf>>);
 
 struct YoutubeBridgeBaseUrl(String);
+
+#[derive(Default)]
+struct VideoStreamBaseUrl(RwLock<Option<String>>);
 
 fn is_video_path(path: &Path) -> bool {
     path.extension()
@@ -218,6 +227,276 @@ fn validated_video_path<R: Runtime>(
         return Err("The requested video is outside the selected library.".into());
     }
     Ok(canonical_path)
+}
+
+fn requested_byte_range(range_header: Option<&str>, length: u64) -> Result<Option<(u64, u64)>, ()> {
+    let Some(range_header) = range_header else {
+        return Ok(None);
+    };
+    let ranges = HttpRange::parse(range_header, length).map_err(|_| ())?;
+    if ranges.len() != 1 {
+        return Err(());
+    }
+    let range = &ranges[0];
+    if range.start >= length || range.length == 0 {
+        return Err(());
+    }
+    Ok(Some((
+        range.start,
+        range.length.min(MAX_STREAM_CHUNK).min(length - range.start),
+    )))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_stream_token() -> Result<String, String> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut random = [0_u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut source| source.read_exact(&mut random))
+        .map_err(|error| format!("Could not create the private video stream token: {error}"))?;
+    let mut token = String::with_capacity(random.len() * 2);
+    for byte in random {
+        token.push(HEX[(byte >> 4) as usize] as char);
+        token.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    Ok(token)
+}
+
+#[cfg(any(target_os = "linux", test))]
+struct LinuxHttpRequest {
+    method: String,
+    target: String,
+    range: Option<String>,
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn read_linux_http_request(stream: &mut TcpStream) -> Result<LinuxHttpRequest, String> {
+    const MAX_HEADER_BYTES: usize = 16 * 1024;
+    let mut bytes = Vec::with_capacity(2048);
+    let mut buffer = [0_u8; 2048];
+    while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+        if bytes.len() >= MAX_HEADER_BYTES {
+            return Err("The request headers are too large.".into());
+        }
+        let read = stream
+            .read(&mut buffer)
+            .map_err(|error| format!("Could not read the request: {error}"))?;
+        if read == 0 {
+            return Err("The request ended before its headers were complete.".into());
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+    }
+    let headers = std::str::from_utf8(&bytes)
+        .map_err(|_| "The request headers are not valid UTF-8.".to_string())?;
+    let mut lines = headers.split("\r\n");
+    let mut request_line = lines
+        .next()
+        .ok_or_else(|| "The request line is missing.".to_string())?
+        .split_ascii_whitespace();
+    let method = request_line
+        .next()
+        .ok_or_else(|| "The request method is missing.".to_string())?
+        .to_string();
+    let target = request_line
+        .next()
+        .ok_or_else(|| "The request target is missing.".to_string())?
+        .to_string();
+    let range = lines.find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("range")
+            .then(|| value.trim().to_string())
+    });
+    Ok(LinuxHttpRequest {
+        method,
+        target,
+        range,
+    })
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn write_linux_http_headers<W: Write>(
+    stream: &mut W,
+    status: &str,
+    headers: &[(&str, String)],
+) -> std::io::Result<()> {
+    write!(stream, "HTTP/1.1 {status}\r\n")?;
+    for (name, value) in headers {
+        write!(stream, "{name}: {value}\r\n")?;
+    }
+    write!(stream, "Connection: close\r\n\r\n")?;
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn write_linux_http_error<W: Write>(stream: &mut W, status: &str) -> std::io::Result<()> {
+    write_linux_http_headers(
+        stream,
+        status,
+        &[
+            ("Content-Length", "0".into()),
+            ("Cache-Control", "no-store".into()),
+            ("Access-Control-Allow-Origin", "*".into()),
+        ],
+    )
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn write_linux_video_response<W: Write>(
+    stream: &mut W,
+    path: &Path,
+    method: &str,
+    range_header: Option<&str>,
+) -> Result<(), String> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| format!("Could not open the requested video: {error}"))?;
+    let length = file
+        .metadata()
+        .map_err(|error| format!("Could not inspect the requested video: {error}"))?
+        .len();
+    let byte_range = match requested_byte_range(range_header, length) {
+        Ok(range) => range,
+        Err(()) => {
+            write_linux_http_headers(
+                stream,
+                "416 Range Not Satisfiable",
+                &[
+                    ("Content-Length", "0".into()),
+                    ("Content-Range", format!("bytes */{length}")),
+                    ("Accept-Ranges", "bytes".into()),
+                    ("Cache-Control", "no-store".into()),
+                    ("Access-Control-Allow-Origin", "*".into()),
+                ],
+            )
+            .map_err(|error| format!("Could not reject the video range: {error}"))?;
+            return Ok(());
+        }
+    };
+    let (status, start, response_length, content_range) = match byte_range {
+        Some((start, response_length)) => (
+            "206 Partial Content",
+            start,
+            response_length,
+            Some(format!(
+                "bytes {start}-{}/{length}",
+                start + response_length - 1
+            )),
+        ),
+        None => ("200 OK", 0, length, None),
+    };
+    let mut headers = vec![
+        ("Content-Type", video_content_type(path).into()),
+        ("Content-Length", response_length.to_string()),
+        ("Accept-Ranges", "bytes".into()),
+        ("Cache-Control", "no-store".into()),
+        ("Access-Control-Allow-Origin", "*".into()),
+        ("X-Content-Type-Options", "nosniff".into()),
+    ];
+    if let Some(content_range) = content_range {
+        headers.push(("Content-Range", content_range));
+    }
+    write_linux_http_headers(stream, status, &headers)
+        .map_err(|error| format!("Could not start the video response: {error}"))?;
+    if method == "HEAD" || response_length == 0 {
+        return Ok(());
+    }
+    file.seek(SeekFrom::Start(start))
+        .map_err(|error| format!("Could not seek in the requested video: {error}"))?;
+    std::io::copy(&mut file.take(response_length), stream)
+        .map_err(|error| format!("Could not stream the requested video: {error}"))?;
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn serve_linux_video_request(
+    app: &tauri::AppHandle,
+    token: &str,
+    mut stream: TcpStream,
+) -> Result<(), String> {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|error| format!("Could not configure the video request: {error}"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(30)))
+        .map_err(|error| format!("Could not configure the video response: {error}"))?;
+    let request = read_linux_http_request(&mut stream)?;
+    if request.method != "GET" && request.method != "HEAD" {
+        write_linux_http_error(&mut stream, "405 Method Not Allowed")
+            .map_err(|error| format!("Could not reject the video request: {error}"))?;
+        return Ok(());
+    }
+
+    let request_url = Url::parse(&format!("http://127.0.0.1{}", request.target))
+        .map_err(|_| "The video request URL is invalid.".to_string())?;
+    if request_url.path() != format!("/{token}") {
+        write_linux_http_error(&mut stream, "404 Not Found")
+            .map_err(|error| format!("Could not reject the video request: {error}"))?;
+        return Ok(());
+    }
+    let Some(requested_path) = request_url
+        .query_pairs()
+        .find_map(|(name, value)| (name == "path").then(|| value.into_owned()))
+    else {
+        write_linux_http_error(&mut stream, "400 Bad Request")
+            .map_err(|error| format!("Could not reject the video request: {error}"))?;
+        return Ok(());
+    };
+    let path = match validated_video_path(app, &requested_path) {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("Watchcraft local video stream rejected a path: {error}");
+            write_linux_http_error(&mut stream, "403 Forbidden").map_err(|write_error| {
+                format!("Could not reject the video request: {write_error}")
+            })?;
+            return Ok(());
+        }
+    };
+
+    write_linux_video_response(
+        &mut stream,
+        &path,
+        &request.method,
+        request.range.as_deref(),
+    )
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn start_linux_video_stream_server(app: tauri::AppHandle) -> Result<String, String> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|error| format!("Could not start the private video stream: {error}"))?;
+    let address = listener
+        .local_addr()
+        .map_err(|error| format!("Could not inspect the private video stream: {error}"))?;
+    let token = linux_stream_token()?;
+    let base_url = format!("http://127.0.0.1:{}/{}", address.port(), token);
+    std::thread::Builder::new()
+        .name("watchcraft-video-stream".into())
+        .spawn(move || {
+            for connection in listener.incoming() {
+                match connection {
+                    Ok(stream) => {
+                        let app = app.clone();
+                        let token = token.clone();
+                        if let Err(error) = std::thread::Builder::new()
+                            .name("watchcraft-video-request".into())
+                            .spawn(move || {
+                                if let Err(error) = serve_linux_video_request(&app, &token, stream)
+                                {
+                                    eprintln!("Watchcraft local video stream failed: {error}");
+                                }
+                            })
+                        {
+                            eprintln!("Watchcraft could not accept a video request: {error}");
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("Watchcraft local video stream stopped: {error}");
+                        break;
+                    }
+                }
+            }
+        })
+        .map_err(|error| format!("Could not run the private video stream: {error}"))?;
+    Ok(base_url)
 }
 
 fn app_data_root<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
@@ -450,27 +729,21 @@ fn video_stream_response<R: Runtime>(
             .body(Vec::new())?);
     }
 
-    if let Some(range_header) = request.headers().get("range") {
+    if request.headers().contains_key("range") {
         let not_satisfiable = || {
             Response::builder()
                 .status(StatusCode::RANGE_NOT_SATISFIABLE)
                 .header(CONTENT_RANGE, format!("bytes */{length}"))
                 .body(Vec::new())
         };
-        let ranges = match range_header
-            .to_str()
-            .ok()
-            .and_then(|value| HttpRange::parse(value, length).ok())
-        {
-            Some(ranges) if ranges.len() == 1 => ranges,
+        let range_header = request
+            .headers()
+            .get("range")
+            .and_then(|value| value.to_str().ok());
+        let (start, bytes_to_read) = match requested_byte_range(range_header, length) {
+            Ok(Some(range)) => range,
             _ => return Ok(not_satisfiable()?),
         };
-        let range = &ranges[0];
-        let start = range.start;
-        if start >= length || range.length == 0 {
-            return Ok(not_satisfiable()?);
-        }
-        let bytes_to_read = range.length.min(MAX_STREAM_CHUNK).min(length - start);
         let end = start + bytes_to_read - 1;
         let mut body = Vec::with_capacity(bytes_to_read as usize);
         file.seek(SeekFrom::Start(start))?;
@@ -585,6 +858,17 @@ fn default_video_player(app: tauri::AppHandle, path: String) -> Result<Option<St
 #[tauri::command]
 fn youtube_bridge_base_url(bridge: tauri::State<YoutubeBridgeBaseUrl>) -> String {
     bridge.0.clone()
+}
+
+#[tauri::command]
+fn video_stream_base_url(
+    stream: tauri::State<VideoStreamBaseUrl>,
+) -> Result<Option<String>, String> {
+    stream
+        .0
+        .read()
+        .map(|base_url| base_url.clone())
+        .map_err(|_| "The local video stream state is unavailable.".into())
 }
 
 #[tauri::command]
@@ -758,6 +1042,7 @@ pub fn run() {
     builder
         .manage(ApprovedLibraryRoots::default())
         .manage(YoutubeBridgeBaseUrl(configured_youtube_bridge_base_url))
+        .manage(VideoStreamBaseUrl::default())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_persisted_scope::init())
         .plugin(tauri_plugin_dialog::init())
@@ -773,6 +1058,14 @@ pub fn run() {
             responder.respond(response);
         })
         .setup(|_app| {
+            #[cfg(any(target_os = "linux", test))]
+            {
+                let base_url = start_linux_video_stream_server(_app.handle().clone())
+                    .map_err(std::io::Error::other)?;
+                *_app.state::<VideoStreamBaseUrl>().0.write().map_err(|_| {
+                    std::io::Error::other("The local video stream state is unavailable.")
+                })? = Some(base_url);
+            }
             #[cfg(target_os = "linux")]
             {
                 // Debian desktop databases do not always refresh immediately after a
@@ -789,6 +1082,7 @@ pub fn run() {
             open_external_url,
             default_video_player,
             youtube_bridge_base_url,
+            video_stream_base_url,
             load_current_collection,
             list_registered_collections,
             choose_collection_folder,
@@ -808,8 +1102,8 @@ pub fn run() {
 mod tests {
     use super::{
         canonical_video_roots, configured_youtube_bridge_base_url, is_video_path,
-        is_within_approved_roots, linux_deep_link_schemes_to_register, validated_external_url,
-        video_content_type,
+        is_within_approved_roots, linux_deep_link_schemes_to_register, requested_byte_range,
+        validated_external_url, video_content_type, write_linux_video_response, MAX_STREAM_CHUNK,
     };
     use std::fs;
     use std::path::Path;
@@ -920,6 +1214,49 @@ mod tests {
             "video/quicktime"
         );
         assert_eq!(video_content_type(Path::new("lesson.webm")), "video/webm");
+    }
+
+    #[test]
+    fn bounds_open_ended_video_ranges_to_streaming_chunks() {
+        assert_eq!(
+            requested_byte_range(Some("bytes=100-"), 10 * 1024 * 1024),
+            Ok(Some((100, MAX_STREAM_CHUNK)))
+        );
+    }
+
+    #[test]
+    fn rejects_multiple_or_unsatisfiable_video_ranges() {
+        assert_eq!(requested_byte_range(Some("bytes=0-10,20-30"), 100), Err(()));
+        assert_eq!(requested_byte_range(Some("bytes=100-"), 100), Err(()));
+    }
+
+    #[test]
+    fn writes_seekable_linux_video_responses_without_buffering_the_whole_file() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "watchcraft-video-response-{}-{nonce}.mp4",
+            std::process::id()
+        ));
+        fs::write(&path, b"0123456789").expect("create temporary video");
+
+        let mut response = Vec::new();
+        write_linux_video_response(&mut response, &path, "GET", Some("bytes=2-5"))
+            .expect("write partial response");
+        let header_end = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .expect("response header terminator")
+            + 4;
+        let headers = std::str::from_utf8(&response[..header_end]).expect("response headers");
+        assert!(headers.starts_with("HTTP/1.1 206 Partial Content\r\n"));
+        assert!(headers.contains("Content-Range: bytes 2-5/10\r\n"));
+        assert!(headers.contains("Content-Length: 4\r\n"));
+        assert_eq!(&response[header_end..], b"2345");
+
+        fs::remove_file(path).expect("remove temporary video");
     }
 
     #[cfg(target_os = "macos")]

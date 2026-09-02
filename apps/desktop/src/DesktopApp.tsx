@@ -37,6 +37,7 @@ export function DesktopApp(): ReactElement {
   const [scopeStatus, setScopeStatus] = useState<ScopeStatus>("checking");
   const [libraryLocation, setLibraryLocation] = useState<DesktopLibraryLocation | null>(null);
   const [youtubeBridgeBaseUrl, setYoutubeBridgeBaseUrl] = useState<string | null>(null);
+  const [videoStreamBaseUrl, setVideoStreamBaseUrl] = useState<string | null | undefined>(undefined);
   const [collections, setCollections] = useState<RegisteredCollection[]>([]);
   const [libraryError, setLibraryError] = useState<string | null>(null);
   const [settingsError, setSettingsError] = useState<string | null>(null);
@@ -45,10 +46,17 @@ export function DesktopApp(): ReactElement {
   const [pendingDeepLinkUrl, setPendingDeepLinkUrl] = useState<string | null>(null);
   const processingDeepLink = useRef<string | null>(null);
   const repository = useMemo(
-    () => libraryLocation && youtubeBridgeBaseUrl && scopeStatus === "ready"
-      ? new DesktopCatalogRepository(libraryLocation, youtubeBridgeBaseUrl)
+    () => libraryLocation
+      && youtubeBridgeBaseUrl
+      && videoStreamBaseUrl !== undefined
+      && scopeStatus === "ready"
+      ? new DesktopCatalogRepository(
+          libraryLocation,
+          youtubeBridgeBaseUrl,
+          videoStreamBaseUrl,
+        )
       : null,
-    [libraryLocation, scopeStatus, youtubeBridgeBaseUrl],
+    [libraryLocation, scopeStatus, videoStreamBaseUrl, youtubeBridgeBaseUrl],
   );
 
   const refreshCollections = useCallback(async (): Promise<RegisteredCollection[]> => {
@@ -74,10 +82,12 @@ export function DesktopApp(): ReactElement {
     void Promise.all([
       restoreLibrary(),
       invoke<string>("youtube_bridge_base_url"),
+      invoke<string | null>("video_stream_base_url"),
     ])
-      .then(async ([location, bridgeBaseUrl]) => {
+      .then(async ([location, bridgeBaseUrl, streamBaseUrl]) => {
         if (!current) return;
         setYoutubeBridgeBaseUrl(bridgeBaseUrl);
+        setVideoStreamBaseUrl(streamBaseUrl);
         if (location) openLocation(location);
         else setScopeStatus("needs-access");
         await refreshCollections();
