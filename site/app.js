@@ -244,7 +244,7 @@ function modeLabel(mode) {
   return {
     "managed-local": "Managed local media",
     "referenced-local": "Referenced local media",
-    remote: "Remote media",
+    remote: "Web Video",
   }[mode] || mode;
 }
 

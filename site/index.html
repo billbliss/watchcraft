@@ -182,13 +182,32 @@
       <section id="getting-started">
         <div class="section-heading">
           <h2>Getting started</h2>
-          <p>A collection can carry a small managed video, refer to videos already on your computer, or play remote sources such as YouTube.</p>
+          <p>A collection can carry a small managed video, refer to videos already on your computer, or play web video such as YouTube.</p>
         </div>
         <div class="steps">
-          <div class="step">Open a remote collection instantly in your browser—there is nothing to install.</div>
-          <div class="step">For collections that use videos on your computer, download the desktop app for macOS, Windows, or Linux.</div>
+          <div class="step">Open a web-video collection instantly in your browser—there is nothing to install.</div>
+          <div class="step">For collections that use videos on your computer, <a href="#download">download</a> the desktop app for macOS, Windows, or Linux.</div>
           <div class="step">Choose a featured collection below, or add any compatible collection URL from Watchcraft Settings.</div>
         </div>
+      </section>
+
+      <section id="collections">
+        <div class="section-heading collection-section-heading">
+          <h2>Available collections</h2>
+          <div class="collection-heading-copy">
+            <p id="collection-intro">Loading featured collections…</p>
+            <label class="category-filter" for="collection-category">
+              <span>Category</span>
+              <select id="collection-category">
+                <option value="">All</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <div class="collection-grid" id="collection-grid" aria-live="polite">
+          <article class="collection-card"><p>Loading available collections…</p></article>
+        </div>
+        <p class="fine-print" style="margin-top: 1rem">Web-video collections can open in your browser or the desktop app. Collections using local videos require the desktop app.</p>
       </section>
 
       <section id="download">
@@ -210,25 +229,6 @@
           </article>
         </div>
         <p class="fine-print" style="margin-top: 1rem">All published versions remain available on <a href="https://github.com/billbliss/watchcraft/releases">GitHub Releases</a>.</p>
-      </section>
-
-      <section id="collections">
-        <div class="section-heading collection-section-heading">
-          <h2>Available collections</h2>
-          <div class="collection-heading-copy">
-            <p id="collection-intro">Loading featured collections…</p>
-            <label class="category-filter" for="collection-category">
-              <span>Category</span>
-              <select id="collection-category">
-                <option value="">All</option>
-              </select>
-            </label>
-          </div>
-        </div>
-        <div class="collection-grid" id="collection-grid" aria-live="polite">
-          <article class="collection-card"><p>Loading available collections…</p></article>
-        </div>
-        <p class="fine-print" style="margin-top: 1rem">Remote collections can open in your browser or the desktop app. Collections using local videos require the desktop app.</p>
       </section>
 
     </main>

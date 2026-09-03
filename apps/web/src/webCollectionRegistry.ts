@@ -17,6 +17,14 @@ export function readLastWebCollectionUrl(raw: string | null): string | null {
   }
 }
 
+export function isLegacyWebDemoUrl(rawUrl: string, appUrl: string): boolean {
+  try {
+    return new URL(rawUrl).href === new URL("demo/collection.json", appUrl).href;
+  } catch {
+    return false;
+  }
+}
+
 export function readWebCollections(raw: string | null): SavedWebCollection[] {
   if (!raw) return [];
   try {

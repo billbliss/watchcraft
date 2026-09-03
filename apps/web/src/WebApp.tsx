@@ -9,6 +9,7 @@ import {
 import {
   WEB_COLLECTIONS_KEY,
   WEB_LAST_COLLECTION_KEY,
+  isLegacyWebDemoUrl,
   readLastWebCollectionUrl,
   readWebCollections,
   removeWebCollection,
@@ -36,7 +37,10 @@ function initialLocationState(): WebLocationState {
     const savedUrl = readLastWebCollectionUrl(
       window.localStorage.getItem(WEB_LAST_COLLECTION_KEY),
     );
-    if (!savedUrl) return location;
+    if (!savedUrl || isLegacyWebDemoUrl(savedUrl, window.location.href)) {
+      window.localStorage.removeItem(WEB_LAST_COLLECTION_KEY);
+      return location;
+    }
     const url = new URL(window.location.href);
     url.searchParams.set("catalog", savedUrl);
     window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
@@ -48,7 +52,8 @@ function initialLocationState(): WebLocationState {
 
 function readSavedCollections(): SavedWebCollection[] {
   try {
-    return readWebCollections(window.localStorage.getItem(WEB_COLLECTIONS_KEY));
+    return readWebCollections(window.localStorage.getItem(WEB_COLLECTIONS_KEY))
+      .filter((collection) => !isLegacyWebDemoUrl(collection.url, window.location.href));
   } catch {
     return [];
   }

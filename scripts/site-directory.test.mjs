@@ -114,7 +114,7 @@ test("builds stable public collection install links", () => {
   );
 });
 
-test("builds browser links only for collections with remote media", () => {
+test("builds browser links only for collections with web video", () => {
   const manifestUrl = "https://example.com/courses/collection.json";
 
   assert.equal(collectionSupportsWeb({ media_modes: ["remote"] }), true);
@@ -135,6 +135,8 @@ test("loads the public directory from the blocker-resistant endpoint", () => {
   assert.match(app, /videoCountLabel\(collection\.video_count\)/);
   assert.match(app, /collectionWebLink\(collection\.manifest_url\)/);
   assert.match(app, /Continue in Watchcraft/);
+  assert.match(app, /remote: "Web Video"/);
+  assert.doesNotMatch(app, /Remote media/);
 });
 
 test("describes platform signing accurately", () => {
@@ -176,5 +178,5 @@ test("links the public homepage to the web reader and desktop downloads", () => 
 
   assert.match(page, /data-web-app-link href="app\/"/);
   assert.match(page, /Get the desktop app/);
-  assert.match(page, /Remote collections can open in your browser/);
+  assert.match(page, /Web-video collections can open in your browser/);
 });

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { displayCollectionSource } from "./collectionSource.ts";
 
@@ -29,4 +30,14 @@ test("does not alter URLs or ordinary folder paths", () => {
     displayCollectionSource(collection("folder", String.raw`C:\Users\Bill\Courses`)),
     String.raw`C:\Users\Bill\Courses`,
   );
+});
+
+test("labels remote delivery as Web Video in Settings", () => {
+  const settings = readFileSync(
+    new URL("./CollectionSettings.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(settings, /remote: "Web Video"/);
+  assert.doesNotMatch(settings, /Remote media/);
 });

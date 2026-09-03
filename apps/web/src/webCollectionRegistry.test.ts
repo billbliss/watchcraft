@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  isLegacyWebDemoUrl,
   readLastWebCollectionUrl,
   readWebCollections,
   removeWebCollection,
@@ -15,6 +16,19 @@ test("reads only absolute URLs for the most recently opened collection", () => {
   assert.equal(readLastWebCollectionUrl("/course.json"), null);
   assert.equal(readLastWebCollectionUrl("not a URL"), null);
   assert.equal(readLastWebCollectionUrl(null), null);
+});
+
+test("recognizes the retired bundled demo without hiding unrelated collections", () => {
+  const appUrl = "https://watchcraft.stream/app/";
+
+  assert.equal(
+    isLegacyWebDemoUrl("https://watchcraft.stream/app/demo/collection.json", appUrl),
+    true,
+  );
+  assert.equal(
+    isLegacyWebDemoUrl("https://example.com/demo/collection.json", appUrl),
+    false,
+  );
 });
 
 test("reads only valid saved browser collections and de-duplicates URLs", () => {

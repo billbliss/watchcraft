@@ -7,9 +7,9 @@ application.
 The app must not import Electron, Python, filesystem APIs, or authored catalog
 content into its source bundle.
 
-The default development catalog is a metadata-only fixture under `public/demo`.
-Pass `?catalog=<manifest-url>` to use a collection published by any ordinary
-HTTP server:
+The default catalog is the published, web-video-based “Essence of linear
+algebra” collection. Pass `?catalog=<manifest-url>` to use another collection
+published by any ordinary HTTP server:
 
 ```text
 https://watchcraft.stream/app/?catalog=https://example.com/courses/collection.json

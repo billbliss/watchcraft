@@ -19,7 +19,7 @@ export interface RegisteredCollection {
 const MEDIA_MODE_LABELS = {
   "managed-local": "Managed local media",
   "referenced-local": "Referenced local media",
-  remote: "Remote media",
+  remote: "Web Video",
 } as const;
 
 interface CollectionSettingsProps {

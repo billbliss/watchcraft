@@ -132,7 +132,7 @@ export function WebCollectionSettings({
           </section>
 
           <p className="web-settings-note">
-            Watchcraft Web plays remote media. Collections that use videos on your computer
+            Watchcraft Web plays web video. Collections that use videos on your computer
             require the <a href="/#download">desktop app</a>.
           </p>
 

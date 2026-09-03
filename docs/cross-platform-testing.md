@@ -72,7 +72,7 @@ Test all three media delivery modes on each OS:
    Play and seek a YouTube video. On Linux, confirm the player does not report
    configuration error 153 when opened or after seeking.
 6. Confirm Settings identifies the three modes as **Managed local media**,
-   **Referenced local media**, and **Remote media**.
+   **Referenced local media**, and **Web Video**.
 7. With Watchcraft closed, open a collection link from `watchcraft.stream` and
    confirm the browser launches the installed app, Watchcraft asks before
    installing, and the collection opens. Repeat while Watchcraft is already
