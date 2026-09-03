@@ -67,7 +67,7 @@ Test all three media delivery modes on each OS:
 4. Play and seek the referenced video, then confirm **Open in …** launches the
    OS default player. Use **Change folder** in Settings and bind the same folder
    again. Remove the collection and verify its extracted video still exists.
-5. Install the remote-media manifest URL:
+5. Install the Web Video collection manifest URL:
    `https://billbliss.github.io/watchcraft-collections/collections/premiere-pro-ai-tools/collection.json`.
    Play and seek a YouTube video. On Linux, confirm the player does not report
    configuration error 153 when opened or after seeking.
