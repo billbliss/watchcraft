@@ -1,5 +1,20 @@
-import { useEffect, useState, type FormEvent, type MouseEvent, type ReactElement } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent,
+  type ReactElement,
+} from "react";
+import type { PublicCollectionDirectoryEntry } from "@watchcraft/catalog-core";
 import { displayCollectionSource, displayLocalPath } from "./collectionSource";
+import {
+  FALLBACK_FEATURED_COLLECTIONS,
+  FEATURED_COLLECTION_DIRECTORY_URL,
+  readFeaturedCollections,
+} from "./featuredCollections";
 
 export interface RegisteredCollection {
   collectionId: string;
@@ -61,9 +76,26 @@ export function CollectionSettings({
   const [openAfter, setOpenAfter] = useState(true);
   const [showArchived, setShowArchived] = useState(false);
   const [url, setUrl] = useState("");
+  const [featuredCollections, setFeaturedCollections] = useState<PublicCollectionDirectoryEntry[]>(
+    FALLBACK_FEATURED_COLLECTIONS,
+  );
+  const [featuredLoading, setFeaturedLoading] = useState(true);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [highlightedIndex, setHighlightedIndex] = useState(-1);
+  const inputRef = useRef<HTMLInputElement>(null);
   const availableCollections = collections.filter((collection) => !collection.archived);
   const archivedCount = collections.length - availableCollections.length;
   const displayedCollections = showArchived ? collections : availableCollections;
+  const matchingFeaturedCollections = useMemo(() => {
+    const query = url.trim().toLocaleLowerCase();
+    if (!query) return featuredCollections;
+    return featuredCollections.filter((collection) => [
+      collection.title,
+      collection.category ?? "",
+      collection.url,
+      ...collection.mediaModes.map((mode) => MEDIA_MODE_LABELS[mode]),
+    ].some((value) => value.toLocaleLowerCase().includes(query)));
+  }, [featuredCollections, url]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent): void {
@@ -73,6 +105,65 @@ export function CollectionSettings({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [busy, onClose]);
 
+  useEffect(() => {
+    let active = true;
+    void fetch(FEATURED_COLLECTION_DIRECTORY_URL, { cache: "no-store" })
+      .then((response) => {
+        if (!response.ok) throw new Error(`Directory request failed (${response.status}).`);
+        return response.json() as Promise<unknown>;
+      })
+      .then((value) => {
+        if (!active) return;
+        const discovered = readFeaturedCollections(value);
+        if (discovered.length > 0) setFeaturedCollections(discovered);
+      })
+      .catch(() => {
+        // Keep the bundled starter collection when the directory is unavailable.
+      })
+      .finally(() => {
+        if (active) setFeaturedLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  function chooseFeaturedCollection(collection: PublicCollectionDirectoryEntry): void {
+    setUrl(collection.url);
+    setPickerOpen(false);
+    setHighlightedIndex(-1);
+    inputRef.current?.focus();
+  }
+
+  function onComboboxKeyDown(event: ReactKeyboardEvent<HTMLInputElement>): void {
+    if (event.key === "Escape" && pickerOpen) {
+      event.preventDefault();
+      event.stopPropagation();
+      setPickerOpen(false);
+      setHighlightedIndex(-1);
+      return;
+    }
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      setPickerOpen(true);
+      const direction = event.key === "ArrowDown" ? 1 : -1;
+      setHighlightedIndex((previous) => {
+        const length = matchingFeaturedCollections.length;
+        if (length === 0) return -1;
+        if (previous < 0) return direction > 0 ? 0 : length - 1;
+        return (previous + direction + length) % length;
+      });
+      return;
+    }
+    if (event.key === "Enter" && pickerOpen && highlightedIndex >= 0) {
+      const highlighted = matchingFeaturedCollections[highlightedIndex];
+      if (highlighted) {
+        event.preventDefault();
+        chooseFeaturedCollection(highlighted);
+      }
+    }
+  }
+
   function closeFromBackdrop(event: MouseEvent<HTMLDivElement>): void {
     if (event.target === event.currentTarget && !busy) onClose();
   }
@@ -81,7 +172,10 @@ export function CollectionSettings({
     event.preventDefault();
     if (!url.trim() || busy) return;
     void onAddUrl(url.trim(), openAfter).then((added) => {
-      if (added) setUrl("");
+      if (added) {
+        setUrl("");
+        setPickerOpen(false);
+      }
     });
   }
 
@@ -213,7 +307,7 @@ export function CollectionSettings({
             <div className="settings-section-heading">
               <div>
                 <h3>Add a collection</h3>
-                <p>Install from a folder on this computer or from a video collection URL.</p>
+                <p>Choose a folder, select a featured collection, or paste a collection URL.</p>
               </div>
             </div>
             {error ? <p className="settings-error" role="alert">{error}</p> : null}
@@ -223,18 +317,87 @@ export function CollectionSettings({
               </button>
               <span className="inline-or">or</span>
               <form className="collection-url-form" onSubmit={submitUrl}>
-                <input
-                  aria-label="Web video collection URL"
-                  autoCapitalize="none"
-                  autoCorrect="off"
-                  disabled={busy}
-                  id="collection-url"
-                  onChange={(event) => setUrl(event.target.value)}
-                  placeholder="https://example.com/course.watchcraft"
-                  spellCheck={false}
-                  type="url"
-                  value={url}
-                />
+                <div className="desktop-collection-combobox">
+                  <div className="desktop-collection-combobox-row">
+                    <input
+                      aria-activedescendant={highlightedIndex >= 0 ? `desktop-featured-collection-${highlightedIndex}` : undefined}
+                      aria-autocomplete="list"
+                      aria-controls="desktop-featured-collections"
+                      aria-expanded={pickerOpen}
+                      aria-haspopup="listbox"
+                      aria-label="Collection URL or featured collection"
+                      autoCapitalize="none"
+                      autoComplete="off"
+                      autoCorrect="off"
+                      disabled={busy}
+                      id="collection-url"
+                      onChange={(event) => {
+                        setUrl(event.target.value);
+                        setPickerOpen(true);
+                        setHighlightedIndex(0);
+                      }}
+                      onFocus={() => setPickerOpen(true)}
+                      onKeyDown={onComboboxKeyDown}
+                      placeholder="Paste a URL or choose a featured collection"
+                      ref={inputRef}
+                      role="combobox"
+                      spellCheck={false}
+                      type="url"
+                      value={url}
+                    />
+                    <button
+                      aria-label={pickerOpen ? "Hide featured collections" : "Browse featured collections"}
+                      aria-expanded={pickerOpen}
+                      className="desktop-featured-toggle"
+                      disabled={busy}
+                      onClick={() => {
+                        setPickerOpen((open) => !open);
+                        setHighlightedIndex(pickerOpen ? -1 : 0);
+                      }}
+                      onMouseDown={(event) => event.preventDefault()}
+                      type="button"
+                    >
+                      <svg aria-hidden="true" viewBox="0 0 16 16">
+                        <path d="m3.5 6 4.5 4 4.5-4" />
+                      </svg>
+                    </button>
+                  </div>
+                  {pickerOpen ? (
+                    <div aria-label="Featured collections" className="desktop-featured-list" id="desktop-featured-collections" role="listbox">
+                      <div className="desktop-featured-list-heading">
+                        <strong>Featured collections</strong>
+                        {featuredLoading ? <span>Updating…</span> : null}
+                      </div>
+                      {matchingFeaturedCollections.map((collection, index) => (
+                        <button
+                          aria-selected={index === highlightedIndex}
+                          className={index === highlightedIndex ? "desktop-featured-option highlighted" : "desktop-featured-option"}
+                          id={`desktop-featured-collection-${index}`}
+                          key={collection.url}
+                          onClick={() => chooseFeaturedCollection(collection)}
+                          onMouseDown={(event) => event.preventDefault()}
+                          role="option"
+                          type="button"
+                        >
+                          <strong>{collection.title}</strong>
+                          <span>
+                            {[
+                              collection.category,
+                              collection.videoCount === null
+                                ? null
+                                : `${collection.videoCount} ${collection.videoCount === 1 ? "video" : "videos"}`,
+                              collection.mediaModes.map((mode) => MEDIA_MODE_LABELS[mode]).join(" · "),
+                            ].filter(Boolean).join(" · ")}
+                          </span>
+                          <small>{collection.url}</small>
+                        </button>
+                      ))}
+                      {matchingFeaturedCollections.length === 0 ? (
+                        <p className="desktop-featured-empty">No featured collections match. You can still add this URL.</p>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
                 <button disabled={busy || !url.trim()} type="submit">Add</button>
               </form>
             </div>

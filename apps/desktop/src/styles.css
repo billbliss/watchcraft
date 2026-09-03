@@ -353,12 +353,13 @@
 
 .add-collection-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 9px;
 }
 
 .inline-or {
   flex: none;
+  padding-top: 9px;
   color: #758279;
   font-size: .67rem;
   text-transform: uppercase;
@@ -368,19 +369,123 @@
   display: flex;
   min-width: 0;
   flex: 1;
+  align-items: flex-start;
   gap: 8px;
+}
+
+.desktop-collection-combobox {
+  min-width: 0;
+  flex: 1;
+}
+
+.desktop-collection-combobox-row {
+  display: flex;
+  min-width: 0;
 }
 
 .collection-url-form input {
   min-width: 0;
   flex: 1;
   padding: 8px 10px;
+  border-radius: 8px 0 0 8px;
   outline: 0;
 }
 
 .collection-url-form input:focus {
   border-color: #70aa81;
   box-shadow: 0 0 0 3px #70aa8126;
+}
+
+.settings-dialog .desktop-featured-toggle {
+  display: grid;
+  width: 38px;
+  min-height: 34px;
+  flex: none;
+  padding: 0;
+  place-items: center;
+  border-left: 0;
+  border-radius: 0 8px 8px 0;
+}
+
+.desktop-featured-toggle svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.5;
+}
+
+.desktop-featured-list {
+  display: grid;
+  max-height: min(285px, 36vh);
+  margin-top: 7px;
+  padding: 6px;
+  overflow: auto;
+  gap: 3px;
+  border: 1px solid #3c4b41;
+  border-radius: 9px;
+  background: #171e19;
+  box-shadow: 0 12px 30px #0007;
+}
+
+.desktop-featured-list-heading {
+  display: flex;
+  padding: 6px 8px 5px;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: .67rem;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.desktop-featured-list-heading strong {
+  color: #cbd5ce;
+}
+
+.settings-dialog .desktop-featured-option {
+  display: grid;
+  width: 100%;
+  padding: 8px 9px;
+  gap: 3px;
+  border-color: transparent;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+}
+
+.settings-dialog .desktop-featured-option:hover:not(:disabled),
+.settings-dialog .desktop-featured-option.highlighted {
+  border-color: #3c4b41;
+  background: #202a23;
+}
+
+.desktop-featured-option strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-featured-option span {
+  color: var(--accent);
+  font-size: .69rem;
+}
+
+.desktop-featured-option small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: .66rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-featured-empty {
+  margin: 0;
+  padding: 11px 9px;
+  color: var(--muted);
+  font-size: .72rem;
 }
 
 .open-after-option {

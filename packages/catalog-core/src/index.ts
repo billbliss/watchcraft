@@ -4,6 +4,68 @@ export interface CollectionStats {
   topic_family_count: number;
 }
 
+export type CollectionMediaMode = "managed-local" | "referenced-local" | "remote";
+
+export interface PublicCollectionDirectoryEntry {
+  collectionId: string;
+  title: string;
+  url: string;
+  category: string | null;
+  videoCount: number | null;
+  mediaModes: CollectionMediaMode[];
+}
+
+export const PUBLIC_COLLECTION_DIRECTORY_URL =
+  "https://collections.watchcraft.stream/directory.json";
+
+export function readPublicCollectionDirectory(
+  value: unknown,
+): PublicCollectionDirectoryEntry[] {
+  if (!value || typeof value !== "object") return [];
+  const collections = (value as { collections?: unknown }).collections;
+  if (!Array.isArray(collections)) return [];
+
+  const knownModes = new Set<CollectionMediaMode>([
+    "managed-local",
+    "referenced-local",
+    "remote",
+  ]);
+  const unique = new Map<string, PublicCollectionDirectoryEntry>();
+  for (const candidate of collections) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const item = candidate as Record<string, unknown>;
+    if (
+      item.archived === true
+      || typeof item.collection_id !== "string"
+      || typeof item.title !== "string"
+      || typeof item.manifest_url !== "string"
+      || !Array.isArray(item.media_modes)
+    ) continue;
+    const mediaModes = item.media_modes.filter(
+      (mode): mode is CollectionMediaMode => typeof mode === "string"
+        && knownModes.has(mode as CollectionMediaMode),
+    );
+    if (mediaModes.length === 0) continue;
+    try {
+      const url = new URL(item.manifest_url);
+      if (url.protocol !== "https:") continue;
+      unique.set(url.href, {
+        collectionId: item.collection_id,
+        title: item.title,
+        url: url.href,
+        category: typeof item.category === "string" ? item.category : null,
+        videoCount: Number.isInteger(item.video_count) && (item.video_count as number) >= 0
+          ? item.video_count as number
+          : null,
+        mediaModes,
+      });
+    } catch {
+      // Ignore malformed public directory entries.
+    }
+  }
+  return [...unique.values()];
+}
+
 export interface CollectionGroup {
   type: "group";
   group_id: string;
