@@ -7,9 +7,11 @@ application.
 The app must not import Electron, Python, filesystem APIs, or authored catalog
 content into its source bundle.
 
-The default catalog is the published, web-video-based “Essence of linear
-algebra” collection. Pass `?catalog=<manifest-url>` to use another collection
-published by any ordinary HTTP server:
+On a first visit, the app opens Settings with a featured web-video collection
+picker. Featured collections come from the public collection directory, with
+the published “Essence of linear algebra” collection bundled as a fallback if
+the directory is unavailable. Pass `?catalog=<manifest-url>` to open a specific
+collection published by any ordinary HTTP server:
 
 ```text
 https://watchcraft.stream/app/?catalog=https://example.com/courses/collection.json

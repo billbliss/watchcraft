@@ -11,9 +11,6 @@ export interface HttpCatalogOptions {
   mediaRootUrl?: string;
 }
 
-export const DEFAULT_WEB_COLLECTION_URL =
-  "https://collections.watchcraft.stream/collections/essence-of-linear-algebra/collection.json";
-
 async function fetchJson<T>(url: URL): Promise<T> {
   const response = await fetch(url, { cache: "no-store" });
   if (!response.ok) {
@@ -90,10 +87,12 @@ export class HttpCatalogRepository implements CatalogRepository {
   }
 }
 
-export function repositoryFromLocation(location: Location): HttpCatalogRepository {
+export function repositoryFromLocation(location: Location): HttpCatalogRepository | null {
   const params = new URLSearchParams(location.search);
+  const manifestUrl = params.get("catalog");
+  if (!manifestUrl) return null;
   return new HttpCatalogRepository({
-    manifestUrl: params.get("catalog") ?? DEFAULT_WEB_COLLECTION_URL,
+    manifestUrl,
     mediaRootUrl: params.get("mediaRoot") ?? undefined,
   });
 }
