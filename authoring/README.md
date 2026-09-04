@@ -182,6 +182,36 @@ The required GitHub environments and variables are described by
 Because this repository is public, do not attach a self-hosted Mac runner to this
 workflow or use it with private source material.
 
+## Operator queue CLI
+
+Queued authoring operator commands use a credential distinct from the GitHub worker
+credential. On macOS the CLI reads the raw value from the login Keychain item named
+`Watchcraft authoring operator token`, account `watchcraft-operator-cli`. Set
+`WATCHCRAFT_AUTHORING_OPERATOR_TOKEN` only when an explicit non-Keychain override is
+needed. Convex production stores only its SHA-256 verifier as
+`AUTHORING_OPERATOR_TOKEN_SHA256`.
+
+The first Python worker handler produces a deterministic lexical-analysis artifact.
+It is an infrastructure and protocol proof, not the model-backed instructional-video
+analysis used by the existing local authoring commands. Submit, approve, dispatch, and
+inspect it separately:
+
+```bash
+./authoring/watchcraft-author queue submit-analysis \
+  --title "Color workflow" \
+  --text "Balance exposure and color before applying the final grade."
+
+./authoring/watchcraft-author queue approve JOB_ID
+./authoring/watchcraft-author queue dispatch JOB_ID
+./authoring/watchcraft-author queue status JOB_ID
+```
+
+`dispatch` starts the manual `Authoring worker` GitHub workflow with identifiers only.
+The Python worker records the GitHub run, claims a lease, selects its handler from the
+approved specification, writes and verifies the result in private R2, and reports the
+authoritative artifact reference to Convex. `queue retry JOB_ID` and
+`queue cancel JOB_ID` use the same compare-and-swap state transitions.
+
 Use `--dry-run` to inspect the playlist without writing files or making AI calls,
 `--import-only` to postpone analysis, `--exclude VIDEO_ID` to omit a video, or
 `--limit N` to work with the first `N` selected videos. Use `--unlisted` when the

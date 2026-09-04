@@ -121,6 +121,7 @@ export interface AuthoringRun {
   request: { [key: string]: JsonValue };
   source_snapshot: ArtifactReference | null;
   plan: ArtifactReference | null;
+  approval_sha256: string | null;
   approval: JobApproval | null;
   job_ids: string[];
   state: "requested" | "planned" | "approved" | "running" | "complete" | "failed" | "cancelled";
@@ -438,6 +439,9 @@ export function parseAuthoringRun(value: unknown): AuthoringRun {
     request,
     source_snapshot: nullableObject(candidate.source_snapshot, "Run source snapshot", parseArtifactReference),
     plan: nullableObject(candidate.plan, "Run plan", parseArtifactReference),
+    approval_sha256: candidate.approval_sha256 === null || candidate.approval_sha256 === undefined
+      ? null
+      : sha256Value(candidate.approval_sha256, "Run approval digest"),
     approval: nullableObject(candidate.approval, "Run approval", parseApproval),
     job_ids: candidate.job_ids.map((jobId, index) => stringValue(jobId, `Run job ID ${index}`)),
     state: state as AuthoringRun["state"],

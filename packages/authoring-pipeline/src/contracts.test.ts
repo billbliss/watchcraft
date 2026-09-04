@@ -16,6 +16,7 @@ test("versioned authoring runs are validated as coherent JSON aggregates", () =>
     request: { source: "synthetic", options: ["smoke"] },
     source_snapshot: null,
     plan: null,
+    approval_sha256: null,
     approval: null,
     job_ids: ["job-1"],
     state: "requested",
@@ -26,6 +27,8 @@ test("versioned authoring runs are validated as coherent JSON aggregates", () =>
 
   assert.equal(run.state, "requested");
   assert.deepEqual(run.job_ids, ["job-1"]);
+  const { approval_sha256: _approvalDigest, ...legacyRun } = run;
+  assert.equal(parseAuthoringRun(legacyRun).approval_sha256, null);
   assert.throws(() => parseAuthoringRun({ ...run, state: "invented" }), /Unsupported run state/);
 });
 

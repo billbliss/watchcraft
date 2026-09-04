@@ -37,6 +37,7 @@ from normalize_topics import (
     run as run_topic_normalization,
 )
 from repair_timelines import repair_one
+from queued_authoring import add_queue_parsers, run_queue_command
 from video_catalog import (
     AUTHORING_CONFIG_NAME,
     atomic_write_text,
@@ -1684,6 +1685,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     build = commands.add_parser("build", help="Rebuild collection without AI calls")
     build.add_argument("--workspace", required=True, type=workspace_path)
+    queue = commands.add_parser("queue", help="Operate the remote authoring queue")
+    add_queue_parsers(queue)
     return parser
 
 
@@ -1763,6 +1766,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
         write_collection(args.workspace)
         return 0
+    if args.command == "queue":
+        return run_queue_command(args)
     return 2
 
 

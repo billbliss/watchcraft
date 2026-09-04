@@ -17,9 +17,11 @@ const modules = import.meta.glob([
   "!./vitest.config.mts",
 ]);
 const workerToken = "test-worker-token-that-is-not-a-production-secret";
+const operatorToken = "test-operator-token-that-is-not-a-production-secret";
 
 beforeEach(() => {
   vi.stubEnv("AUTHORING_WORKER_TOKEN_SHA256", sha256Hex(workerToken));
+  vi.stubEnv("AUTHORING_OPERATOR_TOKEN_SHA256", sha256Hex(operatorToken));
 });
 
 afterEach(() => {
@@ -214,4 +216,138 @@ test("generic control mutations persist a retryable failure, retry, and cancella
   expect(snapshot.jobs).toHaveLength(1);
   expect(snapshot.events).toHaveLength(9);
   expect(snapshot.jobs[0]?.aggregate).toEqual(cancelled);
+});
+
+test("operator and worker credentials drive a persisted non-transcript analysis run", async () => {
+  const t = convexTest(schema, modules);
+  const spec = {
+    operation: "generate",
+    artifact_kind: "analysis",
+    output_schema: { id: "watchcraft.analysis.lexical", version: 1 },
+    handler: { id: "watchcraft.analysis.lexical", version: "1" },
+    source: { media_asset_id: "lesson-1" },
+    inputs: [],
+    dependencies: [],
+    configuration: {
+      title: "Color workflow",
+      text: "Balance exposure and color before applying the final grade.",
+      max_topics: 8,
+    },
+  };
+  const rejected = await post(t, "/authoring/operator/submissions/submit", {
+    job_id: "analysis-job",
+    run_id: "analysis-run",
+    command_prefix: "submit",
+    request: { kind: "lexical-analysis" },
+    spec,
+  }, workerToken);
+  expect(rejected.status).toBe(401);
+
+  const submittedResponse = await post(t, "/authoring/operator/submissions/submit", {
+    job_id: "analysis-job",
+    run_id: "analysis-run",
+    command_prefix: "submit",
+    request: { kind: "lexical-analysis" },
+    spec,
+  }, operatorToken);
+  expect(submittedResponse.status).toBe(200);
+  const submitted = await submittedResponse.json() as any;
+  expect(submitted.job).toMatchObject({ state: "awaiting_approval", revision: 2 });
+  expect(submitted.run).toMatchObject({ state: "planned", revision: 2 });
+
+  const changedReplay = await post(t, "/authoring/operator/submissions/submit", {
+    job_id: "analysis-job",
+    run_id: "analysis-run",
+    command_prefix: "submit",
+    request: { kind: "different-analysis" },
+    spec,
+  }, operatorToken);
+  expect(changedReplay.status).toBe(409);
+
+  const approvedResponse = await post(t, "/authoring/operator/submissions/approve", {
+    job_id: "analysis-job",
+    command_id: "approve",
+    expected_revision: submitted.job.revision,
+    actor: "test-operator",
+    spec_sha256: submitted.job.spec_sha256,
+  }, operatorToken);
+  expect(approvedResponse.status).toBe(200);
+  const approved = await approvedResponse.json() as any;
+  expect(approved.job.state).toBe("ready");
+  expect(approved.run.state).toBe("approved");
+
+  const pendingResponse = await post(t, "/authoring/operator/submissions/request-dispatch", {
+    job_id: "analysis-job",
+    command_id: "request-dispatch",
+    expected_revision: approved.job.revision,
+  }, operatorToken);
+  const pending = await pendingResponse.json() as any;
+  expect(pending).toMatchObject({ state: "dispatch_pending", revision: 4 });
+
+  const dispatchedResponse = await post(t, "/authoring/jobs/dispatch/record", {
+    job_id: "analysis-job",
+    command_id: "record-dispatch",
+    expected_revision: pending.revision,
+    generation: pending.dispatch.generation,
+    github_run_id: "789",
+    github_run_url: "https://github.com/billbliss/watchcraft/actions/runs/789",
+  });
+  expect(dispatchedResponse.status).toBe(200);
+  const dispatched = await dispatchedResponse.json() as any;
+
+  const operatorClaim = await post(t, "/authoring/jobs/claim", {
+    job_id: "analysis-job",
+  }, operatorToken);
+  expect(operatorClaim.status).toBe(401);
+  const claimedResponse = await post(t, "/authoring/jobs/claim", {
+    job_id: "analysis-job",
+    command_id: "claim",
+    expected_revision: dispatched.revision,
+    attempt_id: "analysis-attempt",
+    owner: "github-actions:789",
+    spec_sha256: dispatched.spec_sha256,
+    dispatch_generation: dispatched.dispatch.generation,
+    lease_duration_ms: 60_000,
+    github_run_id: "789",
+  });
+  const claimed = await claimedResponse.json() as any;
+  const startedResponse = await post(t, "/authoring/jobs/start", {
+    job_id: "analysis-job",
+    command_id: "start",
+    expected_revision: claimed.revision,
+    attempt_id: "analysis-attempt",
+  });
+  const started = await startedResponse.json() as any;
+  const digest = "b".repeat(64);
+  const artifact = {
+    store: "r2",
+    algorithm: "sha256",
+    digest,
+    byte_length: 200,
+    media_type: "application/json",
+    artifact_kind: "analysis",
+    schema: { id: "watchcraft.analysis.lexical", version: 1 },
+    key: artifactKey(digest),
+  };
+  const completedResponse = await post(t, "/authoring/jobs/succeed", {
+    job_id: "analysis-job",
+    command_id: "succeed",
+    expected_revision: started.revision,
+    attempt_id: "analysis-attempt",
+    artifact,
+  });
+  expect(completedResponse.status).toBe(200);
+
+  const finalResponse = await post(t, "/authoring/operator/submissions/get", {
+    job_id: "analysis-job",
+  }, operatorToken);
+  const final = await finalResponse.json() as any;
+  expect(final.job).toMatchObject({ state: "succeeded", revision: 8, result: artifact });
+  expect(final.run).toMatchObject({ state: "complete", revision: 5 });
+  const snapshot = await t.run(async (ctx) => ({
+    jobEvents: await ctx.db.query("authoring_job_events").collect(),
+    runEvents: await ctx.db.query("authoring_run_events").collect(),
+  }));
+  expect(snapshot.jobEvents).toHaveLength(8);
+  expect(snapshot.runEvents).toHaveLength(5);
 });

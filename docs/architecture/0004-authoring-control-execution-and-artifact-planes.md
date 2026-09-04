@@ -166,6 +166,13 @@ job state. This credential is distinct from the Convex production deploy key: wo
 must not receive a deploy or admin key. A stronger workload identity mechanism may
 replace the shared secret without changing the job protocol.
 
+Operator commands use a separate high-entropy credential and verifier. Possession of
+the worker credential does not grant submission, approval, retry, or cancellation
+authority, and possession of the operator credential does not grant a worker lease.
+The initial single-operator CLI retrieves its raw credential from the macOS login
+Keychain (or an explicit process environment override); Convex stores only its SHA-256
+verifier. This is a bootstrap boundary, not the eventual end-user identity model.
+
 Workers advertise supported `(operation, artifact_kind, schema_version,
 handler_version)` tuples. Unsupported work fails before acquisition. Hosted and
 self-hosted runners implement the same contract; runner selection is a dispatch
@@ -265,6 +272,12 @@ The first vertical slice will:
 The slice is complete only when the same submitted job can be interrupted and safely
 resumed without duplicate authoritative results, and its validated result can be
 resolved from Convex to exact R2 bytes by digest.
+
+The next slice adds an operator-authenticated CLI and a Python implementation of the
+same worker protocol. Its first bounded handler emits a deterministic lexical-analysis
+artifact. This handler is deliberately modest: its purpose is to prove that the worker
+envelope, leases, artifact store, and run reconciliation are independent of transcript
+generation before network discovery or model-backed analysis is introduced.
 
 ## Consequences
 

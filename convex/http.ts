@@ -8,10 +8,10 @@ import { httpAction } from "./_generated/server";
 
 const http = httpRouter();
 
-function authorized(request: Request): boolean {
+function authorized(request: Request, verifierName: string): boolean {
   const authorization = request.headers.get("authorization");
   const token = authorization?.startsWith("Bearer ") ? authorization.slice(7) : "";
-  const expected = process.env.AUTHORING_WORKER_TOKEN_SHA256;
+  const expected = process.env[verifierName];
   if (!token || !expected || !/^[a-f0-9]{64}$/.test(expected)) return false;
   const actual = sha256Hex(token);
   if (actual.length !== expected.length) return false;
@@ -29,9 +29,9 @@ function jsonResponse(value: unknown, status = 200): Response {
   });
 }
 
-function mutationRoute(functionReference: any) {
+function mutationRoute(functionReference: any, verifierName: string) {
   return httpAction(async (ctx, request) => {
-    if (!authorized(request)) return jsonResponse({ error: "Unauthorized." }, 401);
+    if (!authorized(request, verifierName)) return jsonResponse({ error: "Unauthorized." }, 401);
     try {
       const args = await request.json();
       const result = await ctx.runMutation(functionReference, args);
@@ -43,11 +43,36 @@ function mutationRoute(functionReference: any) {
   });
 }
 
-http.route({ path: "/authoring/smoke/prepare", method: "POST", handler: mutationRoute(internal.authoringInternal.prepareSmokeJob) });
-http.route({ path: "/authoring/jobs/claim", method: "POST", handler: mutationRoute(internal.authoringInternal.claimJob) });
-http.route({ path: "/authoring/jobs/start", method: "POST", handler: mutationRoute(internal.authoringInternal.startJob) });
-http.route({ path: "/authoring/jobs/heartbeat", method: "POST", handler: mutationRoute(internal.authoringInternal.heartbeatJob) });
-http.route({ path: "/authoring/jobs/succeed", method: "POST", handler: mutationRoute(internal.authoringInternal.succeedJob) });
-http.route({ path: "/authoring/jobs/fail", method: "POST", handler: mutationRoute(internal.authoringInternal.failJob) });
+function queryRoute(functionReference: any, verifierName: string) {
+  return httpAction(async (ctx, request) => {
+    if (!authorized(request, verifierName)) return jsonResponse({ error: "Unauthorized." }, 401);
+    try {
+      const args = await request.json();
+      const result = await ctx.runQuery(functionReference, args);
+      return jsonResponse(result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Authoring request failed.";
+      return jsonResponse({ error: message.slice(0, 500) }, 409);
+    }
+  });
+}
+
+const workerVerifier = "AUTHORING_WORKER_TOKEN_SHA256";
+const operatorVerifier = "AUTHORING_OPERATOR_TOKEN_SHA256";
+
+http.route({ path: "/authoring/smoke/prepare", method: "POST", handler: mutationRoute(internal.authoringInternal.prepareSmokeJob, workerVerifier) });
+http.route({ path: "/authoring/jobs/dispatch/record", method: "POST", handler: mutationRoute(internal.authoringInternal.recordDispatch, workerVerifier) });
+http.route({ path: "/authoring/jobs/claim", method: "POST", handler: mutationRoute(internal.authoringInternal.claimJob, workerVerifier) });
+http.route({ path: "/authoring/jobs/start", method: "POST", handler: mutationRoute(internal.authoringInternal.startJob, workerVerifier) });
+http.route({ path: "/authoring/jobs/heartbeat", method: "POST", handler: mutationRoute(internal.authoringInternal.heartbeatJob, workerVerifier) });
+http.route({ path: "/authoring/jobs/succeed", method: "POST", handler: mutationRoute(internal.authoringInternal.succeedJob, workerVerifier) });
+http.route({ path: "/authoring/jobs/fail", method: "POST", handler: mutationRoute(internal.authoringInternal.failJob, workerVerifier) });
+
+http.route({ path: "/authoring/operator/submissions/get", method: "POST", handler: queryRoute(internal.authoringInternal.getSubmission, operatorVerifier) });
+http.route({ path: "/authoring/operator/submissions/submit", method: "POST", handler: mutationRoute(internal.authoringInternal.submitJob, operatorVerifier) });
+http.route({ path: "/authoring/operator/submissions/approve", method: "POST", handler: mutationRoute(internal.authoringInternal.approveSubmission, operatorVerifier) });
+http.route({ path: "/authoring/operator/submissions/request-dispatch", method: "POST", handler: mutationRoute(internal.authoringInternal.requestDispatch, operatorVerifier) });
+http.route({ path: "/authoring/operator/submissions/cancel", method: "POST", handler: mutationRoute(internal.authoringInternal.cancelJob, operatorVerifier) });
+http.route({ path: "/authoring/operator/submissions/retry", method: "POST", handler: mutationRoute(internal.authoringInternal.retryJob, operatorVerifier) });
 
 export default http;

@@ -19,4 +19,13 @@ export default defineSchema({
     recorded_at: v.number(),
     result: v.any(),
   }).index("by_job_command", ["job_id", "command_id"]),
+  authoring_run_events: defineTable({
+    run_id: v.string(),
+    command_id: v.string(),
+    from_state: v.optional(v.string()),
+    to_state: v.string(),
+    revision: v.number(),
+    recorded_at: v.number(),
+    result: v.any(),
+  }).index("by_run_command", ["run_id", "command_id"]),
 });

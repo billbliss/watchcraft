@@ -1,0 +1,62 @@
+name: Authoring worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: Authoritative Convex job ID
+        required: true
+        type: string
+      spec_sha256:
+        description: Approved immutable job specification digest
+        required: true
+        type: string
+      dispatch_generation:
+        description: Convex dispatch generation
+        required: true
+        type: string
+      expected_revision:
+        description: Revision containing the pending dispatch
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: authoring-worker-${{ inputs.job_id }}-${{ inputs.dispatch_generation }}
+  cancel-in-progress: false
+
+jobs:
+  execute:
+    name: Run approved authoring job
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: authoring-production
+    env:
+      WATCHCRAFT_JOB_ID: ${{ inputs.job_id }}
+      WATCHCRAFT_JOB_SPEC_SHA256: ${{ inputs.spec_sha256 }}
+      WATCHCRAFT_DISPATCH_GENERATION: ${{ inputs.dispatch_generation }}
+      WATCHCRAFT_EXPECTED_REVISION: ${{ inputs.expected_revision }}
+      WATCHCRAFT_CONVEX_URL: ${{ vars.WATCHCRAFT_CONVEX_URL }}
+      WATCHCRAFT_R2_BUCKET: ${{ vars.WATCHCRAFT_R2_BUCKET }}
+      WATCHCRAFT_R2_ENDPOINT: ${{ vars.WATCHCRAFT_R2_ENDPOINT }}
+      WATCHCRAFT_AUTHORING_WORKER_TOKEN: ${{ secrets.WATCHCRAFT_AUTHORING_WORKER_TOKEN }}
+      WATCHCRAFT_R2_ACCESS_KEY_ID: ${{ secrets.WATCHCRAFT_R2_ACCESS_KEY_ID }}
+      WATCHCRAFT_R2_SECRET_ACCESS_KEY: ${{ secrets.WATCHCRAFT_R2_SECRET_ACCESS_KEY }}
+    steps:
+      - name: Check out Watchcraft
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: authoring/worker-requirements.txt
+
+      - name: Install worker dependencies
+        run: python -m pip install --requirement authoring/worker-requirements.txt
+
+      - name: Execute authoring job
+        run: python authoring/run_queued_worker.py
