@@ -18,17 +18,25 @@
     "desktop:smoke:referenced": "node scripts/desktop-playback-smoke.mjs --delivery=referenced-local",
     "desktop:smoke:managed": "node scripts/desktop-playback-smoke.mjs --delivery=managed-local",
     "dev": "npm run dev --workspace @watchcraft/web",
-    "test": "npm run test --workspaces --if-present && npm run test:release && npm run test:site",
+    "test": "npm run test --workspaces --if-present && npm run test:authoring-control && npm run test:release && npm run test:site",
+    "test:authoring-control": "vitest run --config convex/vitest.config.mts",
     "test:release": "node --test scripts/release-metadata.test.mjs",
     "test:site": "node --test scripts/youtube-player-bridge.test.mjs scripts/site-directory.test.mjs",
-    "typecheck": "npm run typecheck --workspace @watchcraft/web"
+    "typecheck": "npm run typecheck --workspace @watchcraft/web",
+    "typecheck:authoring": "npm run typecheck --workspace @watchcraft/authoring-pipeline && tsc --project convex/tsconfig.json"
   },
   "engines": {
     "node": ">=22"
   },
   "devDependencies": {
+    "@edge-runtime/vm": "^5.0.0",
     "@testing-library/react": "^16.3.3",
+    "convex-test": "^0.0.56",
     "jsdom": "^29.1.1",
-    "tsx": "^4.23.13"
+    "tsx": "^4.23.13",
+    "vitest": "^5.0.0"
+  },
+  "dependencies": {
+    "convex": "^1.45.0"
   }
 }

@@ -162,6 +162,26 @@ report the exact unresolved topics for the next run.
 The durable phase boundaries and failure guarantees are recorded in
 [ADR 0003](../docs/architecture/0003-resumable-fail-closed-authoring.md).
 
+## Queued authoring smoke test
+
+The manually dispatched `Authoring pipeline smoke` GitHub Actions workflow is the
+first production-shaped queued-authoring slice. It deploys the Convex control-plane
+functions, creates and approves a synthetic transcript job, claims a time-bounded
+lease, writes the transcript as an immutable SHA-256-addressed object in private R2,
+records the validated result in Convex, and downloads it again to verify the exact
+bytes.
+
+This workflow proves orchestration and storage, not speech recognition. The synthetic
+handler is intentionally isolated behind the same generic handler contract that a
+later audio or caption transcript generator will implement. Actions logs contain only
+job IDs, lifecycle state, sizes, and digests; transcripts and credentials are not
+uploaded as Actions artifacts.
+
+The required GitHub environments and variables are described by
+[ADR 0004](../docs/architecture/0004-authoring-control-execution-and-artifact-planes.md).
+Because this repository is public, do not attach a self-hosted Mac runner to this
+workflow or use it with private source material.
+
 Use `--dry-run` to inspect the playlist without writing files or making AI calls,
 `--import-only` to postpone analysis, `--exclude VIDEO_ID` to omit a video, or
 `--limit N` to work with the first `N` selected videos. Use `--unlisted` when the

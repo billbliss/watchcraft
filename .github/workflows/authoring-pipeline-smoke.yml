@@ -1,0 +1,64 @@
+name: Authoring pipeline smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: authoring-pipeline-smoke
+  cancel-in-progress: false
+
+jobs:
+  deploy-control-plane:
+    name: Deploy Convex control plane
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: control-plane-deploy
+    steps:
+      - name: Check out Watchcraft
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Deploy Convex functions
+        env:
+          CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
+        run: npx convex deploy
+
+  run-smoke-job:
+    name: Run synthetic transcript job
+    needs: deploy-control-plane
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: authoring-production
+    env:
+      WATCHCRAFT_CONVEX_URL: ${{ vars.WATCHCRAFT_CONVEX_URL }}
+      WATCHCRAFT_R2_BUCKET: ${{ vars.WATCHCRAFT_R2_BUCKET }}
+      WATCHCRAFT_R2_ENDPOINT: ${{ vars.WATCHCRAFT_R2_ENDPOINT }}
+      WATCHCRAFT_AUTHORING_WORKER_TOKEN: ${{ secrets.WATCHCRAFT_AUTHORING_WORKER_TOKEN }}
+      WATCHCRAFT_R2_ACCESS_KEY_ID: ${{ secrets.WATCHCRAFT_R2_ACCESS_KEY_ID }}
+      WATCHCRAFT_R2_SECRET_ACCESS_KEY: ${{ secrets.WATCHCRAFT_R2_SECRET_ACCESS_KEY }}
+    steps:
+      - name: Check out Watchcraft
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run authoring pipeline smoke job
+        run: node --import tsx scripts/run-authoring-pipeline-smoke.ts

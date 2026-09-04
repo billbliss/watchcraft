@@ -65,7 +65,9 @@ topic-normalization work.
 
 See the [authoring guide](authoring/README.md) for operation and recovery, and
 [ADR 0003](docs/architecture/0003-resumable-fail-closed-authoring.md) for the
-pipeline's checkpoint, failure, and publishability guarantees.
+pipeline's checkpoint, failure, and publishability guarantees. [ADR 0004](docs/architecture/0004-authoring-control-execution-and-artifact-planes.md)
+specifies the Convex control plane, GitHub Actions execution plane, and
+Cloudflare R2 artifact plane for queued authoring.
 
 ## Web reader
 
