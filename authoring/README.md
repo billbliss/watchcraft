@@ -210,6 +210,7 @@ inspect it separately:
 ./authoring/watchcraft-author queue approve JOB_ID
 ./authoring/watchcraft-author queue dispatch JOB_ID
 ./authoring/watchcraft-author queue status JOB_ID
+./authoring/watchcraft-author queue result JOB_ID
 ```
 
 `dispatch` starts the manual `Authoring worker` GitHub workflow with identifiers only.
@@ -217,6 +218,20 @@ The Python worker records the GitHub run, claims a lease, selects its handler fr
 approved specification, writes and verifies the result in private R2, and reports the
 authoritative artifact reference to Convex. `queue retry JOB_ID` and
 `queue cancel JOB_ID` use the same compare-and-swap state transitions.
+
+`queue result` resolves the artifact reference from the authoritative completed job,
+downloads the object from private R2, and verifies its declared byte length and SHA-256
+digest. JSON is displayed in readable form by default; `--output PATH` writes the exact
+verified bytes to a new file and refuses to overwrite an existing file. The command
+uses a separate read-only R2 S3 credential. Its Keychain service is
+`Watchcraft R2 artifact reader`, with accounts `access-key-id` and
+`secret-access-key`. Select `--r2-credentials-source environment` to use
+`WATCHCRAFT_R2_READER_ACCESS_KEY_ID` and
+`WATCHCRAFT_R2_READER_SECRET_ACCESS_KEY` instead. `auto` prefers that complete
+environment pair and otherwise uses Keychain. These names are deliberately distinct
+from the worker's write-capable credential. The non-secret bucket and endpoint use the
+corresponding environment variables when present and otherwise come from the GitHub
+`authoring-production` environment variables.
 
 Use `--dry-run` to inspect the playlist without writing files or making AI calls,
 `--import-only` to postpone analysis, `--exclude VIDEO_ID` to omit a video, or

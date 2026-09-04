@@ -13,11 +13,17 @@ import urllib.request
 import uuid
 from collections import Counter
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 
 OPERATOR_KEYCHAIN_ACCOUNT = "watchcraft-operator-cli"
 OPERATOR_KEYCHAIN_SERVICE = "Watchcraft authoring operator token"
+R2_READER_KEYCHAIN_SERVICE = "Watchcraft R2 artifact reader"
+R2_READER_ACCESS_KEY_ACCOUNT = "access-key-id"
+R2_READER_SECRET_KEY_ACCOUNT = "secret-access-key"
+R2_READER_ACCESS_KEY_ENV = "WATCHCRAFT_R2_READER_ACCESS_KEY_ID"
+R2_READER_SECRET_KEY_ENV = "WATCHCRAFT_R2_READER_SECRET_ACCESS_KEY"
 DEFAULT_GITHUB_REPOSITORY = "billbliss/watchcraft"
 ANALYSIS_HANDLER = ("watchcraft.analysis.lexical", "1")
 WORD_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9'-]{2,}")
@@ -44,6 +50,26 @@ def convex_http_url(deployment_url: str) -> str:
     return f"https://{match.group(1)}.convex.site"
 
 
+def keychain_password(service: str, account: str) -> str:
+    if os.name != "posix":
+        raise RuntimeError("macOS Keychain access is unavailable on this platform")
+    try:
+        result = subprocess.run(
+            ["security", "find-generic-password", "-a", account, "-s", service, "-w"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise RuntimeError(
+            f"Could not retrieve Keychain item {service!r}, account {account!r}"
+        ) from error
+    value = result.stdout.rstrip("\n")
+    if not value:
+        raise RuntimeError(f"Keychain item {service!r}, account {account!r} is empty")
+    return value
+
+
 def operator_token(token_source: str = "auto") -> str:
     if token_source not in {"auto", "keychain", "environment"}:
         raise ValueError(f"Unsupported operator token source {token_source!r}")
@@ -57,42 +83,27 @@ def operator_token(token_source: str = "auto") -> str:
             "WATCHCRAFT_AUTHORING_OPERATOR_TOKEN is required when "
             "--operator-token-source environment is selected"
         )
-    if os.name != "posix":
-        raise RuntimeError(
-            "Keychain access is unavailable on this platform; set "
-            "WATCHCRAFT_AUTHORING_OPERATOR_TOKEN and select "
-            "--operator-token-source environment"
-        )
     try:
-        result = subprocess.run(
-            [
-                "security", "find-generic-password", "-a", OPERATOR_KEYCHAIN_ACCOUNT,
-                "-s", OPERATOR_KEYCHAIN_SERVICE, "-w",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (OSError, subprocess.CalledProcessError) as error:
+        token = keychain_password(OPERATOR_KEYCHAIN_SERVICE, OPERATOR_KEYCHAIN_ACCOUNT)
+    except RuntimeError as error:
         raise RuntimeError(
             f"Could not retrieve {OPERATOR_KEYCHAIN_SERVICE!r} from Keychain. "
             "Set WATCHCRAFT_AUTHORING_OPERATOR_TOKEN and select "
             "--operator-token-source environment to use an explicit override"
         ) from error
-    token = result.stdout.rstrip("\n")
     if len(token) != 64:
         raise RuntimeError("The Keychain operator token is not a 64-character token")
     return token
 
 
-def production_convex_url() -> str:
-    explicit = os.environ.get("WATCHCRAFT_CONVEX_URL")
+def production_configuration(name: str) -> str:
+    explicit = os.environ.get(name)
     if explicit:
         return explicit
     try:
         result = subprocess.run(
             [
-                "gh", "variable", "get", "WATCHCRAFT_CONVEX_URL",
+                "gh", "variable", "get", name,
                 "--env", "authoring-production", "--repo", DEFAULT_GITHUB_REPOSITORY,
             ],
             check=True,
@@ -101,12 +112,47 @@ def production_convex_url() -> str:
         )
     except (OSError, subprocess.CalledProcessError) as error:
         raise RuntimeError(
-            "Set WATCHCRAFT_CONVEX_URL or authenticate the GitHub CLI"
+            f"Set {name} or authenticate the GitHub CLI"
         ) from error
     value = result.stdout.strip()
     if not value:
-        raise RuntimeError("GitHub returned an empty WATCHCRAFT_CONVEX_URL")
+        raise RuntimeError(f"GitHub returned an empty {name}")
     return value
+
+
+def production_convex_url() -> str:
+    return production_configuration("WATCHCRAFT_CONVEX_URL")
+
+
+def r2_reader_credentials(credential_source: str = "auto") -> tuple[str, str]:
+    if credential_source not in {"auto", "keychain", "environment"}:
+        raise ValueError(f"Unsupported R2 credential source {credential_source!r}")
+    access_key = os.environ.get(R2_READER_ACCESS_KEY_ENV, "")
+    secret_key = os.environ.get(R2_READER_SECRET_KEY_ENV, "")
+    if credential_source in {"auto", "environment"} and (access_key or secret_key):
+        if not access_key or not secret_key:
+            raise RuntimeError(
+                f"{R2_READER_ACCESS_KEY_ENV} and {R2_READER_SECRET_KEY_ENV} "
+                "must be set together"
+            )
+        return access_key, secret_key
+    if credential_source == "environment":
+        raise RuntimeError(
+            f"{R2_READER_ACCESS_KEY_ENV} and {R2_READER_SECRET_KEY_ENV} are "
+            "required when --r2-credentials-source environment is selected"
+        )
+    try:
+        return (
+            keychain_password(R2_READER_KEYCHAIN_SERVICE, R2_READER_ACCESS_KEY_ACCOUNT),
+            keychain_password(R2_READER_KEYCHAIN_SERVICE, R2_READER_SECRET_KEY_ACCOUNT),
+        )
+    except RuntimeError as error:
+        raise RuntimeError(
+            f"Could not retrieve read-only R2 credentials from "
+            f"{R2_READER_KEYCHAIN_SERVICE!r}. Set both {R2_READER_ACCESS_KEY_ENV} "
+            f"and {R2_READER_SECRET_KEY_ENV} and select "
+            "--r2-credentials-source environment to use an explicit override"
+        ) from error
 
 
 @dataclass
@@ -208,29 +254,43 @@ class R2ArtifactStore:
         self.bucket = bucket
 
     @classmethod
-    def from_environment(cls) -> "R2ArtifactStore":
-        required = {
-            name: os.environ.get(name, "")
-            for name in (
-                "WATCHCRAFT_R2_ENDPOINT", "WATCHCRAFT_R2_BUCKET",
-                "WATCHCRAFT_R2_ACCESS_KEY_ID", "WATCHCRAFT_R2_SECRET_ACCESS_KEY",
-            )
-        }
-        missing = [name for name, value in required.items() if not value]
-        if missing:
-            raise RuntimeError(f"Missing R2 configuration: {', '.join(missing)}")
+    def from_configuration(
+        cls,
+        *,
+        endpoint: str,
+        bucket: str,
+        access_key_id: str,
+        secret_access_key: str,
+    ) -> "R2ArtifactStore":
         try:
             import boto3
         except ImportError as error:
-            raise RuntimeError("Install authoring/worker-requirements.txt to use R2") from error
+            raise RuntimeError("Install the authoring requirements to use R2") from error
         client = boto3.client(
             "s3",
             region_name="auto",
-            endpoint_url=required["WATCHCRAFT_R2_ENDPOINT"].rstrip("/"),
-            aws_access_key_id=required["WATCHCRAFT_R2_ACCESS_KEY_ID"],
-            aws_secret_access_key=required["WATCHCRAFT_R2_SECRET_ACCESS_KEY"],
+            endpoint_url=endpoint.rstrip("/"),
+            aws_access_key_id=access_key_id,
+            aws_secret_access_key=secret_access_key,
         )
-        return cls(client, required["WATCHCRAFT_R2_BUCKET"])
+        return cls(client, bucket)
+
+    @classmethod
+    def from_environment(cls) -> "R2ArtifactStore":
+        names = (
+            "WATCHCRAFT_R2_ENDPOINT", "WATCHCRAFT_R2_BUCKET",
+            "WATCHCRAFT_R2_ACCESS_KEY_ID", "WATCHCRAFT_R2_SECRET_ACCESS_KEY",
+        )
+        required = {name: os.environ.get(name, "") for name in names}
+        missing = [name for name, value in required.items() if not value]
+        if missing:
+            raise RuntimeError(f"Missing R2 configuration: {', '.join(missing)}")
+        return cls.from_configuration(
+            endpoint=required["WATCHCRAFT_R2_ENDPOINT"],
+            bucket=required["WATCHCRAFT_R2_BUCKET"],
+            access_key_id=required["WATCHCRAFT_R2_ACCESS_KEY_ID"],
+            secret_access_key=required["WATCHCRAFT_R2_SECRET_ACCESS_KEY"],
+        )
 
     def put_json(self, value: dict[str, Any], description: dict[str, Any]) -> dict[str, Any]:
         payload = canonical_json(value).encode("utf-8")
@@ -272,11 +332,48 @@ class R2ArtifactStore:
         return reference
 
     def get_bytes(self, reference: dict[str, Any]) -> bytes:
-        response = self.client.get_object(Bucket=self.bucket, Key=reference["key"])
+        try:
+            response = self.client.get_object(Bucket=self.bucket, Key=reference["key"])
+        except Exception as error:
+            raise RuntimeError(f"Could not read R2 artifact {reference['key']}") from error
         payload = response["Body"].read()
         if len(payload) != reference["byte_length"] or sha256_hex(payload) != reference["digest"]:
             raise RuntimeError("R2 artifact failed content verification")
         return payload
+
+
+def validated_artifact_reference(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise RuntimeError("The completed job has an invalid artifact reference")
+    digest = value.get("digest")
+    byte_length = value.get("byte_length")
+    media_type = value.get("media_type")
+    if value.get("store") != "r2" or value.get("algorithm") != "sha256":
+        raise RuntimeError("The completed job does not reference a SHA-256 R2 artifact")
+    if not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
+        raise RuntimeError("The completed job has an invalid artifact digest")
+    expected_key = f"objects/sha256/{digest[:2]}/{digest[2:]}"
+    if value.get("key") != expected_key:
+        raise RuntimeError("The artifact key does not match its content digest")
+    if (
+        isinstance(byte_length, bool)
+        or not isinstance(byte_length, int)
+        or byte_length < 0
+    ):
+        raise RuntimeError("The completed job has an invalid artifact byte length")
+    if not isinstance(media_type, str) or not media_type:
+        raise RuntimeError("The completed job has an invalid artifact media type")
+    return dict(value)
+
+
+def r2_artifact_reader(credential_source: str = "auto") -> R2ArtifactStore:
+    access_key, secret_key = r2_reader_credentials(credential_source)
+    return R2ArtifactStore.from_configuration(
+        endpoint=production_configuration("WATCHCRAFT_R2_ENDPOINT"),
+        bucket=production_configuration("WATCHCRAFT_R2_BUCKET"),
+        access_key_id=access_key,
+        secret_access_key=secret_key,
+    )
 
 
 def run_worker(*, job_id: str, spec_sha256: str, dispatch_generation: int, expected_revision: int) -> dict[str, Any]:
@@ -432,6 +529,32 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
             description=help_text + ".",
         )
         command.add_argument("job_id")
+    result = commands.add_parser(
+        "result",
+        parents=[credentials],
+        help="Retrieve and verify a completed job artifact",
+        description=(
+            "Retrieve the authoritative artifact from private R2 and verify its "
+            "content digest before displaying or writing it."
+        ),
+    )
+    result.add_argument("job_id")
+    result.add_argument(
+        "--r2-credentials-source",
+        choices=("auto", "keychain", "environment"),
+        default="auto",
+        help=(
+            f"Read-only R2 credential source: environment uses {R2_READER_ACCESS_KEY_ENV} "
+            f"and {R2_READER_SECRET_KEY_ENV}; auto uses them when set and otherwise "
+            "reads the macOS Keychain (default: auto)"
+        ),
+    )
+    result.add_argument(
+        "--output",
+        type=Path,
+        metavar="PATH",
+        help="Write the exact verified bytes to a new file instead of displaying JSON",
+    )
 
 
 def run_queue_command(args: argparse.Namespace) -> int:
@@ -456,12 +579,44 @@ def run_queue_command(args: argparse.Namespace) -> int:
     if args.queue_command == "status":
         print(json.dumps(submission, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
+    if args.queue_command == "result":
+        if job.get("state") != "succeeded" or job.get("result") is None:
+            raise RuntimeError(
+                f"Job {job['job_id']} is {job.get('state', 'unknown')}; "
+                "a result is available only after it succeeds"
+            )
+        reference = validated_artifact_reference(job["result"])
+        payload = r2_artifact_reader(args.r2_credentials_source).get_bytes(reference)
+        if args.output is not None:
+            try:
+                with args.output.open("xb") as destination:
+                    destination.write(payload)
+            except FileExistsError as error:
+                raise RuntimeError(
+                    f"Refusing to overwrite existing output file {args.output}"
+                ) from error
+            except OSError as error:
+                raise RuntimeError(f"Could not write artifact to {args.output}: {error}") from error
+            print(
+                f"wrote {len(payload)} verified bytes for {job['job_id']} to {args.output}"
+            )
+            return 0
+        if reference["media_type"] != "application/json":
+            raise RuntimeError(
+                f"Artifact media type is {reference['media_type']}; use --output PATH"
+            )
+        try:
+            result = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RuntimeError("The verified artifact is not valid UTF-8 JSON") from error
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
     if args.queue_command == "approve":
         result = control.post("/submissions/approve", {
             "job_id": job["job_id"],
             "command_id": str(uuid.uuid4()),
             "expected_revision": job["revision"],
-            "actor": "keychain:watchcraft-operator-cli",
+            "actor": "watchcraft-author-cli",
             "spec_sha256": job["spec_sha256"],
         })
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
