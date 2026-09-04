@@ -24,6 +24,7 @@ interface WebLocationState {
 
 interface InitialWebAppState {
   collections: SavedWebCollection[];
+  currentCollectionId: string | null;
   currentLocation: WebLocationState | null;
   settingsOpen: boolean;
 }
@@ -39,7 +40,13 @@ function locationState(): WebLocationState | null {
 
 function readSavedCollections(): SavedWebCollection[] {
   try {
-    return readWebCollections(window.localStorage.getItem(WEB_COLLECTIONS_KEY))
+    const preferredUrl = readLastWebCollectionUrl(
+      window.localStorage.getItem(WEB_LAST_COLLECTION_KEY),
+    );
+    return readWebCollections(
+      window.localStorage.getItem(WEB_COLLECTIONS_KEY),
+      preferredUrl,
+    )
       .filter((collection) => !isLegacyWebDemoUrl(collection.url, window.location.href));
   } catch {
     return [];
@@ -60,7 +67,15 @@ function initialWebAppState(): InitialWebAppState {
   const collections = readSavedCollections();
   const explicitLocation = locationState();
   if (explicitLocation) {
-    return { collections, currentLocation: explicitLocation, settingsOpen: false };
+    const currentCollection = collections.find(
+      (collection) => collection.url === explicitLocation.catalogUrl,
+    );
+    return {
+      collections,
+      currentCollectionId: currentCollection?.collectionId ?? null,
+      currentLocation: explicitLocation,
+      settingsOpen: false,
+    };
   }
 
   try {
@@ -73,6 +88,7 @@ function initialWebAppState(): InitialWebAppState {
       writeCollectionRoute(savedCollection.url, "replace");
       return {
         collections,
+        currentCollectionId: savedCollection.collectionId,
         currentLocation: { catalogUrl: savedCollection.url, mediaRootUrl: null },
         settingsOpen: false,
       };
@@ -81,7 +97,12 @@ function initialWebAppState(): InitialWebAppState {
   } catch {
     // An empty library still opens the collection chooser without browser storage.
   }
-  return { collections, currentLocation: null, settingsOpen: true };
+  return {
+    collections,
+    currentCollectionId: null,
+    currentLocation: null,
+    settingsOpen: true,
+  };
 }
 
 function persistSavedCollections(collections: SavedWebCollection[]): void {
@@ -114,7 +135,11 @@ function isCollectionManifest(value: unknown): value is CollectionManifest {
   return manifest.kind === "watchcraft.collection"
     && manifest.schema_version === 4
     && typeof manifest.collection_id === "string"
-    && typeof manifest.title === "string";
+    && typeof manifest.title === "string"
+    && Number.isInteger(manifest.revision)
+    && Number(manifest.revision) > 0
+    && typeof manifest.content_hash === "string"
+    && /^[a-f0-9]{64}$/.test(manifest.content_hash);
 }
 
 function EmptyWebApp({ onChoose }: { onChoose: () => void }): ReactElement {
@@ -138,6 +163,9 @@ export function WebApp(): ReactElement {
   const [currentLocation, setCurrentLocation] = useState<WebLocationState | null>(
     initialState.currentLocation,
   );
+  const [currentCollectionId, setCurrentCollectionId] = useState<string | null>(
+    initialState.currentCollectionId,
+  );
   const [collections, setCollections] = useState<SavedWebCollection[]>(initialState.collections);
   const [settingsOpen, setSettingsOpen] = useState(initialState.settingsOpen);
   const [settingsBusy, setSettingsBusy] = useState(false);
@@ -152,21 +180,29 @@ export function WebApp(): ReactElement {
 
   const rememberLoadedCollection = useCallback((manifest: CollectionManifest): void => {
     if (!repository) return;
+    setCurrentCollectionId(manifest.collection_id);
     setCollections((previous) => {
-      const next = saveWebCollection(previous, {
-        collectionId: manifest.collection_id,
-        title: manifest.title,
-        url: repository.manifestLocation,
-      });
-      persistSavedCollections(next);
-      persistLastCollection(repository.manifestLocation);
-      return next;
+      try {
+        const next = saveWebCollection(previous, {
+          collectionId: manifest.collection_id,
+          title: manifest.title,
+          url: repository.manifestLocation,
+          revision: manifest.revision,
+          contentHash: manifest.content_hash,
+        });
+        persistSavedCollections(next);
+        persistLastCollection(repository.manifestLocation);
+        return next;
+      } catch {
+        return previous;
+      }
     });
   }, [repository]);
 
   const switchCollection = useCallback((collection: SavedWebCollection): void => {
     writeCollectionRoute(collection.url, "push");
     persistLastCollection(collection.url);
+    setCurrentCollectionId(collection.collectionId);
     setCurrentLocation({ catalogUrl: collection.url, mediaRootUrl: null });
     setSettingsError(null);
     setSettingsOpen(false);
@@ -176,6 +212,7 @@ export function WebApp(): ReactElement {
     function onPopState(): void {
       const nextLocation = locationState();
       setCurrentLocation(nextLocation);
+      setCurrentCollectionId(null);
       setSettingsOpen(nextLocation === null);
     }
     window.addEventListener("popstate", onPopState);
@@ -209,13 +246,16 @@ export function WebApp(): ReactElement {
         collectionId: value.collection_id,
         title: value.title,
         url: manifestUrl,
+        revision: value.revision,
+        contentHash: value.content_hash,
       };
-      setCollections((previous) => {
-        const next = saveWebCollection(previous, collection);
-        persistSavedCollections(next);
-        return next;
-      });
+      const next = saveWebCollection(collections, collection);
+      persistSavedCollections(next);
+      setCollections(next);
       if (openAfter) switchCollection(collection);
+      else if (currentCollectionId === collection.collectionId) {
+        persistLastCollection(collection.url);
+      }
       return true;
     } catch (error) {
       setSettingsError(error instanceof Error ? error.message : "Could not add that collection.");
@@ -227,16 +267,17 @@ export function WebApp(): ReactElement {
 
   function removeCollection(collection: SavedWebCollection): void {
     if (!window.confirm(`Remove “${collection.title}” from this browser?`)) return;
-    const next = removeWebCollection(collections, collection.url);
+    const next = removeWebCollection(collections, collection.collectionId);
     setCollections(next);
     persistSavedCollections(next);
     if (next.length === 0) clearLastCollection();
-    if (collection.url === repository?.manifestLocation) {
+    if (collection.collectionId === currentCollectionId) {
       if (next[0]) {
         switchCollection(next[0]);
       } else {
         writeCollectionRoute(null, "replace");
         setCurrentLocation(null);
+        setCurrentCollectionId(null);
         setSettingsError(null);
         setSettingsOpen(true);
       }
@@ -283,7 +324,7 @@ export function WebApp(): ReactElement {
       )}
       {settingsOpen ? (
         <WebCollectionSettings
-          activeUrl={repository?.manifestLocation ?? null}
+          activeCollectionId={currentCollectionId}
           busy={settingsBusy}
           collections={collections}
           error={settingsError}

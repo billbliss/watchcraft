@@ -17,7 +17,7 @@ import {
 import type { SavedWebCollection } from "./webCollectionRegistry";
 
 interface WebCollectionSettingsProps {
-  activeUrl: string | null;
+  activeCollectionId: string | null;
   busy: boolean;
   collections: SavedWebCollection[];
   error: string | null;
@@ -29,7 +29,7 @@ interface WebCollectionSettingsProps {
 }
 
 export function WebCollectionSettings({
-  activeUrl,
+  activeCollectionId,
   busy,
   collections,
   error,
@@ -174,7 +174,7 @@ export function WebCollectionSettings({
                 <p className="web-empty-collection-registry">No collections saved yet.</p>
               ) : null}
               {collections.map((collection) => {
-                const active = collection.url === activeUrl;
+                const active = collection.collectionId === activeCollectionId;
                 return (
                   <article
                     className={`web-collection-entry ${active ? "active" : ""}`}

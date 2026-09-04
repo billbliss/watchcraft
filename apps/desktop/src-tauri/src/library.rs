@@ -182,6 +182,32 @@ struct DirectoryBinding {
     path_prefix: PathBuf,
 }
 
+fn validate_collection_update(
+    app_data_root: &Path,
+    previous: Option<&InstalledCollection>,
+    manifest: &CollectionManifest,
+) -> Result<(), String> {
+    let Some(previous) = previous else {
+        return Ok(());
+    };
+    if previous.revision > manifest.revision {
+        return Err(format!(
+            "The installed collection is revision {}; the source provides older revision {}.",
+            previous.revision, manifest.revision
+        ));
+    }
+    if previous.revision == manifest.revision {
+        let previous_manifest = read_manifest(&app_data_root.join(&previous.manifest_path))?;
+        if previous_manifest.content_hash != manifest.content_hash {
+            return Err(format!(
+                "Revision {} changed without a revision increase.",
+                manifest.revision
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn install_from_folder_with_activation(
     app_data_root: &Path,
     selected_root: &Path,
@@ -198,6 +224,12 @@ pub(crate) fn install_from_folder_with_activation(
         .canonicalize()
         .map_err(|error| format!("Could not resolve the collection folder: {error}"))?;
     let media = media_inventory(&manifest)?;
+    let mut registry = read_registry(app_data_root)?;
+    validate_collection_update(
+        app_data_root,
+        registry.collections.get(&manifest.collection_id),
+        &manifest,
+    )?;
     let media_root = resolve_media_root(
         &selected_root,
         &metadata_source_root,
@@ -231,7 +263,6 @@ pub(crate) fn install_from_folder_with_activation(
     let media_expected = media.managed_local.len() + media.referenced_local.len();
     let media_found = managed_found + referenced_found;
 
-    let mut registry = read_registry(app_data_root)?;
     let relative_revision = revision_root
         .strip_prefix(app_data_root)
         .map_err(|_| "Private collection storage is outside the Watchcraft data folder.")?
@@ -294,23 +325,7 @@ pub(crate) fn install_from_url(
     let media = media_inventory(&manifest)?;
     let mut registry = read_registry(app_data_root)?;
     let previous = registry.collections.get(&manifest.collection_id);
-    if let Some(previous) = previous {
-        if previous.revision > manifest.revision {
-            return Err(format!(
-                "The installed collection is revision {}; the URL provides older revision {}.",
-                previous.revision, manifest.revision
-            ));
-        }
-        if previous.revision == manifest.revision {
-            let previous_manifest = read_manifest(&app_data_root.join(&previous.manifest_path))?;
-            if previous_manifest.content_hash != manifest.content_hash {
-                return Err(format!(
-                    "Revision {} changed without a revision increase.",
-                    manifest.revision
-                ));
-            }
-        }
-    }
+    validate_collection_update(app_data_root, previous, &manifest)?;
     let previous_binding = previous.and_then(|installed| installed.media_binding.clone());
     let enabled = activate || previous.map(|installed| installed.enabled).unwrap_or(true);
 
@@ -1634,6 +1649,60 @@ mod tests {
         assert!(remove_collection(&app_data, "first")
             .unwrap_err()
             .contains("final collection"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn preserves_distinct_collections_and_updates_by_id_across_registry_reloads() {
+        let root = temporary_root("registry-update");
+        let app_data = root.join("private");
+        let first = root.join("First Course");
+        let second = root.join("Second Course");
+        for (folder, id) in [(&first, "first"), (&second, "second")] {
+            fs::create_dir_all(folder.join("analysis")).unwrap();
+            fs::create_dir_all(folder.join("media")).unwrap();
+            fs::write(folder.join("analysis/lesson.json"), "{}").unwrap();
+            fs::write(folder.join("media/lesson.mp4"), "video").unwrap();
+            write_fixture(&folder.join("course.watchcraft"), id, 1, ".");
+        }
+
+        install_from_folder_with_activation(&app_data, &first, true).unwrap();
+        install_from_folder_with_activation(&app_data, &second, true).unwrap();
+        let after_add = list_collections(&app_data).unwrap();
+        assert_eq!(after_add.len(), 2);
+        assert!(after_add
+            .iter()
+            .any(|collection| collection.collection_id == "first" && collection.revision == 1));
+        assert!(after_add
+            .iter()
+            .any(|collection| collection.collection_id == "second" && collection.active));
+
+        write_fixture(&first.join("course.watchcraft"), "first", 2, ".");
+        install_from_folder_with_activation(&app_data, &first, true).unwrap();
+        let after_update = list_collections(&app_data).unwrap();
+        assert_eq!(after_update.len(), 2);
+        assert!(after_update
+            .iter()
+            .any(|collection| collection.collection_id == "first"
+                && collection.revision == 2
+                && collection.active));
+        assert!(after_update
+            .iter()
+            .any(|collection| collection.collection_id == "second"));
+        assert_eq!(
+            load_current(&app_data)
+                .unwrap()
+                .expect("the current collection should survive a registry reload")
+                .collection_id,
+            "first"
+        );
+
+        write_fixture(&first.join("course.watchcraft"), "first", 1, ".");
+        assert!(install_from_folder_with_activation(&app_data, &first, true)
+            .unwrap_err()
+            .contains("older revision 1"));
+        assert_eq!(list_collections(&app_data).unwrap().len(), 2);
+
         fs::remove_dir_all(root).unwrap();
     }
 

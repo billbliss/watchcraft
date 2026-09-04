@@ -5,6 +5,7 @@ import {
   displayClock,
   inferTimelineClockMode,
   topicPassesFrequencyFilter,
+  upsertCollectionRegistration,
   youtubeBridgeUrl,
   youtubeEmbedUrl,
   youtubeWatchUrl,
@@ -66,4 +67,41 @@ test("keeps valid hour-minute-second timelines", () => {
   assert.equal(mode, "hours-minutes-seconds");
   assert.equal(displayClock("00:23:22.000", mode), "23:22");
   assert.equal(displayClock("01:02:03", mode), "1:02:03");
+});
+
+test("upserts collection registrations by stable collection ID", () => {
+  const registrations = upsertCollectionRegistration([
+    { collectionId: "first", revision: 1, contentHash: "1", source: "first-url" },
+    { collectionId: "second", revision: 1, contentHash: "2", source: "second-url" },
+  ], {
+    collectionId: "first",
+    revision: 2,
+    contentHash: "3",
+    source: "first-mirror",
+  });
+
+  assert.deepEqual(registrations, [
+    { collectionId: "second", revision: 1, contentHash: "2", source: "second-url" },
+    { collectionId: "first", revision: 2, contentHash: "3", source: "first-mirror" },
+  ]);
+});
+
+test("rejects collection downgrades and same-revision content changes", () => {
+  const current = [{ collectionId: "first", revision: 2, contentHash: "2" }];
+  assert.throws(
+    () => upsertCollectionRegistration(current, {
+      collectionId: "first",
+      revision: 1,
+      contentHash: "1",
+    }),
+    /older revision 1/,
+  );
+  assert.throws(
+    () => upsertCollectionRegistration(current, {
+      collectionId: "first",
+      revision: 2,
+      contentHash: "changed",
+    }),
+    /changed without a revision increase/,
+  );
 });

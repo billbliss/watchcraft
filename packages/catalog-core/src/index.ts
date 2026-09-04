@@ -213,6 +213,53 @@ export interface CollectionManifest {
   content_hash: string;
 }
 
+/**
+ * Runtime registration identity is collection-scoped. A source URL or folder may
+ * change between revisions, but it must not create a second logical collection.
+ */
+export interface CollectionRegistrationIdentity {
+  collectionId: string;
+  revision?: number | null;
+  contentHash?: string | null;
+}
+
+export function assertCollectionRegistrationUpdate(
+  current: CollectionRegistrationIdentity,
+  incoming: CollectionRegistrationIdentity,
+): void {
+  if (current.collectionId !== incoming.collectionId) return;
+  if (current.revision == null || incoming.revision == null) return;
+  if (current.revision > incoming.revision) {
+    throw new Error(
+      `The saved collection is revision ${current.revision}; the source provides older revision ${incoming.revision}.`,
+    );
+  }
+  if (
+    current.revision === incoming.revision
+    && current.contentHash
+    && incoming.contentHash
+    && current.contentHash !== incoming.contentHash
+  ) {
+    throw new Error(`Revision ${incoming.revision} changed without a revision increase.`);
+  }
+}
+
+export function upsertCollectionRegistration<T extends CollectionRegistrationIdentity>(
+  collections: readonly T[],
+  incoming: T,
+): T[] {
+  const current = collections.find(
+    (collection) => collection.collectionId === incoming.collectionId,
+  );
+  if (current) assertCollectionRegistrationUpdate(current, incoming);
+  return [
+    ...collections.filter(
+      (collection) => collection.collectionId !== incoming.collectionId,
+    ),
+    incoming,
+  ];
+}
+
 export interface AnalysisSection {
   start: string;
   end: string;
