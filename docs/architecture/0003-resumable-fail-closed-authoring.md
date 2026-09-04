@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-08-28
+- Amended: 2026-09-03
 
 ## Context
 
@@ -25,6 +26,37 @@ The automated collection-creation path is an ordered, resumable state machine:
 2. analyze every selected source;
 3. normalize topics, labels, families, and related-topic links;
 4. validate and build the publishable collection manifest.
+
+The initial implementation specializes the first phase as transcript generation or
+import and the second phase as per-source analysis. This sequencing does not make a
+transcript the queue's fundamental unit of work. Queued processing is expressed as a
+generic authoring task that names, separately:
+
+- the operation being performed, such as `generate`, `import`, `validate`, or
+  `compile`;
+- the versioned artifact kind being produced or consumed, initially `transcript` and
+  later potentially chapters, shots, scenes, dialogue, speakers, music cues, topics,
+  or another time-indexed annotation layer;
+- immutable input and dependency references, including the source media asset and,
+  when relevant, its edition and coordinate identity;
+- the handler or generator identity, version, and material configuration; and
+- the expected output schema and version.
+
+Operation and artifact kind remain distinct because the same kind of artifact may be
+generated, imported, corrected, or validated. Workers advertise the task kinds they
+can handle and dispatch accepted tasks to typed handlers. The first worker may support
+only transcript generation without putting transcript-specific fields or lifecycle
+rules into the shared queue envelope.
+
+Approval and idempotency bind to the complete task specification. Reuse therefore
+depends on the operation, artifact kind and schema, source and coordinate identity,
+handler version and material configuration, and the hashes of every input and
+dependency. A successful task records an immutable, validated artifact reference in
+the durable ledger; worker logs and temporary output are not authoritative results.
+This generalization applies to authoring orchestration and does not require publishing
+future annotation layers in the current collection schema. Whether an artifact holds
+instant events, intervals, or a sampled or continuous signal is defined by that
+artifact's output schema rather than by the queue lifecycle.
 
 Each phase has an explicit completeness condition:
 
@@ -52,7 +84,8 @@ may remain in place while a new authoring run is incomplete.
 
 Progress is written atomically and at the smallest useful recovery boundary:
 
-- each source transcript and analysis is its own checkpoint;
+- each completed task artifact is its own checkpoint; in the initial pipeline this
+  means each source transcript and analysis;
 - normalization assignments, display labels, and related-topic batches are saved
   incrementally;
 - valid results from a partially invalid display-label batch are saved before the
@@ -76,7 +109,8 @@ precedence. API keys and other credentials must not be written to authoring stat
 transcripts, analyses, manifests, logs, or committed examples.
 
 Regression tests are required at every failure boundary. They cover partial imports,
-cache validation, deferred manifest builds, partial normalization checkpoints,
+cache validation, task dispatch by operation and artifact kind, dependency and output
+schema validation, deferred manifest builds, partial normalization checkpoints,
 deterministic-label validation, and successful resume behavior. Generated manifests
 must also pass the canonical JSON Schema.
 
@@ -93,3 +127,8 @@ the resulting state is auditable: every selected source is accounted for, failur
 actionable, and publication is separated from partial generation. Standalone low-level
 commands remain available for deliberate maintenance, but they do not weaken the
 completion guarantees of `collection create`.
+
+New derived artifact types require a typed handler, schema, validation rules, and
+declared dependencies, but do not require a new queue lifecycle. This is deliberate
+forward compatibility rather than a commitment to implement the broader film
+annotation model in the instructional-video pipeline.
