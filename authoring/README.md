@@ -191,6 +191,12 @@ credential. On macOS the CLI reads the raw value from the login Keychain item na
 needed. Convex production stores only its SHA-256 verifier as
 `AUTHORING_OPERATOR_TOKEN_SHA256`.
 
+Queue commands accept `--operator-token-source auto|keychain|environment` after the
+queue subcommand. `auto` prefers `WATCHCRAFT_AUTHORING_OPERATOR_TOKEN` when present and
+otherwise uses Keychain. `keychain` deliberately ignores the environment override;
+`environment` requires it. Raw token values are not accepted as command-line arguments
+because they can leak through shell history and process listings.
+
 The first Python worker handler produces a deterministic lexical-analysis artifact.
 It is an infrastructure and protocol proof, not the model-backed instructional-video
 analysis used by the existing local authoring commands. Submit, approve, dispatch, and

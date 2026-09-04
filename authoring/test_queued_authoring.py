@@ -6,7 +6,7 @@ from contextlib import redirect_stdout
 from unittest.mock import Mock, patch
 
 import queued_authoring
-from watchcraft_author import build_parser
+from watchcraft_author import build_parser, main
 
 
 class QueuedAuthoringTests(unittest.TestCase):
@@ -18,18 +18,35 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertEqual(args.command, "queue")
         self.assertEqual(args.queue_command, "submit-analysis")
         self.assertEqual(args.max_topics, 8)
+        self.assertEqual(args.operator_token_source, "auto")
+
+    def test_empty_command_prints_help_instead_of_an_argument_error(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(main([]), 0)
+        self.assertIn("queue", output.getvalue())
+        self.assertIn("watchcraft-author queue --help", output.getvalue())
 
     def test_operator_token_prefers_environment_without_reading_keychain(self):
         with patch.dict(os.environ, {"WATCHCRAFT_AUTHORING_OPERATOR_TOKEN": "a" * 64}):
             with patch("queued_authoring.subprocess.run") as run:
-                self.assertEqual(queued_authoring.operator_token_from_keychain(), "a" * 64)
+                self.assertEqual(queued_authoring.operator_token(), "a" * 64)
                 run.assert_not_called()
 
-    def test_operator_token_is_retrieved_from_the_stable_keychain_item(self):
+    def test_operator_token_source_can_require_the_environment(self):
         with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "WATCHCRAFT_AUTHORING_OPERATOR_TOKEN"):
+                queued_authoring.operator_token("environment")
+
+    def test_operator_token_is_retrieved_from_the_stable_keychain_item(self):
+        with patch.dict(
+            os.environ,
+            {"WATCHCRAFT_AUTHORING_OPERATOR_TOKEN": "a" * 64},
+            clear=True,
+        ):
             with patch("queued_authoring.subprocess.run") as run:
                 run.return_value = Mock(stdout="b" * 64 + "\n")
-                token = queued_authoring.operator_token_from_keychain()
+                token = queued_authoring.operator_token("keychain")
         self.assertEqual(token, "b" * 64)
         self.assertIn("Watchcraft authoring operator token", run.call_args.args[0])
 
@@ -107,7 +124,11 @@ class QueuedAuthoringTests(unittest.TestCase):
         }
         client = Mock()
         client.post.side_effect = [{"job": job, "run": {}}, pending]
-        args = argparse.Namespace(queue_command="dispatch", job_id="job-1")
+        args = argparse.Namespace(
+            queue_command="dispatch",
+            job_id="job-1",
+            operator_token_source="auto",
+        )
         with patch("queued_authoring.operator_client", return_value=client):
             with patch("queued_authoring.subprocess.run") as run:
                 with redirect_stdout(io.StringIO()):

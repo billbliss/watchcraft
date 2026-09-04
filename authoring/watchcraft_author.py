@@ -1573,8 +1573,14 @@ def process_workspace(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
-    commands = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog=(
+            "Start with 'watchcraft-author COMMAND --help'. For the remote queue, "
+            "use 'watchcraft-author queue --help'."
+        ),
+    )
+    commands = parser.add_subparsers(dest="command")
     youtube = commands.add_parser("youtube", help="Import public YouTube sources")
     youtube_commands = youtube.add_subparsers(dest="youtube_command", required=True)
     add = youtube_commands.add_parser(
@@ -1691,7 +1697,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command is None:
+        parser.print_help()
+        return 0
     if args.command == "youtube":
         if bool(args.url) == bool(args.playlist):
             raise ValueError("Provide either one YouTube video or --playlist, but not both")

@@ -44,14 +44,25 @@ def convex_http_url(deployment_url: str) -> str:
     return f"https://{match.group(1)}.convex.site"
 
 
-def operator_token_from_keychain() -> str:
+def operator_token(token_source: str = "auto") -> str:
+    if token_source not in {"auto", "keychain", "environment"}:
+        raise ValueError(f"Unsupported operator token source {token_source!r}")
     explicit = os.environ.get("WATCHCRAFT_AUTHORING_OPERATOR_TOKEN")
-    if explicit:
+    if token_source in {"auto", "environment"} and explicit:
         if len(explicit) != 64:
             raise RuntimeError("WATCHCRAFT_AUTHORING_OPERATOR_TOKEN must contain 64 characters")
         return explicit
+    if token_source == "environment":
+        raise RuntimeError(
+            "WATCHCRAFT_AUTHORING_OPERATOR_TOKEN is required when "
+            "--operator-token-source environment is selected"
+        )
     if os.name != "posix":
-        raise RuntimeError("Set WATCHCRAFT_AUTHORING_OPERATOR_TOKEN on this platform")
+        raise RuntimeError(
+            "Keychain access is unavailable on this platform; set "
+            "WATCHCRAFT_AUTHORING_OPERATOR_TOKEN and select "
+            "--operator-token-source environment"
+        )
     try:
         result = subprocess.run(
             [
@@ -64,7 +75,9 @@ def operator_token_from_keychain() -> str:
         )
     except (OSError, subprocess.CalledProcessError) as error:
         raise RuntimeError(
-            f"Could not retrieve {OPERATOR_KEYCHAIN_SERVICE!r} from Keychain"
+            f"Could not retrieve {OPERATOR_KEYCHAIN_SERVICE!r} from Keychain. "
+            "Set WATCHCRAFT_AUTHORING_OPERATOR_TOKEN and select "
+            "--operator-token-source environment to use an explicit override"
         ) from error
     token = result.stdout.rstrip("\n")
     if len(token) != 64:
@@ -129,8 +142,12 @@ class AuthoringHttpClient:
         return result
 
 
-def operator_client() -> AuthoringHttpClient:
-    return AuthoringHttpClient(production_convex_url(), operator_token_from_keychain(), "/authoring/operator")
+def operator_client(token_source: str = "auto") -> AuthoringHttpClient:
+    return AuthoringHttpClient(
+        production_convex_url(),
+        operator_token(token_source),
+        "/authoring/operator",
+    )
 
 
 def worker_client() -> AuthoringHttpClient:
@@ -370,19 +387,55 @@ def analysis_spec(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
+    parent.description = (
+        "Submit, approve, dispatch, and inspect durable remote authoring jobs."
+    )
+    parent.epilog = (
+        "Operator authentication defaults to WATCHCRAFT_AUTHORING_OPERATOR_TOKEN "
+        "when set, then the macOS login Keychain. Raw tokens are intentionally not "
+        "accepted as command-line values."
+    )
     commands = parent.add_subparsers(dest="queue_command", required=True)
-    submit = commands.add_parser("submit-analysis", help="Submit a deterministic analysis job")
+    credentials = argparse.ArgumentParser(add_help=False)
+    credentials.add_argument(
+        "--operator-token-source",
+        choices=("auto", "keychain", "environment"),
+        default="auto",
+        help=(
+            "Credential source: environment requires "
+            "WATCHCRAFT_AUTHORING_OPERATOR_TOKEN; auto uses it when set and otherwise "
+            "reads the macOS Keychain (default: auto)"
+        ),
+    )
+    submit = commands.add_parser(
+        "submit-analysis",
+        parents=[credentials],
+        help="Submit a deterministic analysis job",
+        description="Submit a deterministic, non-transcript lexical-analysis job.",
+    )
     submit.add_argument("--title", required=True)
     submit.add_argument("--text", required=True)
     submit.add_argument("--source-id", default="operator:lexical-analysis")
     submit.add_argument("--max-topics", type=int, default=8)
-    for name in ("status", "approve", "dispatch", "cancel", "retry"):
-        command = commands.add_parser(name)
+    command_help = {
+        "status": "Show the authoritative job and run aggregates",
+        "approve": "Approve the immutable job specification",
+        "dispatch": "Request and launch the GitHub worker",
+        "cancel": "Cancel an unfinished job",
+        "retry": "Return a retryable failed job to the ready state",
+    }
+    for name, help_text in command_help.items():
+        command = commands.add_parser(
+            name,
+            parents=[credentials],
+            help=help_text,
+            description=help_text + ".",
+        )
         command.add_argument("job_id")
 
 
 def run_queue_command(args: argparse.Namespace) -> int:
-    control = operator_client()
+    control = operator_client(args.operator_token_source)
     if args.queue_command == "submit-analysis":
         if not 1 <= args.max_topics <= 20:
             raise ValueError("--max-topics must be between 1 and 20")
