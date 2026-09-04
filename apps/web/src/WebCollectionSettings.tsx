@@ -50,14 +50,20 @@ export function WebCollectionSettings({
   const inputRef = useRef<HTMLInputElement>(null);
 
   const matchingFeaturedCollections = useMemo(() => {
+    const installedCollectionIds = new Set(
+      collections.map((collection) => collection.collectionId),
+    );
+    const availableFeaturedCollections = featuredCollections.filter(
+      (collection) => !installedCollectionIds.has(collection.collectionId),
+    );
     const query = url.trim().toLocaleLowerCase();
-    if (!query) return featuredCollections;
-    return featuredCollections.filter((collection) => [
+    if (!query) return availableFeaturedCollections;
+    return availableFeaturedCollections.filter((collection) => [
       collection.title,
       collection.category ?? "",
       collection.url,
     ].some((value) => value.toLocaleLowerCase().includes(query)));
-  }, [featuredCollections, url]);
+  }, [collections, featuredCollections, url]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent): void {
@@ -292,7 +298,11 @@ export function WebCollectionSettings({
                       </button>
                     ))}
                     {matchingFeaturedCollections.length === 0 ? (
-                      <p className="web-featured-empty">No featured collections match. You can still add this URL.</p>
+                      <p className="web-featured-empty">
+                        {url.trim()
+                          ? "No featured collections match. You can still add this URL."
+                          : "All featured collections are already installed."}
+                      </p>
                     ) : null}
                   </div>
                 ) : null}

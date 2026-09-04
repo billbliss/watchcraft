@@ -87,15 +87,21 @@ export function CollectionSettings({
   const archivedCount = collections.length - availableCollections.length;
   const displayedCollections = showArchived ? collections : availableCollections;
   const matchingFeaturedCollections = useMemo(() => {
+    const installedCollectionIds = new Set(
+      collections.map((collection) => collection.collectionId),
+    );
+    const availableFeaturedCollections = featuredCollections.filter(
+      (collection) => !installedCollectionIds.has(collection.collectionId),
+    );
     const query = url.trim().toLocaleLowerCase();
-    if (!query) return featuredCollections;
-    return featuredCollections.filter((collection) => [
+    if (!query) return availableFeaturedCollections;
+    return availableFeaturedCollections.filter((collection) => [
       collection.title,
       collection.category ?? "",
       collection.url,
       ...collection.mediaModes.map((mode) => MEDIA_MODE_LABELS[mode]),
     ].some((value) => value.toLocaleLowerCase().includes(query)));
-  }, [featuredCollections, url]);
+  }, [collections, featuredCollections, url]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent): void {
@@ -393,7 +399,11 @@ export function CollectionSettings({
                         </button>
                       ))}
                       {matchingFeaturedCollections.length === 0 ? (
-                        <p className="desktop-featured-empty">No featured collections match. You can still add this URL.</p>
+                        <p className="desktop-featured-empty">
+                          {url.trim()
+                            ? "No featured collections match. You can still add this URL."
+                            : "All featured collections are already installed."}
+                        </p>
                       ) : null}
                     </div>
                   ) : null}

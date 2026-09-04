@@ -12,6 +12,27 @@ const FIRST_URL = "https://collections.example/first/collection.json";
 const SECOND_URL = "https://collections.example/second/collection.json";
 const FIRST_UPDATE_URL = "https://mirror.example/first/collection.json";
 
+function featuredDirectory() {
+  return {
+    collections: [
+      {
+        collection_id: "first",
+        title: "First collection",
+        manifest_url: FIRST_URL,
+        media_modes: ["remote"],
+        video_count: 1,
+      },
+      {
+        collection_id: "second",
+        title: "Second collection",
+        manifest_url: SECOND_URL,
+        media_modes: ["remote"],
+        video_count: 1,
+      },
+    ],
+  };
+}
+
 const dom = new JSDOM("<!doctype html><html><body><div id=\"root\"></div></body></html>", {
   url: "https://watchcraft.example/",
 });
@@ -150,4 +171,38 @@ test("desktop Settings preserves, updates, persists, and reloads collection regi
   assert.match(view.container.textContent ?? "", /First collection updated/);
   assert.match(view.container.textContent ?? "", /Second collection/);
   assert.equal(view.container.querySelectorAll(".active").length, 1);
+});
+
+test("desktop featured picker hides installed collections, including archived ones", async () => {
+  dom.window.document.body.innerHTML = '<div id="root"></div>';
+  persistedRegistry = JSON.stringify([{
+    ...registration("first", "First collection", 1, FIRST_URL),
+    archived: true,
+  }]);
+  globalThis.fetch = async () => new Response(JSON.stringify(featuredDirectory()), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+  const view = render(createElement(SettingsHarness), {
+    container: dom.window.document.querySelector("#root")!,
+  });
+
+  fireEvent.click(view.getByRole("button", { name: "Browse featured collections" }));
+  await waitFor(() => assert.ok(
+    view.getByRole("option", { name: /Second collection/ }),
+  ));
+  assert.equal(view.queryByRole("option", { name: /First collection/ }), null);
+
+  fireEvent.click(view.getByRole("option", { name: /Second collection/ }));
+  fireEvent.click(view.getByRole("button", { name: "Add", exact: true }));
+  await waitFor(() => assert.equal(
+    view.container.querySelectorAll(".collection-entry").length,
+    1,
+  ));
+
+  fireEvent.click(view.getByRole("button", { name: "Browse featured collections" }));
+  await waitFor(() => assert.ok(
+    view.getByText("All featured collections are already installed."),
+  ));
+  assert.equal(view.queryAllByRole("option").length, 0);
 });

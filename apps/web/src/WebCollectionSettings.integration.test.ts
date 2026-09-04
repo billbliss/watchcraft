@@ -16,6 +16,27 @@ const FIRST_URL = "https://collections.example/first/collection.json";
 const SECOND_URL = "https://collections.example/second/collection.json";
 const FIRST_UPDATE_URL = "https://mirror.example/first/collection.json";
 
+function featuredDirectory() {
+  return {
+    collections: [
+      {
+        collection_id: "first",
+        title: "First collection",
+        manifest_url: FIRST_URL,
+        media_modes: ["remote"],
+        video_count: 1,
+      },
+      {
+        collection_id: "second",
+        title: "Second collection",
+        manifest_url: SECOND_URL,
+        media_modes: ["remote"],
+        video_count: 1,
+      },
+    ],
+  };
+}
+
 const dom = new JSDOM("<!doctype html><html><body><div id=\"root\"></div></body></html>", {
   url: "https://watchcraft.example/app/",
 });
@@ -204,4 +225,47 @@ test("Settings updates a collection by collection_id without duplicating it", as
   assert.match(view.container.textContent ?? "", /First collection updated/);
   assert.match(view.container.textContent ?? "", /Second collection/);
   assert.equal(view.container.querySelectorAll(".web-collection-entry.active").length, 1);
+});
+
+test("featured picker hides collections already saved in the browser", async () => {
+  const dom = installDom();
+  const firstCollection: SavedWebCollection = {
+    collectionId: "first",
+    title: "First collection",
+    url: FIRST_URL,
+    revision: 1,
+    contentHash: "1".repeat(64),
+  };
+  dom.window.localStorage.setItem(WEB_COLLECTIONS_KEY, JSON.stringify([firstCollection]));
+  dom.window.localStorage.setItem(WEB_LAST_COLLECTION_KEY, FIRST_URL);
+  globalThis.fetch = async () => new Response(JSON.stringify(featuredDirectory()), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+  const view = render(createElement(SettingsHarness, {
+    manifests: {
+      [SECOND_URL]: manifest("second", "Second collection", 1, "2"),
+    },
+  }), {
+    container: dom.window.document.querySelector("#root")!,
+  });
+
+  fireEvent.click(view.getByRole("button", { name: "Browse featured collections" }));
+  await waitFor(() => assert.ok(
+    view.getByRole("option", { name: /Second collection/ }),
+  ));
+  assert.equal(view.queryByRole("option", { name: /First collection/ }), null);
+
+  fireEvent.click(view.getByRole("option", { name: /Second collection/ }));
+  fireEvent.click(view.getByRole("button", { name: "Add", exact: true }));
+  await waitFor(() => assert.equal(
+    view.container.querySelectorAll(".web-collection-entry").length,
+    2,
+  ));
+
+  fireEvent.click(view.getByRole("button", { name: "Browse featured collections" }));
+  await waitFor(() => assert.ok(
+    view.getByText("All featured collections are already installed."),
+  ));
+  assert.equal(view.queryAllByRole("option").length, 0);
 });
