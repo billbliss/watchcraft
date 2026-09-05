@@ -46,14 +46,13 @@ const youtubeTranscriptionSpec = {
   operation: "generate" as const,
   artifact_kind: "transcript",
   output_schema: { id: "watchcraft.transcript", version: 1 },
-  handler: { id: "watchcraft.transcript.mlx-whisper-youtube", version: "2" },
+  handler: { id: "watchcraft.transcript.mlx-whisper-youtube", version: "1" },
   source: { media_asset_id: "youtube:WPtpUu3uIUI" },
   inputs: [],
   dependencies: [],
   configuration: {
     canonical_url: "https://www.youtube.com/watch?v=WPtpUu3uIUI",
     video_id: "WPtpUu3uIUI",
-    access_profile: "mweb-pot",
   },
 };
 
@@ -61,7 +60,7 @@ test("the checked-in registry is valid, stable, and fully resolves an approved j
   const registry = parseCapabilityRegistry(DEFAULT_CAPABILITY_REGISTRY);
   const spec = resolveJobSpecAgainstRegistry(lexicalSpec, registry);
 
-  assert.equal(spec.registry_snapshot?.registry_version, "2026-09-05.2");
+  assert.equal(spec.registry_snapshot?.registry_version, "2026-09-05.1");
   assert.equal(spec.registry_snapshot?.registry_sha256, capabilityRegistrySha256(registry));
   assert.equal(spec.registry_snapshot?.execution_profile.id, "python-portable");
   assert.equal(spec.registry_snapshot?.execution_profile.dispatcher.workflow, "authoring-worker.yml");

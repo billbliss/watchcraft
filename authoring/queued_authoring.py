@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any, Callable
 
 from youtube_audio import (
-    YOUTUBE_MWEB_POT_ACCESS_PROFILE,
     canonical_youtube_url,
     download_youtube_audio,
     youtube_video_id,
@@ -51,7 +50,7 @@ HTTP_TRANSCRIPTION_SMOKE_HANDLER = (
 )
 YOUTUBE_TRANSCRIPTION_HANDLER = (
     "watchcraft.transcript.mlx-whisper-youtube",
-    "2",
+    "1",
 )
 PYTHON_EXECUTION_PROFILE = ("python-portable", "1")
 PYTHON_EXECUTION_WORKFLOW = "authoring-worker.yml"
@@ -551,7 +550,6 @@ def mlx_youtube_transcription(job: dict[str, Any]) -> dict[str, Any]:
         "maximum_bytes",
         "maximum_duration_seconds",
         "timeout_seconds",
-        "access_profile",
         "language",
         "model",
     }
@@ -574,11 +572,6 @@ def mlx_youtube_transcription(job: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(
             f"the initial YouTube transcript handler requires {TRANSCRIPTION_SMOKE_MODEL}"
         )
-    if configuration["access_profile"] != YOUTUBE_MWEB_POT_ACCESS_PROFILE:
-        raise ValueError(
-            f"the YouTube transcript handler requires the "
-            f"{YOUTUBE_MWEB_POT_ACCESS_PROFILE} access profile"
-        )
     if (
         type(configuration["maximum_bytes"]) is not int
         or not 1 <= configuration["maximum_bytes"] <= YOUTUBE_TRANSCRIPTION_MAX_BYTES
@@ -599,7 +592,6 @@ def mlx_youtube_transcription(job: dict[str, Any]) -> dict[str, Any]:
             maximum_bytes=configuration["maximum_bytes"],
             maximum_duration_seconds=configuration["maximum_duration_seconds"],
             timeout_seconds=configuration["timeout_seconds"],
-            access_profile=configuration["access_profile"],
         )
         transcript = mlx_transcribe_file(
             audio_path,
@@ -1160,7 +1152,6 @@ def youtube_transcription_spec(value: str) -> dict[str, Any]:
             "maximum_bytes": YOUTUBE_TRANSCRIPTION_MAX_BYTES,
             "maximum_duration_seconds": YOUTUBE_TRANSCRIPTION_MAX_DURATION_SECONDS,
             "timeout_seconds": YOUTUBE_TRANSCRIPTION_TIMEOUT_SECONDS,
-            "access_profile": YOUTUBE_MWEB_POT_ACCESS_PROFILE,
             "language": "en",
             "model": TRANSCRIPTION_SMOKE_MODEL,
         },

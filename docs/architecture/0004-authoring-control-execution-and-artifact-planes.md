@@ -277,17 +277,6 @@ playback URL. The compressed audio is deleted after MLX inference and is not upl
 to R2. Playlist traversal, course structure, collection authorship, and curricular
 placement remain explicitly outside this handler.
 
-Public source access is an execution constraint distinct from authentication and
-compute capability. The second version of the YouTube handler binds an explicit
-`mweb-pot` access profile and uses a pinned local Proof-of-Origin token provider on the
-GitHub runner without account cookies. This is a bounded reachability experiment, not
-a claim that a public URL is universally accessible: attestation may still fail when
-the provider distrusts a shared runner IP. Attempts record the access profile and
-provider version. A remaining `source_access_denied` result is authoritative evidence
-that dispatch must select a trusted-network acquisition path or separate acquisition
-from downstream processing; it must not trigger the silent introduction of reusable
-browser credentials.
-
 ### Operational retention and cleanup
 
 Test and diagnostic runs identify their purpose in the run request and may carry an
