@@ -321,6 +321,17 @@ test("registry publication is immutable and activation is environment-scoped and
   expect(view.active).toEqual(active);
   expect(view.registry).toEqual(DEFAULT_CAPABILITY_REGISTRY);
 
+  const adminView = await post(t, "/authoring/admin/registry/get-active", {
+    environment: "production",
+  }, registryAdminToken);
+  expect(adminView.status).toBe(200);
+  await expect(adminView.json()).resolves.toEqual(view);
+
+  const operatorCannotUseAdminView = await post(t, "/authoring/admin/registry/get-active", {
+    environment: "production",
+  }, operatorToken);
+  expect(operatorCannotUseAdminView.status).toBe(401);
+
   const changed = structuredClone(DEFAULT_CAPABILITY_REGISTRY);
   changed.execution_profiles[0].timeout_minutes += 1;
   const overwrite = await post(t, "/authoring/admin/registry/publish", {

@@ -5,7 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -428,22 +428,63 @@ class QueuedAuthoringTests(unittest.TestCase):
         status = build_parser().parse_args(["queue", "registry-status"])
         self.assertEqual(status.operator_token_source, "auto")
         self.assertEqual(status.environment, "production")
-        activate = build_parser().parse_args([
+        explicit = build_parser().parse_args([
             "queue", "registry-activate", "--registry-admin-token-source", "keychain",
             "--expected-revision", "0",
         ])
+        self.assertEqual(explicit.expected_revision, 0)
+        activate = build_parser().parse_args([
+            "queue", "registry-activate", "--registry-admin-token-source", "keychain",
+        ])
+        self.assertIsNone(activate.expected_revision)
         self.assertEqual(activate.registry_admin_token_source, "keychain")
         self.assertEqual(activate.registry_file, queued_authoring.DEFAULT_REGISTRY_PATH)
 
         client = Mock()
-        client.post.return_value = {"registry_version": "2026-09-04.3"}
+        client.post.side_effect = [
+            {
+                "active": {
+                    "environment": "production",
+                    "revision": 2,
+                },
+                "registry": {},
+            },
+            {
+                "registry_version": "2026-09-04.3",
+                "revision": 3,
+            },
+        ]
         with patch("queued_authoring.registry_admin_client", return_value=client):
-            with redirect_stdout(io.StringIO()):
+            activation_message = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(activation_message):
                 self.assertEqual(queued_authoring.run_queue_command(activate), 0)
-        path, payload = client.post.call_args.args
+        self.assertIn("observed active-pointer revision 2", activation_message.getvalue())
+        self.assertEqual(
+            client.post.call_args_list[0].args,
+            ("/registry/get-active", {"environment": "production"}),
+        )
+        path, payload = client.post.call_args_list[1].args
         self.assertEqual(path, "/registry/activate")
-        self.assertEqual(payload["expected_revision"], 0)
+        self.assertEqual(payload["expected_revision"], 2)
         self.assertRegex(payload["registry_sha256"], r"^[a-f0-9]{64}$")
+
+        override_client = Mock()
+        override_client.post.return_value = {"registry_version": "2026-09-04.3"}
+        with patch("queued_authoring.registry_admin_client", return_value=override_client):
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                self.assertEqual(queued_authoring.run_queue_command(explicit), 0)
+        self.assertEqual(override_client.post.call_count, 1)
+        self.assertEqual(
+            override_client.post.call_args.args[1]["expected_revision"],
+            0,
+        )
+
+        no_active_registry = Mock()
+        no_active_registry.post.return_value = {"active": None, "registry": None}
+        self.assertEqual(
+            queued_authoring.active_registry_revision(no_active_registry, "development"),
+            0,
+        )
 
     def test_cleanup_command_uses_admin_authority_and_exact_confirmation(self):
         client = Mock()

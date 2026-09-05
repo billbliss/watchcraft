@@ -9,6 +9,7 @@ import math
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -1362,7 +1363,17 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         )
         if name == "registry-activate":
             command.add_argument("--environment", default="production")
-            command.add_argument("--expected-revision", required=True, type=int)
+            command.add_argument(
+                "--expected-active-revision",
+                "--expected-revision",
+                dest="expected_revision",
+                type=int,
+                help=(
+                    "Current activation-pointer revision for compare-and-set. The CLI "
+                    "reads it automatically when omitted. This is not the registry "
+                    "document version."
+                ),
+            )
     cleanup_list = commands.add_parser(
         "cleanup-list",
         parents=[admin_credentials],
@@ -1417,6 +1428,26 @@ def load_registry_document(path: Path) -> dict[str, Any]:
     return value
 
 
+def active_registry_revision(
+    control: AuthoringHttpClient,
+    environment: str,
+) -> int:
+    observed = control.post("/registry/get-active", {"environment": environment})
+    active = observed.get("active")
+    if active is None:
+        return 0
+    if not isinstance(active, dict):
+        raise RuntimeError("Authoring control returned an invalid active registry pointer")
+    revision = active.get("revision")
+    if (
+        active.get("environment") != environment
+        or type(revision) is not int
+        or revision < 1
+    ):
+        raise RuntimeError("Authoring control returned an invalid active registry pointer")
+    return revision
+
+
 def run_queue_command(args: argparse.Namespace) -> int:
     if args.queue_command in {"cleanup-list", "cleanup-run", "cleanup-orphan-job"}:
         control = registry_admin_client(args.registry_admin_token_source)
@@ -1452,13 +1483,24 @@ def run_queue_command(args: argparse.Namespace) -> int:
                 "registry": registry,
             })
         else:
+            expected_revision = args.expected_revision
+            revision_source = "override"
+            if expected_revision is None:
+                expected_revision = active_registry_revision(control, args.environment)
+                revision_source = "observed"
+            print(
+                f"Activating registry document {registry['registry_version']} in "
+                f"{args.environment}; {revision_source} active-pointer revision "
+                f"{expected_revision}.",
+                file=sys.stderr,
+            )
             result = control.post("/registry/activate", {
                 "environment": args.environment,
                 "command_id": str(uuid.uuid4()),
                 "actor": "watchcraft-author-cli",
                 "registry_version": registry["registry_version"],
                 "registry_sha256": sha256_hex(canonical_json(registry)),
-                "expected_revision": args.expected_revision,
+                "expected_revision": expected_revision,
             })
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         return 0

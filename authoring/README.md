@@ -219,18 +219,21 @@ After deploying registry-aware control-plane code, bootstrap production explicit
   --registry-admin-token-source keychain
 
 ./authoring/watchcraft-author queue registry-activate \
-  --registry-admin-token-source keychain \
-  --expected-revision 0
+  --registry-admin-token-source keychain
 
 ./authoring/watchcraft-author queue registry-status \
   --operator-token-source keychain
 ```
 
 `registry-publish` and `registry-activate` default to the checked-in document; an
-alternate JSON path may be supplied as their positional argument. Activation requires
-the currently observed pointer revision, so a stale administrator cannot overwrite a
-newer selection. Use the revision returned by `registry-status` after the first
-activation. Publishing the same version with different content is rejected.
+alternate JSON path may be supplied as their positional argument. Before activation,
+the CLI uses the registry-admin credential to read the current activation-pointer
+revision and supplies it to the compare-and-set mutation. This preserves stale-write
+protection without requiring the operator to copy a revision manually. The immutable
+registry document version (for example `2026-09-04.3`) and the activation-pointer
+revision (for example `2`) are separate values. Advanced scripts may explicitly pass
+`--expected-active-revision`; the older `--expected-revision` spelling remains an
+alias. Publishing the same version with different content is rejected.
 
 The first Python worker handler produces a deterministic lexical-analysis artifact.
 It is an infrastructure and protocol proof, not the model-backed instructional-video

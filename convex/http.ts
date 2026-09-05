@@ -77,6 +77,7 @@ http.route({ path: "/authoring/operator/submissions/cancel", method: "POST", han
 http.route({ path: "/authoring/operator/submissions/retry", method: "POST", handler: mutationRoute(internal.authoringInternal.retryJob, operatorVerifier) });
 http.route({ path: "/authoring/operator/registry/get-active", method: "POST", handler: queryRoute(internal.authoringRegistry.getActiveRegistry, operatorVerifier) });
 
+http.route({ path: "/authoring/admin/registry/get-active", method: "POST", handler: queryRoute(internal.authoringRegistry.getActiveRegistry, registryAdminVerifier) });
 http.route({ path: "/authoring/admin/registry/publish", method: "POST", handler: mutationRoute(internal.authoringRegistry.publishRegistry, registryAdminVerifier) });
 http.route({ path: "/authoring/admin/registry/activate", method: "POST", handler: mutationRoute(internal.authoringRegistry.activateRegistry, registryAdminVerifier) });
 http.route({ path: "/authoring/admin/cleanup/list", method: "POST", handler: queryRoute(internal.authoringCleanup.listRuns, registryAdminVerifier) });
