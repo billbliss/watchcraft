@@ -31,11 +31,22 @@ const transcriptionSmokeSpec = {
   configuration: { fixture_text: "Watchcraft verifies audio." },
 };
 
+const httpTranscriptionSmokeSpec = {
+  operation: "generate" as const,
+  artifact_kind: "transcript",
+  output_schema: { id: "watchcraft.transcript", version: 1 },
+  handler: { id: "watchcraft.transcript.mlx-whisper-http-smoke", version: "1" },
+  source: { media_asset_id: "fixture:openai-whisper-jfk-flac" },
+  inputs: [],
+  dependencies: [],
+  configuration: { url: "https://example.invalid/fixture.flac" },
+};
+
 test("the checked-in registry is valid, stable, and fully resolves an approved job", () => {
   const registry = parseCapabilityRegistry(DEFAULT_CAPABILITY_REGISTRY);
   const spec = resolveJobSpecAgainstRegistry(lexicalSpec, registry);
 
-  assert.equal(spec.registry_snapshot?.registry_version, "2026-09-04.2");
+  assert.equal(spec.registry_snapshot?.registry_version, "2026-09-04.3");
   assert.equal(spec.registry_snapshot?.registry_sha256, capabilityRegistrySha256(registry));
   assert.equal(spec.registry_snapshot?.execution_profile.id, "python-portable");
   assert.equal(spec.registry_snapshot?.execution_profile.dispatcher.workflow, "authoring-worker.yml");
@@ -53,6 +64,16 @@ test("the MLX transcription smoke resolves to its dedicated Apple silicon workfl
     spec.registry_snapshot?.execution_profile.dispatcher.workflow,
     "authoring-mlx-worker.yml",
   );
+
+  const httpSpec = resolveJobSpecAgainstRegistry(
+    httpTranscriptionSmokeSpec,
+    DEFAULT_CAPABILITY_REGISTRY,
+  );
+  assert.equal(
+    httpSpec.registry_snapshot?.handler.id,
+    "watchcraft.transcript.mlx-whisper-http-smoke",
+  );
+  assert.equal(httpSpec.registry_snapshot?.execution_profile.id, "macos-mlx");
 });
 
 test("registry validation rejects duplicate identities and dangling profiles", () => {

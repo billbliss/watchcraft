@@ -283,6 +283,25 @@ audio-input handler. It proves capability-based routing and MLX execution withou
 requiring an input uploader, retaining source audio, or granting the worker private
 source access.
 
+The next remote-input smoke keeps YouTube extraction out of scope while exercising
+the media path that follows it. It downloads OpenAI Whisper's 11-second JFK FLAC test
+fixture from a URL pinned to an exact upstream Git commit. The approved job binds the
+URL, byte length, SHA-256, download ceiling, and timeout. The macOS worker streams it
+into a temporary file, rejects redirects away from HTTPS and any size or digest drift,
+transcribes it with the same MLX implementation, then deletes the audio:
+
+```bash
+./authoring/watchcraft-author queue smoke-transcription-http \
+  --operator-token-source keychain \
+  --r2-credentials-source keychain
+```
+
+Only the transcript JSON enters R2. The result provenance records the verified media
+identity but not a retained audio object. A later YouTube adapter can resolve a watch
+URL to a temporary media stream and hand that stream to the same bounded acquisition
+boundary; YouTube extraction and access behavior remain the single variable deferred
+by this smoke.
+
 `queue result` resolves the artifact reference from the authoritative completed job,
 downloads the object from private R2, and verifies its declared byte length and SHA-256
 digest. JSON is displayed in readable form by default; `--output PATH` writes the exact

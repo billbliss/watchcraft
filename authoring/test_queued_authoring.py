@@ -15,20 +15,23 @@ import queued_authoring
 from watchcraft_author import build_parser, main
 
 
-def registry_snapshot(*, transcription=False):
-    if transcription:
+def registry_snapshot(*, transcription=False, http_transcription=False):
+    if transcription or http_transcription:
+        handler = (
+            queued_authoring.HTTP_TRANSCRIPTION_SMOKE_HANDLER
+            if http_transcription
+            else queued_authoring.TRANSCRIPTION_SMOKE_HANDLER
+        )
         return {
-            "registry_version": "2026-09-04.2",
+            "registry_version": "2026-09-04.3",
             "registry_sha256": "c" * 64,
-            "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
-                queued_authoring.TRANSCRIPTION_SMOKE_HANDLER
-            ],
+            "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[handler],
             "execution_profile": queued_authoring.LOCAL_EXECUTION_PROFILES[
                 queued_authoring.MLX_EXECUTION_PROFILE
             ],
         }
     return {
-        "registry_version": "2026-09-04.2",
+        "registry_version": "2026-09-04.3",
         "registry_sha256": "c" * 64,
         "handler": {
             "id": "watchcraft.analysis.lexical",
@@ -93,6 +96,13 @@ class QueuedAuthoringTests(unittest.TestCase):
         ])
         self.assertEqual(smoke.timeout_seconds, 1800)
         self.assertEqual(smoke.retention_days, 7)
+        http_smoke = build_parser().parse_args([
+            "queue", "smoke-transcription-http",
+            "--operator-token-source", "keychain",
+            "--r2-credentials-source", "keychain",
+        ])
+        self.assertEqual(http_smoke.timeout_seconds, 1800)
+        self.assertEqual(http_smoke.retention_days, 7)
 
         cleanup = build_parser().parse_args([
             "queue", "cleanup-run", "run-1", "--confirm", "run-1",
@@ -221,6 +231,99 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertFalse(result["provenance"]["audio_retained"])
         self.assertEqual(transcription_smoke_spec["artifact_kind"], "transcript")
 
+    def test_https_audio_download_is_bounded_and_verified_before_use(self):
+        payload = b"verified remote audio"
+
+        class Response(io.BytesIO):
+            def __init__(self, value):
+                super().__init__(value)
+                self.headers = {"Content-Length": str(len(value))}
+
+            def geturl(self):
+                return "https://fixtures.example/audio.flac"
+
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "audio.flac"
+            with patch(
+                "queued_authoring.urllib.request.urlopen",
+                return_value=Response(payload),
+            ):
+                result = queued_authoring.download_verified_https(
+                    "https://fixtures.example/audio.flac",
+                    destination,
+                    expected_sha256=queued_authoring.sha256_hex(payload),
+                    expected_bytes=len(payload),
+                    maximum_bytes=100,
+                    timeout_seconds=30,
+                )
+            self.assertEqual(destination.read_bytes(), payload)
+            self.assertEqual(result["digest"], queued_authoring.sha256_hex(payload))
+            self.assertEqual(result["byte_length"], len(payload))
+
+            bad_destination = Path(directory) / "bad.flac"
+            with patch(
+                "queued_authoring.urllib.request.urlopen",
+                return_value=Response(payload),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "SHA-256"):
+                    queued_authoring.download_verified_https(
+                        "https://fixtures.example/audio.flac",
+                        bad_destination,
+                        expected_sha256="a" * 64,
+                        expected_bytes=len(payload),
+                        maximum_bytes=100,
+                        timeout_seconds=30,
+                    )
+            self.assertFalse(bad_destination.exists())
+
+            oversized_destination = Path(directory) / "oversized.flac"
+            with patch(
+                "queued_authoring.urllib.request.urlopen",
+                return_value=Response(payload),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "declares 21 bytes"):
+                    queued_authoring.download_verified_https(
+                        "https://fixtures.example/audio.flac",
+                        oversized_destination,
+                        expected_sha256=queued_authoring.sha256_hex(payload),
+                        expected_bytes=20,
+                        maximum_bytes=20,
+                        timeout_seconds=30,
+                    )
+            self.assertFalse(oversized_destination.exists())
+
+    def test_http_mlx_smoke_downloads_transcribes_and_discards_pinned_audio(self):
+        job = {
+            "job_id": "job-http-mlx",
+            "spec_sha256": "a" * 64,
+            "spec": queued_authoring.http_transcription_smoke_spec(),
+        }
+        acquisition = {
+            "url": queued_authoring.HTTP_TRANSCRIPTION_SMOKE_URL,
+            "algorithm": "sha256",
+            "digest": queued_authoring.HTTP_TRANSCRIPTION_SMOKE_SHA256,
+            "byte_length": queued_authoring.HTTP_TRANSCRIPTION_SMOKE_BYTES,
+        }
+        with patch(
+            "queued_authoring.download_verified_https",
+            return_value=acquisition,
+        ) as download:
+            with patch(
+                "queued_authoring.mlx_transcribe_file",
+                return_value={
+                    "language": "en",
+                    "text": "And so my fellow Americans.",
+                    "segments": [{"start": 0.0, "end": 2.0, "text": "And so."}],
+                },
+            ) as transcribe:
+                result = queued_authoring.mlx_http_transcription_smoke(job)
+        audio_path = download.call_args.args[1]
+        self.assertFalse(audio_path.exists())
+        self.assertEqual(transcribe.call_args.args[0], audio_path)
+        self.assertEqual(result["kind"], "watchcraft.transcript")
+        self.assertEqual(result["provenance"]["acquisition"], acquisition)
+        self.assertFalse(result["provenance"]["audio_retained"])
+
     def test_python_r2_store_is_content_addressed_and_create_once(self):
         class MissingObject(Exception):
             response = {
@@ -333,7 +436,7 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertEqual(activate.registry_file, queued_authoring.DEFAULT_REGISTRY_PATH)
 
         client = Mock()
-        client.post.return_value = {"registry_version": "2026-09-04.2"}
+        client.post.return_value = {"registry_version": "2026-09-04.3"}
         with patch("queued_authoring.registry_admin_client", return_value=client):
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(queued_authoring.run_queue_command(activate), 0)
@@ -450,6 +553,95 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertIn('"state": "succeeded"', output.getvalue())
         reader.get_bytes.assert_called_once_with(reference)
 
+    def test_one_command_http_transcription_smoke_binds_verified_remote_media(self):
+        spec = {
+            **queued_authoring.http_transcription_smoke_spec(),
+            "registry_snapshot": registry_snapshot(http_transcription=True),
+        }
+        submitted_job = {
+            "job_id": "job-http-smoke",
+            "run_id": "run-http-smoke",
+            "revision": 2,
+            "state": "awaiting_approval",
+            "spec_sha256": "a" * 64,
+            "spec": spec,
+        }
+        ready_job = {**submitted_job, "revision": 3, "state": "ready"}
+        pending_job = {
+            **ready_job,
+            "revision": 4,
+            "state": "dispatch_pending",
+            "dispatch": {"generation": 1},
+        }
+        completed_job = {
+            **pending_job,
+            "revision": 8,
+            "state": "succeeded",
+            "result": {"digest": "b" * 64},
+        }
+        completed = {
+            "job": completed_job,
+            "run": {"run_id": "run-http-smoke", "state": "complete"},
+        }
+        verified_result = {
+            "kind": "watchcraft.transcript",
+            "text": "And so my fellow Americans.",
+            "segments": [{"text": "And so my fellow Americans."}],
+            "provenance": {
+                "handler_id": queued_authoring.HTTP_TRANSCRIPTION_SMOKE_HANDLER[0],
+                "acquisition": {
+                    "digest": queued_authoring.HTTP_TRANSCRIPTION_SMOKE_SHA256,
+                    "byte_length": queued_authoring.HTTP_TRANSCRIPTION_SMOKE_BYTES,
+                },
+            },
+        }
+        control = Mock()
+        control.post.return_value = {
+            "job": ready_job,
+            "run": {"run_id": "run-http-smoke"},
+        }
+        args = build_parser().parse_args([
+            "queue", "smoke-transcription-http",
+            "--operator-token-source", "keychain",
+            "--r2-credentials-source", "keychain",
+        ])
+        with patch("queued_authoring.operator_client", return_value=control):
+            with patch(
+                "queued_authoring.submit_spec",
+                return_value={
+                    "job": submitted_job,
+                    "run": {"run_id": "run-http-smoke"},
+                },
+            ) as submit:
+                with patch(
+                    "queued_authoring.dispatch_submission",
+                    return_value=pending_job,
+                ):
+                    with patch(
+                        "queued_authoring.wait_for_terminal_job",
+                        return_value=completed,
+                    ):
+                        with patch(
+                            "queued_authoring.verified_json_result",
+                            return_value=verified_result,
+                        ):
+                            with redirect_stdout(io.StringIO()):
+                                self.assertEqual(
+                                    queued_authoring.run_queue_command(args),
+                                    0,
+                                )
+        submitted_request = submit.call_args.kwargs["request"]
+        submitted_spec = submit.call_args.kwargs["spec"]
+        self.assertEqual(submitted_request["purpose"], "smoke")
+        self.assertEqual(
+            submitted_spec["configuration"]["expected_sha256"],
+            queued_authoring.HTTP_TRANSCRIPTION_SMOKE_SHA256,
+        )
+        self.assertEqual(
+            submitted_spec["handler"]["id"],
+            queued_authoring.HTTP_TRANSCRIPTION_SMOKE_HANDLER[0],
+        )
+
     def test_waiting_for_a_remote_job_reports_periodic_progress(self):
         client = Mock()
         client.post.side_effect = [
@@ -492,6 +684,17 @@ class QueuedAuthoringTests(unittest.TestCase):
         with patch.dict(os.environ, environment, clear=True):
             profile = queued_authoring.validate_registry_snapshot(job)
         self.assertEqual(profile["dispatcher"]["workflow"], "authoring-mlx-worker.yml")
+
+        http_job = {
+            "job_id": "job-http-mlx",
+            "spec": {
+                **queued_authoring.http_transcription_smoke_spec(),
+                "registry_snapshot": registry_snapshot(http_transcription=True),
+            },
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            http_profile = queued_authoring.validate_registry_snapshot(http_job)
+        self.assertEqual(http_profile["id"], "macos-mlx")
 
     def test_result_displays_verified_json_from_the_authoritative_reference(self):
         payload = queued_authoring.canonical_json({

@@ -1,7 +1,7 @@
 {
   "kind": "watchcraft.authoring-capability-registry",
   "schema_version": 1,
-  "registry_version": "2026-09-04.2",
+  "registry_version": "2026-09-04.3",
   "handlers": [
     {
       "id": "watchcraft.analysis.lexical",
@@ -31,6 +31,32 @@
     },
     {
       "id": "watchcraft.transcript.mlx-whisper-smoke",
+      "version": "1",
+      "operation": "generate",
+      "inputs": [],
+      "dependencies": [],
+      "output": {
+        "artifact_kind": "transcript",
+        "schema": {
+          "id": "watchcraft.transcript",
+          "version": 1
+        }
+      },
+      "execution_profile": {
+        "id": "macos-mlx",
+        "version": "1"
+      },
+      "lease_class": "accelerated",
+      "retry_policy": {
+        "max_attempts": 2,
+        "retryable_classifications": [
+          "artifact_store_failed",
+          "lease_expired"
+        ]
+      }
+    },
+    {
+      "id": "watchcraft.transcript.mlx-whisper-http-smoke",
       "version": "1",
       "operation": "generate",
       "inputs": [],

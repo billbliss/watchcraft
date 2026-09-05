@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from collections import Counter
@@ -36,6 +37,10 @@ DEFAULT_REGISTRY_PATH = (
 )
 ANALYSIS_HANDLER = ("watchcraft.analysis.lexical", "1")
 TRANSCRIPTION_SMOKE_HANDLER = ("watchcraft.transcript.mlx-whisper-smoke", "1")
+HTTP_TRANSCRIPTION_SMOKE_HANDLER = (
+    "watchcraft.transcript.mlx-whisper-http-smoke",
+    "1",
+)
 PYTHON_EXECUTION_PROFILE = ("python-portable", "1")
 PYTHON_EXECUTION_WORKFLOW = "authoring-worker.yml"
 MLX_EXECUTION_PROFILE = ("macos-mlx", "1")
@@ -44,6 +49,16 @@ TRANSCRIPTION_SMOKE_MODEL = "mlx-community/whisper-tiny-mlx"
 TRANSCRIPTION_SMOKE_TEXT = (
     "Watchcraft verifies real audio transcription on an Apple silicon worker."
 )
+HTTP_TRANSCRIPTION_SMOKE_URL = (
+    "https://raw.githubusercontent.com/openai/whisper/"
+    "86098128c0b4f24f0e2aa2994de830614b474227/tests/jfk.flac"
+)
+HTTP_TRANSCRIPTION_SMOKE_SHA256 = (
+    "63a4b1e4c1dc655ac70961ffbf518acd249df237e5a0152faae9a4a836949715"
+)
+HTTP_TRANSCRIPTION_SMOKE_BYTES = 1_152_693
+HTTP_TRANSCRIPTION_SMOKE_MAX_BYTES = 2_000_000
+HTTP_TRANSCRIPTION_SMOKE_TIMEOUT_SECONDS = 60
 WORD_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9'-]{2,}")
 STOP_WORDS = {
     "and", "are", "but", "for", "from", "has", "have", "into", "its", "not",
@@ -311,44 +326,21 @@ def json_safe(value: Any) -> Any:
     return value
 
 
-def mlx_transcription_smoke(job: dict[str, Any]) -> dict[str, Any]:
-    configuration = job["spec"]["configuration"]
-    phrase = configuration.get("fixture_text")
-    language = configuration.get("language", "en")
-    model = configuration.get("model", TRANSCRIPTION_SMOKE_MODEL)
-    if not isinstance(phrase, str) or not phrase.strip() or len(phrase) > 500:
-        raise ValueError("fixture_text must contain between 1 and 500 characters")
-    if language != "en":
-        raise ValueError("the initial MLX transcription smoke supports only English")
-    if model != TRANSCRIPTION_SMOKE_MODEL:
-        raise ValueError(f"the initial MLX transcription smoke requires {TRANSCRIPTION_SMOKE_MODEL}")
+def mlx_transcribe_file(audio_path: Path, *, language: str, model: str) -> dict[str, Any]:
     try:
         import mlx_whisper
     except ImportError as error:
         raise RuntimeError("mlx-whisper is required by the macos-mlx worker") from error
-
-    with tempfile.TemporaryDirectory(prefix="watchcraft-mlx-smoke-") as directory:
-        audio_path = Path(directory) / "fixture.aiff"
-        try:
-            subprocess.run(
-                ["say", "-r", "155", "-o", str(audio_path), phrase],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        except (OSError, subprocess.CalledProcessError) as error:
-            raise RuntimeError("macOS could not synthesize the transcription fixture") from error
-        result = mlx_whisper.transcribe(
-            str(audio_path),
-            path_or_hf_repo=model,
-            language=language,
-            task="transcribe",
-            word_timestamps=True,
-            temperature=0.0,
-            condition_on_previous_text=False,
-            verbose=None,
-        )
-
+    result = mlx_whisper.transcribe(
+        str(audio_path),
+        path_or_hf_repo=model,
+        language=language,
+        task="transcribe",
+        word_timestamps=True,
+        temperature=0.0,
+        condition_on_previous_text=False,
+        verbose=None,
+    )
     safe_result = json_safe(result)
     if not isinstance(safe_result, dict):
         raise RuntimeError("MLX Whisper returned an invalid transcript result")
@@ -363,13 +355,118 @@ def mlx_transcription_smoke(job: dict[str, Any]) -> dict[str, Any]:
     if not text:
         raise RuntimeError("MLX Whisper returned an empty transcript")
     return {
+        "language": safe_result.get("language") or language,
+        "text": text,
+        "segments": segments,
+    }
+
+
+def download_verified_https(
+    url: str,
+    destination: Path,
+    *,
+    expected_sha256: str,
+    expected_bytes: int,
+    maximum_bytes: int,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("remote audio must use an HTTPS URL without embedded credentials")
+    if not re.fullmatch(r"[a-f0-9]{64}", expected_sha256):
+        raise ValueError("remote audio expected_sha256 must be a lowercase SHA-256 digest")
+    if not 0 < expected_bytes <= maximum_bytes:
+        raise ValueError("remote audio byte limits are invalid")
+    if not 1 <= timeout_seconds <= 300:
+        raise ValueError("remote audio timeout must be between 1 and 300 seconds")
+
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "audio/*,application/octet-stream;q=0.9",
+            "User-Agent": "WatchcraftAuthor/0.1",
+        },
+    )
+    digest = hashlib.sha256()
+    byte_length = 0
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            resolved = urllib.parse.urlsplit(response.geturl())
+            if resolved.scheme != "https":
+                raise RuntimeError("remote audio redirected away from HTTPS")
+            declared_length = response.headers.get("Content-Length")
+            if declared_length is not None:
+                try:
+                    declared_bytes = int(declared_length)
+                except ValueError as error:
+                    raise RuntimeError("remote audio returned an invalid Content-Length") from error
+                if declared_bytes > maximum_bytes:
+                    raise RuntimeError(
+                        f"remote audio declares {declared_bytes} bytes; limit is {maximum_bytes}"
+                    )
+            with destination.open("xb") as output:
+                while chunk := response.read(64 * 1024):
+                    byte_length += len(chunk)
+                    if byte_length > maximum_bytes:
+                        raise RuntimeError(
+                            f"remote audio exceeded the {maximum_bytes}-byte limit"
+                        )
+                    digest.update(chunk)
+                    output.write(chunk)
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+
+    actual_sha256 = digest.hexdigest()
+    if byte_length != expected_bytes:
+        destination.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"remote audio has {byte_length} bytes; expected {expected_bytes}"
+        )
+    if actual_sha256 != expected_sha256:
+        destination.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"remote audio SHA-256 is {actual_sha256}; expected {expected_sha256}"
+        )
+    return {
+        "url": url,
+        "algorithm": "sha256",
+        "digest": actual_sha256,
+        "byte_length": byte_length,
+    }
+
+
+def mlx_transcription_smoke(job: dict[str, Any]) -> dict[str, Any]:
+    configuration = job["spec"]["configuration"]
+    phrase = configuration.get("fixture_text")
+    language = configuration.get("language", "en")
+    model = configuration.get("model", TRANSCRIPTION_SMOKE_MODEL)
+    if not isinstance(phrase, str) or not phrase.strip() or len(phrase) > 500:
+        raise ValueError("fixture_text must contain between 1 and 500 characters")
+    if language != "en":
+        raise ValueError("the initial MLX transcription smoke supports only English")
+    if model != TRANSCRIPTION_SMOKE_MODEL:
+        raise ValueError(f"the initial MLX transcription smoke requires {TRANSCRIPTION_SMOKE_MODEL}")
+
+    with tempfile.TemporaryDirectory(prefix="watchcraft-mlx-smoke-") as directory:
+        audio_path = Path(directory) / "fixture.aiff"
+        try:
+            subprocess.run(
+                ["say", "-r", "155", "-o", str(audio_path), phrase],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise RuntimeError("macOS could not synthesize the transcription fixture") from error
+        transcript = mlx_transcribe_file(audio_path, language=language, model=model)
+
+    return {
         "kind": "watchcraft.transcript",
         "schema_version": 1,
         "source": job["spec"]["source"],
         "model": model,
-        "language": safe_result.get("language") or language,
-        "text": text,
-        "segments": segments,
+        **transcript,
         "provenance": {
             "handler_id": TRANSCRIPTION_SMOKE_HANDLER[0],
             "handler_version": TRANSCRIPTION_SMOKE_HANDLER[1],
@@ -382,9 +479,58 @@ def mlx_transcription_smoke(job: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def mlx_http_transcription_smoke(job: dict[str, Any]) -> dict[str, Any]:
+    configuration = job["spec"]["configuration"]
+    expected_configuration = {
+        "url": HTTP_TRANSCRIPTION_SMOKE_URL,
+        "expected_sha256": HTTP_TRANSCRIPTION_SMOKE_SHA256,
+        "expected_bytes": HTTP_TRANSCRIPTION_SMOKE_BYTES,
+        "maximum_bytes": HTTP_TRANSCRIPTION_SMOKE_MAX_BYTES,
+        "timeout_seconds": HTTP_TRANSCRIPTION_SMOKE_TIMEOUT_SECONDS,
+        "language": "en",
+        "model": TRANSCRIPTION_SMOKE_MODEL,
+    }
+    if configuration != expected_configuration:
+        raise ValueError("the HTTP transcription smoke requires its pinned fixture configuration")
+
+    with tempfile.TemporaryDirectory(prefix="watchcraft-mlx-http-smoke-") as directory:
+        audio_path = Path(directory) / "fixture.flac"
+        acquisition = download_verified_https(
+            configuration["url"],
+            audio_path,
+            expected_sha256=configuration["expected_sha256"],
+            expected_bytes=configuration["expected_bytes"],
+            maximum_bytes=configuration["maximum_bytes"],
+            timeout_seconds=configuration["timeout_seconds"],
+        )
+        transcript = mlx_transcribe_file(
+            audio_path,
+            language=configuration["language"],
+            model=configuration["model"],
+        )
+
+    return {
+        "kind": "watchcraft.transcript",
+        "schema_version": 1,
+        "source": job["spec"]["source"],
+        "model": configuration["model"],
+        **transcript,
+        "provenance": {
+            "handler_id": HTTP_TRANSCRIPTION_SMOKE_HANDLER[0],
+            "handler_version": HTTP_TRANSCRIPTION_SMOKE_HANDLER[1],
+            "job_id": job["job_id"],
+            "spec_sha256": job["spec_sha256"],
+            "fixture_source": "openai/whisper tests/jfk.flac",
+            "acquisition": acquisition,
+            "audio_retained": False,
+        },
+    }
+
+
 HANDLERS: dict[tuple[str, str], Callable[[dict[str, Any]], dict[str, Any]]] = {
     ANALYSIS_HANDLER: lexical_analysis,
     TRANSCRIPTION_SMOKE_HANDLER: mlx_transcription_smoke,
+    HTTP_TRANSCRIPTION_SMOKE_HANDLER: mlx_http_transcription_smoke,
 }
 LOCAL_HANDLER_CONTRACTS: dict[tuple[str, str], dict[str, Any]] = {
     ANALYSIS_HANDLER: {
@@ -410,6 +556,28 @@ LOCAL_HANDLER_CONTRACTS: dict[tuple[str, str], dict[str, Any]] = {
     TRANSCRIPTION_SMOKE_HANDLER: {
         "id": TRANSCRIPTION_SMOKE_HANDLER[0],
         "version": TRANSCRIPTION_SMOKE_HANDLER[1],
+        "operation": "generate",
+        "inputs": [],
+        "dependencies": [],
+        "output": {
+            "artifact_kind": "transcript",
+            "schema": {"id": "watchcraft.transcript", "version": 1},
+        },
+        "execution_profile": {
+            "id": MLX_EXECUTION_PROFILE[0],
+            "version": MLX_EXECUTION_PROFILE[1],
+        },
+        "lease_class": "accelerated",
+        "retry_policy": {
+            "max_attempts": 2,
+            "retryable_classifications": [
+                "artifact_store_failed", "lease_expired",
+            ],
+        },
+    },
+    HTTP_TRANSCRIPTION_SMOKE_HANDLER: {
+        "id": HTTP_TRANSCRIPTION_SMOKE_HANDLER[0],
+        "version": HTTP_TRANSCRIPTION_SMOKE_HANDLER[1],
         "operation": "generate",
         "inputs": [],
         "dependencies": [],
@@ -818,6 +986,30 @@ def transcription_smoke_spec(fixture_text: str = TRANSCRIPTION_SMOKE_TEXT) -> di
     }
 
 
+def http_transcription_smoke_spec() -> dict[str, Any]:
+    return {
+        "operation": "generate",
+        "artifact_kind": "transcript",
+        "output_schema": {"id": "watchcraft.transcript", "version": 1},
+        "handler": {
+            "id": HTTP_TRANSCRIPTION_SMOKE_HANDLER[0],
+            "version": HTTP_TRANSCRIPTION_SMOKE_HANDLER[1],
+        },
+        "source": {"media_asset_id": "fixture:openai-whisper-jfk-flac"},
+        "inputs": [],
+        "dependencies": [],
+        "configuration": {
+            "url": HTTP_TRANSCRIPTION_SMOKE_URL,
+            "expected_sha256": HTTP_TRANSCRIPTION_SMOKE_SHA256,
+            "expected_bytes": HTTP_TRANSCRIPTION_SMOKE_BYTES,
+            "maximum_bytes": HTTP_TRANSCRIPTION_SMOKE_MAX_BYTES,
+            "timeout_seconds": HTTP_TRANSCRIPTION_SMOKE_TIMEOUT_SECONDS,
+            "language": "en",
+            "model": TRANSCRIPTION_SMOKE_MODEL,
+        },
+    }
+
+
 def ephemeral_request(kind: str, source_id: str, retention_days: int) -> dict[str, Any]:
     if not 1 <= retention_days <= 90:
         raise ValueError("--retention-days must be between 1 and 90")
@@ -947,9 +1139,12 @@ def run_smoke_command(args: argparse.Namespace, kind: str) -> int:
         )
         spec = analysis_spec(spec_args)
         request_kind = "lexical-analysis-smoke"
-    else:
+    elif kind == "transcription":
         spec = transcription_smoke_spec()
         request_kind = "mlx-transcription-smoke"
+    else:
+        spec = http_transcription_smoke_spec()
+        request_kind = "mlx-transcription-http-smoke"
     submitted = submit_spec(
         control,
         request=ephemeral_request(
@@ -981,12 +1176,24 @@ def run_smoke_command(args: argparse.Namespace, kind: str) -> int:
         raise RuntimeError(
             f"Smoke artifact kind is {result.get('kind')!r}; expected {expected_kind!r}"
         )
-    if kind == "transcription":
+    if kind in {"transcription", "transcription-http"}:
         if not result.get("text") or not result.get("segments"):
             raise RuntimeError("Transcription smoke returned no text or segments")
         provenance = result.get("provenance", {})
-        if provenance.get("handler_id") != TRANSCRIPTION_SMOKE_HANDLER[0]:
+        expected_handler = (
+            TRANSCRIPTION_SMOKE_HANDLER
+            if kind == "transcription"
+            else HTTP_TRANSCRIPTION_SMOKE_HANDLER
+        )
+        if provenance.get("handler_id") != expected_handler[0]:
             raise RuntimeError("Transcription smoke provenance does not identify the MLX handler")
+        if kind == "transcription-http":
+            acquisition = provenance.get("acquisition", {})
+            if (
+                acquisition.get("digest") != HTTP_TRANSCRIPTION_SMOKE_SHA256
+                or acquisition.get("byte_length") != HTTP_TRANSCRIPTION_SMOKE_BYTES
+            ):
+                raise RuntimeError("HTTP transcription smoke provenance has invalid media identity")
     print(json.dumps({
         "job_id": completed["job"]["job_id"],
         "run_id": completed["run"]["run_id"],
@@ -1054,6 +1261,16 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         help="Short English phrase synthesized and transcribed by the worker",
     )
     transcription_submit.add_argument("--retention-days", type=int, default=7)
+    http_transcription_submit = commands.add_parser(
+        "submit-transcription-http-smoke",
+        parents=[credentials],
+        help="Submit MLX transcription of a pinned HTTPS audio fixture",
+        description=(
+            "Submit a macOS/MLX transcription job that downloads, bounds, and "
+            "hash-verifies an immutable public audio fixture before inference."
+        ),
+    )
+    http_transcription_submit.add_argument("--retention-days", type=int, default=7)
     command_help = {
         "status": "Show the authoritative job and run aggregates",
         "approve": "Approve the immutable job specification",
@@ -1098,6 +1315,11 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
     for name, help_text, timeout in (
         ("smoke-analysis", "Run the complete lexical-analysis queue smoke", 600),
         ("smoke-transcription", "Run the complete macOS/MLX transcription smoke", 1800),
+        (
+            "smoke-transcription-http",
+            "Run the complete verified-HTTPS macOS/MLX transcription smoke",
+            1800,
+        ),
     ):
         smoke = commands.add_parser(
             name,
@@ -1241,10 +1463,16 @@ def run_queue_command(args: argparse.Namespace) -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
 
-    if args.queue_command in {"smoke-analysis", "smoke-transcription"}:
+    if args.queue_command in {
+        "smoke-analysis", "smoke-transcription", "smoke-transcription-http",
+    }:
         return run_smoke_command(
             args,
-            "analysis" if args.queue_command == "smoke-analysis" else "transcription",
+            {
+                "smoke-analysis": "analysis",
+                "smoke-transcription": "transcription",
+                "smoke-transcription-http": "transcription-http",
+            }[args.queue_command],
         )
 
     control = operator_client(args.operator_token_source)
@@ -1266,6 +1494,15 @@ def run_queue_command(args: argparse.Namespace) -> int:
             "synthetic:mlx-audio-smoke",
             args.retention_days,
         ), spec=transcription_smoke_spec(args.fixture_text))
+        print(canonical_json({"job": result["job"], "run": result["run"]}))
+        return 0
+    if args.queue_command == "submit-transcription-http-smoke":
+        spec = http_transcription_smoke_spec()
+        result = submit_spec(control, request=ephemeral_request(
+            "mlx-transcription-http-smoke",
+            spec["source"]["media_asset_id"],
+            args.retention_days,
+        ), spec=spec)
         print(canonical_json({"job": result["job"], "run": result["run"]}))
         return 0
 

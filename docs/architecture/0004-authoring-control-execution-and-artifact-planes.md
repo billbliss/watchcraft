@@ -251,6 +251,21 @@ implementation, and publishes a transcript artifact. Its dedicated handler ident
 ends in `-smoke`: it is not the future production handler for acquired or private
 audio, and its fixture is never an authoritative input or retained artifact.
 
+A second `mlx-whisper-http-smoke` handler tests the production-shaped media boundary
+without introducing provider extraction. Its specification binds an immutable HTTPS
+audio URL, expected byte length and SHA-256, maximum transfer size, and timeout. The
+worker downloads into ephemeral local storage, verifies the exact bytes before
+inference, transcribes through the same MLX implementation, and deletes the audio.
+Only the transcript artifact is uploaded to R2.
+
+The direct-HTTPS fixture stands in for the output of a future provider adapter, not
+for the adapter itself. For YouTube, that adapter will retain the canonical watch URL
+and video identity, resolve an attempt-scoped media stream and required request
+headers, and classify provider access failures. Temporary signed or session-bound
+media URLs are execution details and must not become durable source identity. Keeping
+the provider boundary separate lets the HTTP smoke validate bounded transport,
+content identity, cleanup, and inference before YouTube reachability is introduced.
+
 ### Operational retention and cleanup
 
 Test and diagnostic runs identify their purpose in the run request and may carry an
