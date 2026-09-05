@@ -13,17 +13,27 @@ from jsonschema import Draft202012Validator
 
 import queued_authoring
 from watchcraft_author import build_parser, main
+from youtube_audio import YouTubeAcquisitionError
 
 
-def registry_snapshot(*, transcription=False, http_transcription=False):
-    if transcription or http_transcription:
+def registry_snapshot(
+    *,
+    transcription=False,
+    http_transcription=False,
+    youtube_transcription=False,
+):
+    if transcription or http_transcription or youtube_transcription:
         handler = (
-            queued_authoring.HTTP_TRANSCRIPTION_SMOKE_HANDLER
-            if http_transcription
-            else queued_authoring.TRANSCRIPTION_SMOKE_HANDLER
+            queued_authoring.YOUTUBE_TRANSCRIPTION_HANDLER
+            if youtube_transcription
+            else (
+                queued_authoring.HTTP_TRANSCRIPTION_SMOKE_HANDLER
+                if http_transcription
+                else queued_authoring.TRANSCRIPTION_SMOKE_HANDLER
+            )
         )
         return {
-            "registry_version": "2026-09-04.3",
+            "registry_version": "2026-09-05.1",
             "registry_sha256": "c" * 64,
             "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[handler],
             "execution_profile": queued_authoring.LOCAL_EXECUTION_PROFILES[
@@ -31,7 +41,7 @@ def registry_snapshot(*, transcription=False, http_transcription=False):
             ],
         }
     return {
-        "registry_version": "2026-09-04.3",
+        "registry_version": "2026-09-05.1",
         "registry_sha256": "c" * 64,
         "handler": {
             "id": "watchcraft.analysis.lexical",
@@ -103,6 +113,15 @@ class QueuedAuthoringTests(unittest.TestCase):
         ])
         self.assertEqual(http_smoke.timeout_seconds, 1800)
         self.assertEqual(http_smoke.retention_days, 7)
+        youtube_smoke = build_parser().parse_args([
+            "queue", "smoke-transcription-youtube",
+            "--operator-token-source", "keychain",
+            "--r2-credentials-source", "keychain",
+        ])
+        self.assertEqual(
+            youtube_smoke.youtube_url,
+            queued_authoring.YOUTUBE_TRANSCRIPTION_SMOKE_URL,
+        )
 
         cleanup = build_parser().parse_args([
             "queue", "cleanup-run", "run-1", "--confirm", "run-1",
@@ -324,6 +343,49 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertEqual(result["provenance"]["acquisition"], acquisition)
         self.assertFalse(result["provenance"]["audio_retained"])
 
+    def test_youtube_mlx_handler_acquires_one_video_and_discards_audio(self):
+        spec = queued_authoring.youtube_transcription_spec(
+            "https://www.youtube.com/shorts/WPtpUu3uIUI"
+        )
+        job = {
+            "job_id": "job-youtube-mlx",
+            "spec_sha256": "a" * 64,
+            "spec": spec,
+        }
+        acquisition = {
+            "provider": "youtube",
+            "video_id": "WPtpUu3uIUI",
+            "canonical_url": "https://www.youtube.com/watch?v=WPtpUu3uIUI",
+            "algorithm": "sha256",
+            "digest": "b" * 64,
+            "byte_length": 1_682_197,
+            "duration_seconds": 120.0,
+        }
+        with patch(
+            "queued_authoring.download_youtube_audio",
+            return_value=acquisition,
+        ) as download:
+            with patch(
+                "queued_authoring.mlx_transcribe_file",
+                return_value={
+                    "language": "en",
+                    "text": "Welcome to the hotel.",
+                    "segments": [{"start": 0.0, "end": 2.0, "text": "Welcome."}],
+                },
+            ) as transcribe:
+                result = queued_authoring.mlx_youtube_transcription(job)
+        audio_path = download.call_args.args[1]
+        self.assertFalse(audio_path.exists())
+        self.assertEqual(download.call_args.args[0], "WPtpUu3uIUI")
+        self.assertEqual(transcribe.call_args.args[0], audio_path)
+        self.assertEqual(spec["source"], {"media_asset_id": "youtube:WPtpUu3uIUI"})
+        self.assertEqual(
+            spec["configuration"]["canonical_url"],
+            "https://www.youtube.com/watch?v=WPtpUu3uIUI",
+        )
+        self.assertEqual(result["provenance"]["acquisition"], acquisition)
+        self.assertFalse(result["provenance"]["audio_retained"])
+
     def test_python_r2_store_is_content_addressed_and_create_once(self):
         class MissingObject(Exception):
             response = {
@@ -450,7 +512,7 @@ class QueuedAuthoringTests(unittest.TestCase):
                 "registry": {},
             },
             {
-                "registry_version": "2026-09-04.3",
+                "registry_version": "2026-09-05.1",
                 "revision": 3,
             },
         ]
@@ -469,7 +531,7 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertRegex(payload["registry_sha256"], r"^[a-f0-9]{64}$")
 
         override_client = Mock()
-        override_client.post.return_value = {"registry_version": "2026-09-04.3"}
+        override_client.post.return_value = {"registry_version": "2026-09-05.1"}
         with patch("queued_authoring.registry_admin_client", return_value=override_client):
             with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 self.assertEqual(queued_authoring.run_queue_command(explicit), 0)
@@ -683,6 +745,101 @@ class QueuedAuthoringTests(unittest.TestCase):
             queued_authoring.HTTP_TRANSCRIPTION_SMOKE_HANDLER[0],
         )
 
+    def test_one_command_youtube_smoke_binds_one_canonical_video(self):
+        spec = {
+            **queued_authoring.youtube_transcription_spec("WPtpUu3uIUI"),
+            "registry_snapshot": registry_snapshot(youtube_transcription=True),
+        }
+        submitted_job = {
+            "job_id": "job-youtube-smoke",
+            "run_id": "run-youtube-smoke",
+            "revision": 2,
+            "state": "awaiting_approval",
+            "spec_sha256": "a" * 64,
+            "spec": spec,
+        }
+        ready_job = {**submitted_job, "revision": 3, "state": "ready"}
+        pending_job = {
+            **ready_job,
+            "revision": 4,
+            "state": "dispatch_pending",
+            "dispatch": {"generation": 1},
+        }
+        completed = {
+            "job": {
+                **pending_job,
+                "revision": 8,
+                "state": "succeeded",
+                "result": {"digest": "b" * 64},
+            },
+            "run": {"run_id": "run-youtube-smoke", "state": "complete"},
+        }
+        verified_result = {
+            "kind": "watchcraft.transcript",
+            "text": "Welcome to the hotel.",
+            "segments": [{"text": "Welcome to the hotel."}],
+            "provenance": {
+                "handler_id": queued_authoring.YOUTUBE_TRANSCRIPTION_HANDLER[0],
+                "acquisition": {
+                    "video_id": "WPtpUu3uIUI",
+                    "canonical_url": "https://www.youtube.com/watch?v=WPtpUu3uIUI",
+                    "digest": "c" * 64,
+                    "byte_length": 1_682_197,
+                },
+            },
+        }
+        control = Mock()
+        control.post.return_value = {
+            "job": ready_job,
+            "run": {"run_id": "run-youtube-smoke"},
+        }
+        args = build_parser().parse_args([
+            "queue", "smoke-transcription-youtube",
+            "--operator-token-source", "keychain",
+            "--r2-credentials-source", "keychain",
+            "https://www.youtube.com/shorts/WPtpUu3uIUI",
+        ])
+        with patch("queued_authoring.operator_client", return_value=control):
+            with patch(
+                "queued_authoring.submit_spec",
+                return_value={
+                    "job": submitted_job,
+                    "run": {"run_id": "run-youtube-smoke"},
+                },
+            ) as submit:
+                with patch(
+                    "queued_authoring.dispatch_submission",
+                    return_value=pending_job,
+                ):
+                    with patch(
+                        "queued_authoring.wait_for_terminal_job",
+                        return_value=completed,
+                    ):
+                        with patch(
+                            "queued_authoring.verified_json_result",
+                            return_value=verified_result,
+                        ):
+                            with redirect_stdout(io.StringIO()):
+                                self.assertEqual(
+                                    queued_authoring.run_queue_command(args),
+                                    0,
+                                )
+        submitted_request = submit.call_args.kwargs["request"]
+        submitted_spec = submit.call_args.kwargs["spec"]
+        self.assertEqual(submitted_request["purpose"], "smoke")
+        self.assertEqual(
+            submitted_spec["source"],
+            {"media_asset_id": "youtube:WPtpUu3uIUI"},
+        )
+        self.assertEqual(
+            submitted_spec["configuration"]["canonical_url"],
+            "https://www.youtube.com/watch?v=WPtpUu3uIUI",
+        )
+        self.assertEqual(
+            submitted_spec["handler"]["id"],
+            queued_authoring.YOUTUBE_TRANSCRIPTION_HANDLER[0],
+        )
+
     def test_waiting_for_a_remote_job_reports_periodic_progress(self):
         client = Mock()
         client.post.side_effect = [
@@ -736,6 +893,17 @@ class QueuedAuthoringTests(unittest.TestCase):
         with patch.dict(os.environ, environment, clear=True):
             http_profile = queued_authoring.validate_registry_snapshot(http_job)
         self.assertEqual(http_profile["id"], "macos-mlx")
+
+        youtube_job = {
+            "job_id": "job-youtube-mlx",
+            "spec": {
+                **queued_authoring.youtube_transcription_spec("WPtpUu3uIUI"),
+                "registry_snapshot": registry_snapshot(youtube_transcription=True),
+            },
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            youtube_profile = queued_authoring.validate_registry_snapshot(youtube_job)
+        self.assertEqual(youtube_profile["id"], "macos-mlx")
 
     def test_result_displays_verified_json_from_the_authoritative_reference(self):
         payload = queued_authoring.canonical_json({
@@ -882,6 +1050,68 @@ class QueuedAuthoringTests(unittest.TestCase):
             "/jobs/start",
             "/jobs/succeed",
         ])
+
+    def test_python_worker_preserves_classified_provider_failures(self):
+        spec = {
+            **queued_authoring.youtube_transcription_spec("WPtpUu3uIUI"),
+            "registry_snapshot": registry_snapshot(youtube_transcription=True),
+        }
+        job = {
+            "job_id": "job-youtube-failure",
+            "run_id": "run-youtube-failure",
+            "revision": 4,
+            "state": "dispatch_pending",
+            "spec_sha256": "a" * 64,
+            "spec": spec,
+            "dispatch": {"generation": 1},
+        }
+
+        class Control:
+            def __init__(self):
+                self.failure = None
+
+            def post(self, path, payload):
+                if path == "/jobs/dispatch/record":
+                    return {**job, "revision": 5, "state": "dispatched"}
+                if path == "/jobs/claim":
+                    return {**job, "revision": 6, "state": "claimed"}
+                if path == "/jobs/start":
+                    return {**job, "revision": 7, "state": "running"}
+                if path == "/jobs/fail":
+                    self.failure = payload["failure"]
+                    return {**job, "revision": 8, "state": "retryable_failed"}
+                raise AssertionError(path)
+
+        def fail_acquisition(_job):
+            raise YouTubeAcquisitionError(
+                "YouTube rate limited the worker",
+                "source_rate_limited",
+                True,
+            )
+
+        control = Control()
+        environment = {
+            "WATCHCRAFT_EXECUTION_PROFILE_ID": "macos-mlx",
+            "WATCHCRAFT_EXECUTION_PROFILE_VERSION": "1",
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            with patch("queued_authoring.worker_client", return_value=control):
+                with patch.dict(
+                    queued_authoring.HANDLERS,
+                    {queued_authoring.YOUTUBE_TRANSCRIPTION_HANDLER: fail_acquisition},
+                ):
+                    with self.assertRaisesRegex(
+                        YouTubeAcquisitionError,
+                        "rate limited",
+                    ):
+                        queued_authoring.run_worker(
+                            job_id=job["job_id"],
+                            spec_sha256=job["spec_sha256"],
+                            dispatch_generation=1,
+                            expected_revision=4,
+                        )
+        self.assertEqual(control.failure["classification"], "source_rate_limited")
+        self.assertTrue(control.failure["retryable"])
 
     def test_python_worker_rejects_a_job_routed_to_another_execution_profile(self):
         spec = {

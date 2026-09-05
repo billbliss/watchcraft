@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 import subprocess
 import sys
 import tempfile
+import urllib.parse
+from pathlib import Path
 from typing import Any
 
 from video_catalog import clean_segments, segment_text
@@ -12,6 +17,16 @@ from video_catalog import clean_segments, segment_text
 
 SAMPLE_RATE = 16_000
 MIN_USEFUL_SPEECH_SECONDS = 3.0
+YOUTUBE_ORIGINAL_AUDIO_FORMAT = "bestaudio[format_note*=original]/bestaudio/best"
+
+
+class YouTubeAcquisitionError(RuntimeError):
+    """A classified failure to acquire one public YouTube audio stream."""
+
+    def __init__(self, message: str, classification: str, retryable: bool):
+        super().__init__(message)
+        self.classification = classification
+        self.retryable = retryable
 
 
 class NoSpeechDetected(RuntimeError):
@@ -24,6 +39,33 @@ class NoSpeechDetected(RuntimeError):
         )
         self.audio_seconds = audio_seconds
         self.speech_seconds = speech_seconds
+
+
+def youtube_video_id(value: str) -> str:
+    """Return one stable video ID from supported YouTube URL forms or an ID."""
+    candidate = value.strip()
+    if re.fullmatch(r"[A-Za-z0-9_-]{11}", candidate):
+        return candidate
+    parsed = urllib.parse.urlparse(candidate)
+    host = (parsed.hostname or "").casefold()
+    if host in {"youtu.be", "www.youtu.be"}:
+        video_id = parsed.path.strip("/").split("/")[0]
+    elif host == "youtube.com" or host.endswith(".youtube.com"):
+        if parsed.path == "/watch":
+            video_id = urllib.parse.parse_qs(parsed.query).get("v", [""])[0]
+        elif parsed.path.startswith(("/embed/", "/shorts/", "/live/")):
+            video_id = parsed.path.rstrip("/").split("/")[-1]
+        else:
+            video_id = ""
+    else:
+        video_id = ""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+        raise ValueError(f"Not a recognizable YouTube video URL or ID: {value}")
+    return video_id
+
+
+def canonical_youtube_url(value: str) -> str:
+    return f"https://www.youtube.com/watch?v={youtube_video_id(value)}"
 
 
 def yt_dlp_command(executable: str | None = None) -> list[str]:
@@ -53,17 +95,191 @@ def yt_dlp_audio_command(url: str, command: list[str]) -> list[str]:
     """Build a yt-dlp stream command with Node available for YouTube challenges."""
     return [
         *command,
+        "--ignore-config",
         "--quiet",
         "--no-warnings",
         "--no-playlist",
         "--js-runtimes",
         "node",
         "--format",
-        "bestaudio/best",
+        YOUTUBE_ORIGINAL_AUDIO_FORMAT,
         "--output",
         "-",
         url,
     ]
+
+
+def yt_dlp_audio_download_command(
+    url: str,
+    command: list[str],
+    destination: Path,
+    maximum_bytes: int,
+) -> list[str]:
+    """Build a deterministic, single-item original-audio download command."""
+    metadata_template = (
+        'after_move:{"video_id":%(id)j,"duration":%(duration)j,'
+        '"format_id":%(format_id)j,"language":%(language)j,'
+        '"extension":%(ext)j}'
+    )
+    return [
+        *command,
+        "--ignore-config",
+        "--quiet",
+        "--no-warnings",
+        "--no-playlist",
+        "--js-runtimes",
+        "node",
+        "--format",
+        YOUTUBE_ORIGINAL_AUDIO_FORMAT,
+        "--max-filesize",
+        str(maximum_bytes),
+        "--output",
+        str(destination),
+        "--print",
+        metadata_template,
+        url,
+    ]
+
+
+def classify_youtube_acquisition_failure(message: str) -> tuple[str, bool]:
+    normalized = message.casefold()
+    if "http error 429" in normalized or "too many requests" in normalized:
+        return "source_rate_limited", True
+    if any(
+        marker in normalized
+        for marker in (
+            "please sign in",
+            "sign in to confirm",
+            "age-restricted",
+            "members-only",
+            "private video",
+        )
+    ):
+        return "source_access_denied", False
+    if "video unavailable" in normalized or "has been removed" in normalized:
+        return "source_unavailable", False
+    return "source_acquisition_failed", True
+
+
+def download_youtube_audio(
+    value: str,
+    destination: Path,
+    *,
+    maximum_bytes: int,
+    maximum_duration_seconds: int,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    """Acquire one public original audio stream and return its observed identity."""
+    video_id = youtube_video_id(value)
+    url = canonical_youtube_url(video_id)
+    if maximum_bytes < 1 or maximum_duration_seconds < 1 or timeout_seconds < 1:
+        raise ValueError("YouTube acquisition limits must be positive")
+    command = yt_dlp_command()
+    try:
+        version = command_version(command)
+    except RuntimeError as error:
+        raise YouTubeAcquisitionError(
+            str(error), "worker_dependency_missing", False
+        ) from error
+    download_command = yt_dlp_audio_download_command(
+        url,
+        command,
+        destination,
+        maximum_bytes,
+    )
+    try:
+        completed = subprocess.run(
+            download_command,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as error:
+        destination.unlink(missing_ok=True)
+        raise YouTubeAcquisitionError(
+            f"YouTube audio acquisition timed out after {timeout_seconds}s",
+            "source_acquisition_timeout",
+            True,
+        ) from error
+    except OSError as error:
+        destination.unlink(missing_ok=True)
+        raise YouTubeAcquisitionError(
+            f"Could not start yt-dlp: {error}",
+            "worker_dependency_missing",
+            False,
+        ) from error
+    if completed.returncode != 0:
+        destination.unlink(missing_ok=True)
+        detail = " ".join(completed.stderr.split())[:400]
+        classification, retryable = classify_youtube_acquisition_failure(detail)
+        raise YouTubeAcquisitionError(
+            f"yt-dlp could not acquire YouTube audio: {detail or 'unknown error'}",
+            classification,
+            retryable,
+        )
+    if not destination.is_file():
+        raise YouTubeAcquisitionError(
+            "yt-dlp completed without producing an audio file",
+            "source_media_rejected",
+            False,
+        )
+
+    byte_length = destination.stat().st_size
+    if byte_length < 1 or byte_length > maximum_bytes:
+        destination.unlink(missing_ok=True)
+        raise YouTubeAcquisitionError(
+            f"YouTube audio has {byte_length} bytes; limit is {maximum_bytes}",
+            "source_media_rejected",
+            False,
+        )
+    try:
+        metadata = json.loads(completed.stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError) as error:
+        destination.unlink(missing_ok=True)
+        raise YouTubeAcquisitionError(
+            "yt-dlp returned invalid acquisition metadata",
+            "source_acquisition_failed",
+            True,
+        ) from error
+    duration = metadata.get("duration") if isinstance(metadata, dict) else None
+    if (
+        isinstance(duration, bool)
+        or not isinstance(duration, (int, float))
+        or duration <= 0
+        or duration > maximum_duration_seconds
+    ):
+        destination.unlink(missing_ok=True)
+        raise YouTubeAcquisitionError(
+            f"YouTube audio duration {duration!r}s exceeds or violates the "
+            f"{maximum_duration_seconds}s limit",
+            "source_media_rejected",
+            False,
+        )
+    if metadata.get("video_id") != video_id:
+        destination.unlink(missing_ok=True)
+        raise YouTubeAcquisitionError(
+            "yt-dlp returned media for a different YouTube video",
+            "source_identity_mismatch",
+            False,
+        )
+
+    digest = hashlib.sha256()
+    with destination.open("rb") as source:
+        while chunk := source.read(64 * 1024):
+            digest.update(chunk)
+    return {
+        "provider": "youtube",
+        "video_id": video_id,
+        "canonical_url": url,
+        "yt_dlp_version": version,
+        "format_id": metadata.get("format_id"),
+        "audio_language": metadata.get("language"),
+        "container": metadata.get("extension"),
+        "duration_seconds": round(float(duration), 3),
+        "algorithm": "sha256",
+        "digest": digest.hexdigest(),
+        "byte_length": byte_length,
+    }
 
 
 def stream_youtube_audio(url: str, command: list[str]) -> Any:

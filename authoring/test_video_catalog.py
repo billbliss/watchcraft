@@ -1050,6 +1050,10 @@ class FormattingTests(unittest.TestCase):
         self.assertEqual(
             youtube_video_id("https://youtu.be/PjObX9XQvgI"), "PjObX9XQvgI"
         )
+        self.assertEqual(
+            youtube_video_id("https://www.youtube.com/shorts/WPtpUu3uIUI"),
+            "WPtpUu3uIUI",
+        )
 
     def test_youtube_playlist_id_accepts_playlist_and_watch_urls(self):
         playlist_id = "PL1234567890_example"

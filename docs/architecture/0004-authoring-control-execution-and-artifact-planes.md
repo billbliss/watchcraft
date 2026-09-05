@@ -266,6 +266,17 @@ media URLs are execution details and must not become durable source identity. Ke
 the provider boundary separate lets the HTTP smoke validate bounded transport,
 content identity, cleanup, and inference before YouTube reachability is introduced.
 
+The first YouTube-backed handler remains single-item and grouping-neutral. Its durable
+specification contains the stable YouTube video ID and canonical watch URL, while the
+macOS attempt resolves and downloads the provider-designated original audio under
+reviewed size, duration, and timeout ceilings. This matters for videos that advertise
+automatic dubbed tracks: `bestaudio` alone is not treated as adequate source-language
+selection. The attempt records the selected format, reported language, duration,
+observed byte length and SHA-256, and acquisition-tool version, but never the temporary
+playback URL. The compressed audio is deleted after MLX inference and is not uploaded
+to R2. Playlist traversal, course structure, collection authorship, and curricular
+placement remain explicitly outside this handler.
+
 ### Operational retention and cleanup
 
 Test and diagnostic runs identify their purpose in the run request and may carry an

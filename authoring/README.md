@@ -230,7 +230,7 @@ alternate JSON path may be supplied as their positional argument. Before activat
 the CLI uses the registry-admin credential to read the current activation-pointer
 revision and supplies it to the compare-and-set mutation. This preserves stale-write
 protection without requiring the operator to copy a revision manually. The immutable
-registry document version (for example `2026-09-04.3`) and the activation-pointer
+registry document version (for example `2026-09-05.1`) and the activation-pointer
 revision (for example `2`) are separate values. Advanced scripts may explicitly pass
 `--expected-active-revision`; the older `--expected-revision` spelling remains an
 alias. Publishing the same version with different content is rejected.
@@ -304,6 +304,30 @@ identity but not a retained audio object. A later YouTube adapter can resolve a 
 URL to a temporary media stream and hand that stream to the same bounded acquisition
 boundary; YouTube extraction and access behavior remain the single variable deferred
 by this smoke.
+
+The first provider-backed handler processes exactly one public YouTube video. Shorts,
+share, embed, and watch URLs are normalized to the stable video ID and canonical watch
+URL before the job specification is approved. The worker uses the pinned `yt-dlp`
+module from its Python environment, Node.js 22 for YouTube's JavaScript challenges,
+and FFmpeg already present on the macOS runner. It prefers the provider-designated
+original audio track, which avoids silently selecting one of YouTube's automatic
+dubs, and enforces reviewed transfer, duration, and timeout ceilings:
+
+```bash
+./authoring/watchcraft-author queue smoke-transcription-youtube \
+  --operator-token-source keychain \
+  --r2-credentials-source keychain
+```
+
+The default two-minute fixture is `WPtpUu3uIUI`; one other public YouTube URL or ID may
+be supplied as the positional argument. Acquisition records the canonical identity,
+selected format and language, `yt-dlp` version, duration, byte count, and observed
+SHA-256. Temporary playback URLs are neither persisted nor included in the job.
+Provider access denial, disappearance, rate limiting, timeout, and general extraction
+failure are classified separately. As with the HTTP fixture, the compressed source
+audio exists only in the runner's temporary directory and only transcript JSON enters
+R2. This command still does not discover playlists, create a collection, or assign the
+video to any authored grouping.
 
 `queue result` resolves the artifact reference from the authoritative completed job,
 downloads the object from private R2, and verifies its declared byte length and SHA-256

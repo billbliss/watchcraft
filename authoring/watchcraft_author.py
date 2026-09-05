@@ -46,7 +46,7 @@ from video_catalog import (
     render_readable_transcript,
     render_srt,
 )
-from youtube_audio import NoSpeechDetected, youtube_audio_transcript
+from youtube_audio import NoSpeechDetected, youtube_audio_transcript, youtube_video_id
 
 AUTHORING_SCHEMA_VERSION = 1
 MIN_USEFUL_TIMELINE_SECTIONS = 3
@@ -103,28 +103,6 @@ def workspace_path(value: str) -> Path:
     path = Path(value).expanduser().resolve()
     path.mkdir(parents=True, exist_ok=True)
     return path
-
-
-def youtube_video_id(value: str) -> str:
-    candidate = value.strip()
-    if re.fullmatch(r"[A-Za-z0-9_-]{11}", candidate):
-        return candidate
-    parsed = urllib.parse.urlparse(candidate)
-    host = (parsed.hostname or "").casefold()
-    if host in {"youtu.be", "www.youtu.be"}:
-        video_id = parsed.path.strip("/").split("/")[0]
-    elif host.endswith("youtube.com"):
-        if parsed.path == "/watch":
-            video_id = urllib.parse.parse_qs(parsed.query).get("v", [""])[0]
-        elif parsed.path.startswith(("/embed/", "/shorts/", "/live/")):
-            video_id = parsed.path.rstrip("/").split("/")[-1]
-        else:
-            video_id = ""
-    else:
-        video_id = ""
-    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
-        raise ValueError(f"Not a recognizable YouTube video URL or ID: {value}")
-    return video_id
 
 
 def youtube_playlist_id(value: str) -> str:
