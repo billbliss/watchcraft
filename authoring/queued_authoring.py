@@ -896,27 +896,43 @@ def wait_for_terminal_job(
     job_id: str,
     timeout_seconds: int,
     poll_seconds: float = 5.0,
+    progress_seconds: float = 30.0,
 ) -> dict[str, Any]:
     if timeout_seconds < 1:
         raise ValueError("--timeout-seconds must be positive")
-    deadline = time.monotonic() + timeout_seconds
+    if poll_seconds <= 0 or progress_seconds <= 0:
+        raise ValueError("poll and progress intervals must be positive")
+    started_at = time.monotonic()
+    deadline = started_at + timeout_seconds
+    next_progress_at = started_at + progress_seconds
     last_state = None
     while True:
         submission = control.post("/submissions/get", {"job_id": job_id})
         job = submission["job"]
-        if job.get("state") != last_state:
-            print(f"{job_id}: {job.get('state')}", flush=True)
-            last_state = job.get("state")
-        if job.get("state") == "succeeded":
+        state = job.get("state")
+        state_changed = state != last_state
+        if state_changed:
+            print(f"{job_id}: {state}", flush=True)
+            last_state = state
+        if state == "succeeded":
             return submission
-        if job.get("state") in {"retryable_failed", "terminal_failed", "cancelled"}:
+        if state in {"retryable_failed", "terminal_failed", "cancelled"}:
             failure = job.get("failure") or {}
             raise RuntimeError(
-                f"Smoke job {job_id} ended as {job.get('state')}: "
+                f"Smoke job {job_id} ended as {state}: "
                 f"{failure.get('classification', 'unknown')} {failure.get('message', '')}".strip()
             )
-        if time.monotonic() >= deadline:
+        now = time.monotonic()
+        if now >= deadline:
             raise RuntimeError(f"Timed out after {timeout_seconds}s waiting for smoke job {job_id}")
+        if not state_changed and now >= next_progress_at:
+            elapsed_seconds = int(now - started_at)
+            print(
+                f"{job_id}: still waiting ({state}, {elapsed_seconds}s elapsed)",
+                flush=True,
+            )
+            while next_progress_at <= now:
+                next_progress_at += progress_seconds
         time.sleep(poll_seconds)
 
 

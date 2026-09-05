@@ -450,6 +450,33 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertIn('"state": "succeeded"', output.getvalue())
         reader.get_bytes.assert_called_once_with(reference)
 
+    def test_waiting_for_a_remote_job_reports_periodic_progress(self):
+        client = Mock()
+        client.post.side_effect = [
+            {"job": {"job_id": "job-1", "state": "dispatch_pending"}},
+            {"job": {"job_id": "job-1", "state": "dispatch_pending"}},
+            {"job": {"job_id": "job-1", "state": "succeeded"}},
+        ]
+        output = io.StringIO()
+        with patch("queued_authoring.time.monotonic", side_effect=[0.0, 0.0, 31.0, 32.0]):
+            with patch("queued_authoring.time.sleep") as sleep:
+                with redirect_stdout(output):
+                    result = queued_authoring.wait_for_terminal_job(
+                        client,
+                        "job-1",
+                        timeout_seconds=60,
+                        poll_seconds=5,
+                        progress_seconds=30,
+                    )
+        self.assertEqual(result["job"]["state"], "succeeded")
+        self.assertIn("job-1: dispatch_pending", output.getvalue())
+        self.assertIn(
+            "job-1: still waiting (dispatch_pending, 31s elapsed)",
+            output.getvalue(),
+        )
+        self.assertIn("job-1: succeeded", output.getvalue())
+        self.assertEqual(sleep.call_count, 2)
+
     def test_mlx_registry_snapshot_is_accepted_only_by_the_macos_profile(self):
         job = {
             "job_id": "job-mlx",
