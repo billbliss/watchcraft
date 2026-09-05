@@ -178,8 +178,43 @@ export function installBrowserDiagnostics(service: DiagnosticsService): () => vo
   };
 }
 
-export function formatDiagnosticEntry(entry: DiagnosticEntry): string {
+export function readablePercentEscapes(value: string): string {
+  let readable = value;
+  for (let depth = 0; depth < 3; depth += 1) {
+    const decoded = readable.replace(/(?:%[0-9A-Fa-f]{2})+/g, (encoded) => {
+      try {
+        return decodeURIComponent(encoded)
+          .replace(/\r/g, "\\r")
+          .replace(/\n/g, "\\n")
+          .replace(/\t/g, "\\t")
+          .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, (character) =>
+            `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+          );
+      } catch {
+        return encoded;
+      }
+    });
+    if (decoded === readable) break;
+    readable = decoded;
+  }
+  return readable;
+}
+
+function readableValue(value: unknown): unknown {
+  if (typeof value === "string") return readablePercentEscapes(value);
+  if (Array.isArray(value)) return value.map(readableValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, nested]) => [key, readableValue(nested)]),
+    );
+  }
+  return value;
+}
+
+export function formatDiagnosticEntry(entry: DiagnosticEntry, readableEscapes = true): string {
   const timestamp = new Date(entry.timestampMs).toISOString();
-  const fields = Object.keys(entry.fields).length > 0 ? ` ${JSON.stringify(entry.fields)}` : "";
-  return `${timestamp} ${entry.level.toUpperCase()} [${entry.category}] ${entry.event} — ${entry.message}${fields}`;
+  const fieldsValue = readableEscapes ? readableValue(entry.fields) : entry.fields;
+  const fields = Object.keys(entry.fields).length > 0 ? ` ${JSON.stringify(fieldsValue)}` : "";
+  const message = readableEscapes ? readablePercentEscapes(entry.message) : entry.message;
+  return `${timestamp} ${entry.level.toUpperCase()} [${entry.category}] ${entry.event} — ${message}${fields}`;
 }

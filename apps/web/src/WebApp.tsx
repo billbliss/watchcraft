@@ -343,6 +343,10 @@ export function WebApp(): ReactElement {
           onCollectionLoaded={rememberLoadedCollection}
           onDiagnosticEvent={recordDiagnostic}
           onOpenDiagnostics={() => setDiagnosticsOpen(true)}
+          onOpenSettings={() => {
+            setSettingsError(null);
+            setSettingsOpen(true);
+          }}
           repository={repository}
           routeBasePath={import.meta.env.BASE_URL}
           sidebarFooter={settingsButton}

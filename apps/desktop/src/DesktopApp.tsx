@@ -426,6 +426,10 @@ export function DesktopApp(): ReactElement {
         key={libraryLocation?.manifestPath}
         onDiagnosticEvent={diagnosticsEnabled ? recordDiagnostic : undefined}
         onOpenDiagnostics={diagnosticsEnabled ? () => setDiagnosticsOpen(true) : undefined}
+        onOpenSettings={() => {
+          setSettingsError(null);
+          setSettingsOpen(true);
+        }}
         repository={repository}
         sidebarFooter={(
           <button

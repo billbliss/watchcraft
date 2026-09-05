@@ -436,6 +436,9 @@ h3 { margin: 27px 0 11px; font-size: 1rem; }
 .status-card { max-width: 680px; padding: 35px; border: 1px solid var(--line); border-radius: 15px; background: var(--panel); }
 .status-card h1 { margin: 0; color: #edf3ee; }
 .status-card code { display: block; margin-top: 15px; overflow-wrap: anywhere; color: var(--accent); }
+.status-card-actions { display: flex; margin-top: 18px; gap: 9px; flex-wrap: wrap; }
+.status-card-actions .action { margin: 0; padding: 8px 11px; border: 1px solid #405047; border-radius: 8px; color: inherit; background: #19211c; cursor: pointer; }
+.status-card-actions .primary { border-color: #60906d; background: #294c34; }
 .error-card { border-color: #6a3f38; }
 .web-empty-library { text-align: center; }
 .web-empty-library p { margin: 12px 0 0; line-height: 1.5; }
@@ -633,8 +636,9 @@ h3 { margin: 27px 0 11px; font-size: 1rem; }
 .diagnostics-actions { display: flex; gap: 8px; }
 .diagnostics-actions button { cursor: pointer; }
 .diagnostics-actions .primary-action { margin: 0; border-color: #60906d; background: #294c34; }
-.diagnostics-path-option { display: flex; padding: 0 20px 10px; gap: 8px; align-items: center; color: var(--muted); font-size: .76rem; }
-.diagnostics-limitation { margin: 0; padding: 0 20px 10px; color: var(--muted); font-size: .76rem; }
+.diagnostics-options-row { display: flex; min-height: 28px; padding: 0 20px 10px; gap: 18px; align-items: center; justify-content: space-between; }
+.diagnostics-path-option, .diagnostics-readable-option { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: .76rem; white-space: nowrap; }
+.diagnostics-limitation { margin: 0; color: var(--muted); font-size: .76rem; }
 .diagnostics-log { flex: 1; margin: 0 20px 12px; padding: 14px; overflow: auto; border: 1px solid #2d3b32; border-radius: 8px; color: #d1ddd4; background: #070b08; font: 11px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .diagnostics-status { min-height: 18px; margin: 0; padding: 0 20px 12px; color: var(--accent); font-size: .76rem; }
 
@@ -645,6 +649,8 @@ h3 { margin: 27px 0 11px; font-size: 1rem; }
   .diagnostics-summary small { width: 100%; margin-left: 0; }
   .diagnostics-toolbar { align-items: stretch; flex-direction: column; }
   .diagnostics-actions { flex-wrap: wrap; }
+  .diagnostics-options-row { align-items: flex-start; flex-direction: column; gap: 7px; }
+  .diagnostics-readable-option { align-self: flex-end; }
 }
 
 @media (max-width: 900px) {

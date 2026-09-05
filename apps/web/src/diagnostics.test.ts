@@ -13,7 +13,21 @@ for (const [key, value] of Object.entries({
   Object.defineProperty(globalThis, key, { configurable: true, value, writable: true });
 }
 
-const { formatDiagnosticEntry, WebDiagnosticsService } = await import("./diagnostics.ts");
+const {
+  formatDiagnosticEntry,
+  readablePercentEscapes,
+  WebDiagnosticsService,
+} = await import("./diagnostics.ts");
+
+test("formats URL escapes readably without creating forged log lines", () => {
+  assert.equal(
+    readablePercentEscapes("Video%20Catalog%2FLesson%20%231%25.mp4"),
+    "Video Catalog/Lesson #1%.mp4",
+  );
+  assert.equal(readablePercentEscapes("caf%C3%A9%0Aerror"), "café\\nerror");
+  assert.equal(readablePercentEscapes("nested%2520catalog"), "nested catalog");
+  assert.equal(readablePercentEscapes("invalid%E2%80"), "invalid%E2%80");
+});
 
 test("web diagnostics persist browser events and can be cleared", async () => {
   localStorage.clear();

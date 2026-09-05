@@ -27,6 +27,7 @@ interface AppProps {
   onCollectionLoaded?: (manifest: CollectionManifest) => void;
   onDiagnosticEvent?: (event: DiagnosticEvent) => void;
   onOpenDiagnostics?: () => void;
+  onOpenSettings?: () => void;
   routeBasePath?: string;
   sidebarFooter?: ReactElement;
   videoRouteMode?: "path" | "query";
@@ -206,6 +207,7 @@ export function App({
   onCollectionLoaded,
   onDiagnosticEvent,
   onOpenDiagnostics,
+  onOpenSettings,
   repository,
   routeBasePath = "/",
   sidebarFooter,
@@ -650,6 +652,16 @@ export function App({
           <h1>Catalog unavailable</h1>
           <p>{loadError}</p>
           <code>{repository.manifestLocation}</code>
+          {(onOpenSettings || onOpenDiagnostics) ? (
+            <div className="status-card-actions">
+              {onOpenSettings ? (
+                <button className="action primary" onClick={onOpenSettings} type="button">Choose collection</button>
+              ) : null}
+              {onOpenDiagnostics ? (
+                <button className="action" onClick={onOpenDiagnostics} type="button">View diagnostics</button>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       </main>
     );

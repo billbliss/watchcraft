@@ -14,6 +14,7 @@ export function DiagnosticsDialog({ onClose, service }: DiagnosticsDialogProps):
   const [entries, setEntries] = useState<DiagnosticEntry[]>([]);
   const [category, setCategory] = useState("all");
   const [includePaths, setIncludePaths] = useState(false);
+  const [readableEscapes, setReadableEscapes] = useState(true);
   const [status, setStatus] = useState<string | null>(null);
 
   useEffect(() => {
@@ -57,7 +58,9 @@ export function DiagnosticsDialog({ onClose, service }: DiagnosticsDialogProps):
 
   async function copyLogs(): Promise<void> {
     try {
-      await navigator.clipboard.writeText(visibleEntries.map(formatDiagnosticEntry).join("\n"));
+      await navigator.clipboard.writeText(
+        visibleEntries.map((entry) => formatDiagnosticEntry(entry, readableEscapes)).join("\n"),
+      );
       setStatus(`Copied ${visibleEntries.length} log entries.`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Could not copy diagnostics.");
@@ -113,20 +116,26 @@ export function DiagnosticsDialog({ onClose, service }: DiagnosticsDialogProps):
           </div>
         </div>
 
-        {service.includePathsSupported ? (
-          <label className="diagnostics-path-option">
-            <input checked={includePaths} onChange={(event) => setIncludePaths(event.target.checked)} type="checkbox" />
-            <span>Include full local paths in exported reports</span>
+        <div className="diagnostics-options-row">
+          {service.includePathsSupported ? (
+            <label className="diagnostics-path-option">
+              <input checked={includePaths} onChange={(event) => setIncludePaths(event.target.checked)} type="checkbox" />
+              <span>Include full local paths in exported reports</span>
+            </label>
+          ) : (
+            <p className="diagnostics-limitation">
+              Web diagnostics include browser, collection, network, and playback events. Folder binding and native streaming are desktop-only.
+            </p>
+          )}
+          <label className="diagnostics-readable-option">
+            <input checked={readableEscapes} onChange={(event) => setReadableEscapes(event.target.checked)} type="checkbox" />
+            <span>Readable URLs</span>
           </label>
-        ) : (
-          <p className="diagnostics-limitation">
-            Web diagnostics include browser, collection, network, and playback events. Folder binding and native streaming are desktop-only.
-          </p>
-        )}
+        </div>
 
         <pre aria-label="Diagnostic log" className="diagnostics-log">
           {visibleEntries.length > 0
-            ? visibleEntries.map(formatDiagnosticEntry).join("\n")
+            ? visibleEntries.map((entry) => formatDiagnosticEntry(entry, readableEscapes)).join("\n")
             : "No diagnostic events in this view."}
         </pre>
         {status ? <p className="diagnostics-status" role="status">{status}</p> : null}
