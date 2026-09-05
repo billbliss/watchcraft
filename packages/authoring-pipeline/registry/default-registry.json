@@ -1,7 +1,7 @@
 {
   "kind": "watchcraft.authoring-capability-registry",
   "schema_version": 1,
-  "registry_version": "2026-09-05.1",
+  "registry_version": "2026-09-05.3",
   "handlers": [
     {
       "id": "watchcraft.analysis.lexical",
@@ -82,10 +82,18 @@
       }
     },
     {
-      "id": "watchcraft.transcript.mlx-whisper-youtube",
+      "id": "watchcraft.transcript.mlx-whisper",
       "version": "1",
       "operation": "generate",
-      "inputs": [],
+      "inputs": [
+        {
+          "artifact_kind": "source-audio",
+          "schema": {
+            "id": "watchcraft.source-audio",
+            "version": 1
+          }
+        }
+      ],
       "dependencies": [],
       "output": {
         "artifact_kind": "transcript",
@@ -104,9 +112,7 @@
         "retryable_classifications": [
           "artifact_store_failed",
           "lease_expired",
-          "source_acquisition_failed",
-          "source_acquisition_timeout",
-          "source_rate_limited"
+          "source_input_unavailable"
         ]
       }
     }

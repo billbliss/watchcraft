@@ -37,6 +37,11 @@ R2_READER_ACCESS_KEY_ACCOUNT = "access-key-id"
 R2_READER_SECRET_KEY_ACCOUNT = "secret-access-key"
 R2_READER_ACCESS_KEY_ENV = "WATCHCRAFT_R2_READER_ACCESS_KEY_ID"
 R2_READER_SECRET_KEY_ENV = "WATCHCRAFT_R2_READER_SECRET_ACCESS_KEY"
+R2_STAGING_KEYCHAIN_SERVICE = "Watchcraft R2 staging uploader"
+R2_STAGING_ACCESS_KEY_ACCOUNT = "access-key-id"
+R2_STAGING_SECRET_KEY_ACCOUNT = "secret-access-key"
+R2_STAGING_ACCESS_KEY_ENV = "WATCHCRAFT_R2_STAGING_ACCESS_KEY_ID"
+R2_STAGING_SECRET_KEY_ENV = "WATCHCRAFT_R2_STAGING_SECRET_ACCESS_KEY"
 DEFAULT_GITHUB_REPOSITORY = "billbliss/watchcraft"
 DEFAULT_REGISTRY_PATH = (
     Path(__file__).resolve().parents[1]
@@ -48,8 +53,8 @@ HTTP_TRANSCRIPTION_SMOKE_HANDLER = (
     "watchcraft.transcript.mlx-whisper-http-smoke",
     "1",
 )
-YOUTUBE_TRANSCRIPTION_HANDLER = (
-    "watchcraft.transcript.mlx-whisper-youtube",
+STAGED_TRANSCRIPTION_HANDLER = (
+    "watchcraft.transcript.mlx-whisper",
     "1",
 )
 PYTHON_EXECUTION_PROFILE = ("python-portable", "1")
@@ -70,10 +75,12 @@ HTTP_TRANSCRIPTION_SMOKE_SHA256 = (
 HTTP_TRANSCRIPTION_SMOKE_BYTES = 1_152_693
 HTTP_TRANSCRIPTION_SMOKE_MAX_BYTES = 2_000_000
 HTTP_TRANSCRIPTION_SMOKE_TIMEOUT_SECONDS = 60
-YOUTUBE_TRANSCRIPTION_SMOKE_URL = "https://www.youtube.com/watch?v=WPtpUu3uIUI"
+YOUTUBE_TRANSCRIPTION_SMOKE_URL = "https://www.youtube.com/watch?v=D_jOvlB_D7A"
 YOUTUBE_TRANSCRIPTION_MAX_BYTES = 10_000_000
 YOUTUBE_TRANSCRIPTION_MAX_DURATION_SECONDS = 300
 YOUTUBE_TRANSCRIPTION_TIMEOUT_SECONDS = 180
+SOURCE_AUDIO_RETENTION_MILLISECONDS = 86_400_000
+SOURCE_AUDIO_SCHEMA = {"id": "watchcraft.source-audio", "version": 1}
 WORD_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9'-]{2,}")
 STOP_WORDS = {
     "and", "are", "but", "for", "from", "has", "have", "into", "its", "not",
@@ -230,6 +237,43 @@ def r2_reader_credentials(credential_source: str = "auto") -> tuple[str, str]:
             f"{R2_READER_KEYCHAIN_SERVICE!r}. Set both {R2_READER_ACCESS_KEY_ENV} "
             f"and {R2_READER_SECRET_KEY_ENV} and select "
             "--r2-credentials-source environment to use an explicit override"
+        ) from error
+
+
+def r2_staging_credentials(credential_source: str = "auto") -> tuple[str, str]:
+    if credential_source not in {"auto", "keychain", "environment"}:
+        raise ValueError(f"Unsupported R2 staging credential source {credential_source!r}")
+    access_key = os.environ.get(R2_STAGING_ACCESS_KEY_ENV, "")
+    secret_key = os.environ.get(R2_STAGING_SECRET_KEY_ENV, "")
+    if credential_source in {"auto", "environment"} and (access_key or secret_key):
+        if not access_key or not secret_key:
+            raise RuntimeError(
+                f"{R2_STAGING_ACCESS_KEY_ENV} and {R2_STAGING_SECRET_KEY_ENV} "
+                "must be set together"
+            )
+        return access_key, secret_key
+    if credential_source == "environment":
+        raise RuntimeError(
+            f"{R2_STAGING_ACCESS_KEY_ENV} and {R2_STAGING_SECRET_KEY_ENV} are "
+            "required when --r2-staging-credentials-source environment is selected"
+        )
+    try:
+        return (
+            keychain_password(
+                R2_STAGING_KEYCHAIN_SERVICE,
+                R2_STAGING_ACCESS_KEY_ACCOUNT,
+            ),
+            keychain_password(
+                R2_STAGING_KEYCHAIN_SERVICE,
+                R2_STAGING_SECRET_KEY_ACCOUNT,
+            ),
+        )
+    except RuntimeError as error:
+        raise RuntimeError(
+            f"Could not retrieve R2 staging credentials from "
+            f"{R2_STAGING_KEYCHAIN_SERVICE!r}. Set both {R2_STAGING_ACCESS_KEY_ENV} "
+            f"and {R2_STAGING_SECRET_KEY_ENV} and select "
+            "--r2-staging-credentials-source environment to use an explicit override"
         ) from error
 
 
@@ -542,57 +586,86 @@ def mlx_http_transcription_smoke(job: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def mlx_youtube_transcription(job: dict[str, Any]) -> dict[str, Any]:
-    configuration = job["spec"]["configuration"]
-    required_keys = {
-        "canonical_url",
-        "video_id",
-        "maximum_bytes",
-        "maximum_duration_seconds",
-        "timeout_seconds",
+class StagedSourceError(RuntimeError):
+    """An approved staged source-media input cannot be consumed."""
+
+    def __init__(self, message: str, classification: str, retryable: bool):
+        super().__init__(message)
+        self.classification = classification
+        self.retryable = retryable
+
+
+def mlx_staged_transcription(job: dict[str, Any]) -> dict[str, Any]:
+    spec = job["spec"]
+    configuration = spec["configuration"]
+    if not isinstance(configuration, dict) or set(configuration) != {
+        "acquisition",
         "language",
+        "maximum_bytes",
         "model",
-    }
-    if not isinstance(configuration, dict) or set(configuration) != required_keys:
-        raise ValueError("the YouTube transcript configuration is invalid")
-    if not isinstance(configuration["canonical_url"], str) or not isinstance(
-        configuration["video_id"], str
-    ):
-        raise ValueError("the YouTube transcript source identity is invalid")
-    video_id = youtube_video_id(configuration["canonical_url"])
-    if (
-        configuration["video_id"] != video_id
-        or configuration["canonical_url"] != canonical_youtube_url(video_id)
-        or job["spec"]["source"] != {"media_asset_id": f"youtube:{video_id}"}
-    ):
-        raise ValueError("the YouTube transcript source identity is inconsistent")
+    }:
+        raise ValueError("the staged transcription configuration is invalid")
     if configuration["language"] != "en":
-        raise ValueError("the initial YouTube transcript handler supports only English")
+        raise ValueError("the initial staged transcription handler supports only English")
     if configuration["model"] != TRANSCRIPTION_SMOKE_MODEL:
         raise ValueError(
-            f"the initial YouTube transcript handler requires {TRANSCRIPTION_SMOKE_MODEL}"
+            f"the initial staged transcription handler requires {TRANSCRIPTION_SMOKE_MODEL}"
         )
+    maximum_bytes = configuration["maximum_bytes"]
     if (
-        type(configuration["maximum_bytes"]) is not int
-        or not 1 <= configuration["maximum_bytes"] <= YOUTUBE_TRANSCRIPTION_MAX_BYTES
-        or type(configuration["maximum_duration_seconds"]) is not int
-        or not 1
-        <= configuration["maximum_duration_seconds"]
-        <= YOUTUBE_TRANSCRIPTION_MAX_DURATION_SECONDS
-        or type(configuration["timeout_seconds"]) is not int
-        or not 1 <= configuration["timeout_seconds"] <= YOUTUBE_TRANSCRIPTION_TIMEOUT_SECONDS
+        type(maximum_bytes) is not int
+        or not 1 <= maximum_bytes <= YOUTUBE_TRANSCRIPTION_MAX_BYTES
     ):
-        raise ValueError("the YouTube transcript acquisition limits are invalid")
-
-    with tempfile.TemporaryDirectory(prefix="watchcraft-mlx-youtube-") as directory:
-        audio_path = Path(directory) / "source-audio"
-        acquisition = download_youtube_audio(
-            video_id,
-            audio_path,
-            maximum_bytes=configuration["maximum_bytes"],
-            maximum_duration_seconds=configuration["maximum_duration_seconds"],
-            timeout_seconds=configuration["timeout_seconds"],
+        raise ValueError("the staged transcription byte limit is invalid")
+    if not isinstance(spec.get("inputs"), list) or len(spec["inputs"]) != 1:
+        raise ValueError("the staged transcription handler requires one source-audio input")
+    reference = validated_artifact_reference(spec["inputs"][0], allow_staged=True)
+    if (
+        reference.get("artifact_kind") != "source-audio"
+        or reference.get("schema") != SOURCE_AUDIO_SCHEMA
+        or not reference.get("media_type", "").startswith("audio/")
+        or reference["byte_length"] < 1
+        or reference["byte_length"] > maximum_bytes
+    ):
+        raise ValueError("the staged source-audio reference is invalid")
+    retention = reference["retention"]
+    if retention["expires_at"] <= int(time.time() * 1000):
+        raise StagedSourceError(
+            "The staged source-audio input has expired",
+            "source_input_expired",
+            False,
         )
+    acquisition = configuration["acquisition"]
+    if not isinstance(acquisition, dict):
+        raise ValueError("the staged source-audio acquisition provenance is invalid")
+    acquisition_source = acquisition.get("source")
+    acquisition_media = acquisition.get("media")
+    method = acquisition.get("method")
+    if (
+        not isinstance(acquisition_source, dict)
+        or acquisition_source.get("media_asset_id")
+        != spec.get("source", {}).get("media_asset_id")
+        or not isinstance(acquisition_media, dict)
+        or acquisition_media.get("algorithm") != reference["algorithm"]
+        or acquisition_media.get("digest") != reference["digest"]
+        or acquisition_media.get("byte_length") != reference["byte_length"]
+        or not isinstance(method, dict)
+        or not isinstance(method.get("id"), str)
+        or not isinstance(method.get("version"), str)
+    ):
+        raise ValueError("the staged source-audio provenance does not match its input")
+
+    try:
+        payload = R2ArtifactStore.from_environment().get_bytes(reference)
+    except Exception as error:
+        raise StagedSourceError(
+            "Could not retrieve and verify the staged source-audio input",
+            "source_input_unavailable",
+            True,
+        ) from error
+    with tempfile.TemporaryDirectory(prefix="watchcraft-mlx-staged-") as directory:
+        audio_path = Path(directory) / "source-audio"
+        audio_path.write_bytes(payload)
         transcript = mlx_transcribe_file(
             audio_path,
             language=configuration["language"],
@@ -602,16 +675,17 @@ def mlx_youtube_transcription(job: dict[str, Any]) -> dict[str, Any]:
     return {
         "kind": "watchcraft.transcript",
         "schema_version": 1,
-        "source": job["spec"]["source"],
+        "source": spec["source"],
         "model": configuration["model"],
         **transcript,
         "provenance": {
-            "handler_id": YOUTUBE_TRANSCRIPTION_HANDLER[0],
-            "handler_version": YOUTUBE_TRANSCRIPTION_HANDLER[1],
+            "handler_id": STAGED_TRANSCRIPTION_HANDLER[0],
+            "handler_version": STAGED_TRANSCRIPTION_HANDLER[1],
             "job_id": job["job_id"],
             "spec_sha256": job["spec_sha256"],
             "acquisition": acquisition,
-            "audio_retained": False,
+            "source_audio": reference,
+            "worker_audio_retained": False,
         },
     }
 
@@ -620,7 +694,7 @@ HANDLERS: dict[tuple[str, str], Callable[[dict[str, Any]], dict[str, Any]]] = {
     ANALYSIS_HANDLER: lexical_analysis,
     TRANSCRIPTION_SMOKE_HANDLER: mlx_transcription_smoke,
     HTTP_TRANSCRIPTION_SMOKE_HANDLER: mlx_http_transcription_smoke,
-    YOUTUBE_TRANSCRIPTION_HANDLER: mlx_youtube_transcription,
+    STAGED_TRANSCRIPTION_HANDLER: mlx_staged_transcription,
 }
 LOCAL_HANDLER_CONTRACTS: dict[tuple[str, str], dict[str, Any]] = {
     ANALYSIS_HANDLER: {
@@ -687,11 +761,16 @@ LOCAL_HANDLER_CONTRACTS: dict[tuple[str, str], dict[str, Any]] = {
             ],
         },
     },
-    YOUTUBE_TRANSCRIPTION_HANDLER: {
-        "id": YOUTUBE_TRANSCRIPTION_HANDLER[0],
-        "version": YOUTUBE_TRANSCRIPTION_HANDLER[1],
+    STAGED_TRANSCRIPTION_HANDLER: {
+        "id": STAGED_TRANSCRIPTION_HANDLER[0],
+        "version": STAGED_TRANSCRIPTION_HANDLER[1],
         "operation": "generate",
-        "inputs": [],
+        "inputs": [
+            {
+                "artifact_kind": "source-audio",
+                "schema": SOURCE_AUDIO_SCHEMA,
+            },
+        ],
         "dependencies": [],
         "output": {
             "artifact_kind": "transcript",
@@ -707,9 +786,7 @@ LOCAL_HANDLER_CONTRACTS: dict[tuple[str, str], dict[str, Any]] = {
             "retryable_classifications": [
                 "artifact_store_failed",
                 "lease_expired",
-                "source_acquisition_failed",
-                "source_acquisition_timeout",
-                "source_rate_limited",
+                "source_input_unavailable",
             ],
         },
     },
@@ -922,6 +999,75 @@ class R2ArtifactStore:
             raise RuntimeError("R2 artifact did not round-trip exactly")
         return reference
 
+    def put_staged_file(
+        self,
+        source: Path,
+        description: dict[str, Any],
+        *,
+        acquisition_id: str,
+        expires_at: int,
+    ) -> dict[str, Any]:
+        try:
+            normalized_acquisition_id = str(uuid.UUID(acquisition_id))
+        except (ValueError, AttributeError) as error:
+            raise ValueError("Staged artifact acquisition ID must be a UUID") from error
+        if type(expires_at) is not int or expires_at < 1:
+            raise ValueError("Staged artifact expiration must be a positive timestamp")
+        try:
+            payload = source.read_bytes()
+        except OSError as error:
+            raise RuntimeError(f"Could not read staged source media {source}") from error
+        if not payload:
+            raise RuntimeError("Refusing to stage an empty source-media artifact")
+        digest = sha256_hex(payload)
+        key = (
+            f"staging/{normalized_acquisition_id}/sha256/"
+            f"{digest[:2]}/{digest[2:]}"
+        )
+        reference = {
+            "store": "r2",
+            "algorithm": "sha256",
+            "digest": digest,
+            "byte_length": len(payload),
+            "media_type": description["media_type"],
+            "artifact_kind": description["artifact_kind"],
+            "schema": description["schema"],
+            "key": key,
+            "retention": {
+                "class": "ephemeral",
+                "expires_at": expires_at,
+            },
+        }
+        try:
+            self.client.put_object(
+                Bucket=self.bucket,
+                Key=key,
+                Body=payload,
+                ContentLength=len(payload),
+                ContentType=description["media_type"],
+                IfNoneMatch="*",
+                Metadata={
+                    "sha256": digest,
+                    "artifact_kind": description["artifact_kind"],
+                    "schema_id": description["schema"]["id"],
+                    "schema_version": str(description["schema"]["version"]),
+                    "retention_class": "ephemeral",
+                    "expires_at": str(expires_at),
+                },
+            )
+        except Exception as error:
+            status = getattr(error, "response", {}).get(
+                "ResponseMetadata", {}
+            ).get("HTTPStatusCode")
+            if status != 412:
+                raise
+        if self.get_bytes(reference) != payload:
+            raise RuntimeError("Staged R2 artifact did not round-trip exactly")
+        return reference
+
+    def delete(self, reference: dict[str, Any]) -> None:
+        self.client.delete_object(Bucket=self.bucket, Key=reference["key"])
+
     def get_bytes(self, reference: dict[str, Any]) -> bytes:
         try:
             response = self.client.get_object(Bucket=self.bucket, Key=reference["key"])
@@ -933,7 +1079,11 @@ class R2ArtifactStore:
         return payload
 
 
-def validated_artifact_reference(value: Any) -> dict[str, Any]:
+def validated_artifact_reference(
+    value: Any,
+    *,
+    allow_staged: bool = False,
+) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise RuntimeError("The completed job has an invalid artifact reference")
     digest = value.get("digest")
@@ -943,9 +1093,32 @@ def validated_artifact_reference(value: Any) -> dict[str, Any]:
         raise RuntimeError("The completed job does not reference a SHA-256 R2 artifact")
     if not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
         raise RuntimeError("The completed job has an invalid artifact digest")
+    key = value.get("key")
+    retention = value.get("retention")
     expected_key = f"objects/sha256/{digest[:2]}/{digest[2:]}"
-    if value.get("key") != expected_key:
-        raise RuntimeError("The artifact key does not match its content digest")
+    if retention is None:
+        if key != expected_key:
+            raise RuntimeError("The artifact key does not match its content digest")
+    else:
+        if not allow_staged:
+            raise RuntimeError("A completed job cannot use a staged result artifact")
+        if (
+            not isinstance(retention, dict)
+            or retention.get("class") != "ephemeral"
+            or type(retention.get("expires_at")) is not int
+            or retention["expires_at"] < 1
+        ):
+            raise RuntimeError("The staged artifact has invalid retention metadata")
+        acquisition_id_pattern = (
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
+            r"[89ab][0-9a-f]{3}-[0-9a-f]{12}"
+        )
+        key_pattern = (
+            rf"staging/{acquisition_id_pattern}/sha256/"
+            rf"{digest[:2]}/{digest[2:]}"
+        )
+        if not isinstance(key, str) or not re.fullmatch(key_pattern, key):
+            raise RuntimeError("The staged artifact key does not match its content digest")
     if (
         isinstance(byte_length, bool)
         or not isinstance(byte_length, int)
@@ -959,6 +1132,16 @@ def validated_artifact_reference(value: Any) -> dict[str, Any]:
 
 def r2_artifact_reader(credential_source: str = "auto") -> R2ArtifactStore:
     access_key, secret_key = r2_reader_credentials(credential_source)
+    return R2ArtifactStore.from_configuration(
+        endpoint=production_configuration("WATCHCRAFT_R2_ENDPOINT"),
+        bucket=production_configuration("WATCHCRAFT_R2_BUCKET"),
+        access_key_id=access_key,
+        secret_access_key=secret_key,
+    )
+
+
+def r2_staging_writer(credential_source: str = "auto") -> R2ArtifactStore:
+    access_key, secret_key = r2_staging_credentials(credential_source)
     return R2ArtifactStore.from_configuration(
         endpoint=production_configuration("WATCHCRAFT_R2_ENDPOINT"),
         bucket=production_configuration("WATCHCRAFT_R2_BUCKET"),
@@ -1132,26 +1315,88 @@ def http_transcription_smoke_spec() -> dict[str, Any]:
     }
 
 
-def youtube_transcription_spec(value: str) -> dict[str, Any]:
-    video_id = youtube_video_id(value)
-    canonical_url = canonical_youtube_url(video_id)
+def source_audio_media_type(container: Any) -> str:
+    return {
+        "aac": "audio/aac",
+        "flac": "audio/flac",
+        "m4a": "audio/mp4",
+        "mp3": "audio/mpeg",
+        "ogg": "audio/ogg",
+        "opus": "audio/ogg",
+        "wav": "audio/wav",
+        "webm": "audio/webm",
+    }.get(str(container).casefold(), "audio/x-unknown")
+
+
+def youtube_acquisition_provenance(acquisition: dict[str, Any]) -> dict[str, Any]:
+    video_id = acquisition["video_id"]
+    return {
+        "method": {
+            "id": "watchcraft.youtube.yt-dlp-local",
+            "version": "1",
+        },
+        "source": {
+            "media_asset_id": f"youtube:{video_id}",
+            "provider": "youtube",
+            "video_id": video_id,
+            "canonical_url": acquisition["canonical_url"],
+        },
+        "observed_at": int(time.time() * 1000),
+        "tool": {
+            "id": "yt-dlp",
+            "version": acquisition["yt_dlp_version"],
+        },
+        "media": {
+            "algorithm": acquisition["algorithm"],
+            "digest": acquisition["digest"],
+            "byte_length": acquisition["byte_length"],
+            "duration_seconds": acquisition["duration_seconds"],
+            "format_id": acquisition.get("format_id"),
+            "language": acquisition.get("audio_language"),
+            "container": acquisition.get("container"),
+        },
+    }
+
+
+def staged_transcription_spec(
+    *,
+    source: dict[str, Any],
+    source_audio: dict[str, Any],
+    acquisition: dict[str, Any],
+) -> dict[str, Any]:
+    reference = validated_artifact_reference(source_audio, allow_staged=True)
+    if (
+        reference.get("artifact_kind") != "source-audio"
+        or reference.get("schema") != SOURCE_AUDIO_SCHEMA
+    ):
+        raise ValueError("Staged transcription requires a source-audio artifact")
+    acquisition_source = acquisition.get("source") if isinstance(acquisition, dict) else None
+    acquisition_media = acquisition.get("media") if isinstance(acquisition, dict) else None
+    if (
+        not isinstance(source, dict)
+        or not isinstance(source.get("media_asset_id"), str)
+        or not isinstance(acquisition_source, dict)
+        or acquisition_source.get("media_asset_id") != source["media_asset_id"]
+        or not isinstance(acquisition_media, dict)
+        or acquisition_media.get("algorithm") != reference["algorithm"]
+        or acquisition_media.get("digest") != reference["digest"]
+        or acquisition_media.get("byte_length") != reference["byte_length"]
+    ):
+        raise ValueError("Acquisition provenance must bind the staged source audio")
     return {
         "operation": "generate",
         "artifact_kind": "transcript",
         "output_schema": {"id": "watchcraft.transcript", "version": 1},
         "handler": {
-            "id": YOUTUBE_TRANSCRIPTION_HANDLER[0],
-            "version": YOUTUBE_TRANSCRIPTION_HANDLER[1],
+            "id": STAGED_TRANSCRIPTION_HANDLER[0],
+            "version": STAGED_TRANSCRIPTION_HANDLER[1],
         },
-        "source": {"media_asset_id": f"youtube:{video_id}"},
-        "inputs": [],
+        "source": source,
+        "inputs": [reference],
         "dependencies": [],
         "configuration": {
-            "canonical_url": canonical_url,
-            "video_id": video_id,
+            "acquisition": acquisition,
             "maximum_bytes": YOUTUBE_TRANSCRIPTION_MAX_BYTES,
-            "maximum_duration_seconds": YOUTUBE_TRANSCRIPTION_MAX_DURATION_SECONDS,
-            "timeout_seconds": YOUTUBE_TRANSCRIPTION_TIMEOUT_SECONDS,
             "language": "en",
             "model": TRANSCRIPTION_SMOKE_MODEL,
         },
@@ -1294,8 +1539,7 @@ def run_smoke_command(args: argparse.Namespace, kind: str) -> int:
         spec = http_transcription_smoke_spec()
         request_kind = "mlx-transcription-http-smoke"
     else:
-        spec = youtube_transcription_spec(args.youtube_url)
-        request_kind = "mlx-transcription-youtube-smoke"
+        raise ValueError(f"Unsupported worker-only smoke kind {kind!r}")
     submitted = submit_spec(
         control,
         request=ephemeral_request(
@@ -1327,18 +1571,14 @@ def run_smoke_command(args: argparse.Namespace, kind: str) -> int:
         raise RuntimeError(
             f"Smoke artifact kind is {result.get('kind')!r}; expected {expected_kind!r}"
         )
-    if kind in {"transcription", "transcription-http", "transcription-youtube"}:
+    if kind in {"transcription", "transcription-http"}:
         if not result.get("text") or not result.get("segments"):
             raise RuntimeError("Transcription smoke returned no text or segments")
         provenance = result.get("provenance", {})
         expected_handler = (
             TRANSCRIPTION_SMOKE_HANDLER
             if kind == "transcription"
-            else (
-                HTTP_TRANSCRIPTION_SMOKE_HANDLER
-                if kind == "transcription-http"
-                else YOUTUBE_TRANSCRIPTION_HANDLER
-            )
+            else HTTP_TRANSCRIPTION_SMOKE_HANDLER
         )
         if provenance.get("handler_id") != expected_handler[0]:
             raise RuntimeError("Transcription smoke provenance does not identify the MLX handler")
@@ -1349,16 +1589,110 @@ def run_smoke_command(args: argparse.Namespace, kind: str) -> int:
                 or acquisition.get("byte_length") != HTTP_TRANSCRIPTION_SMOKE_BYTES
             ):
                 raise RuntimeError("HTTP transcription smoke provenance has invalid media identity")
-        if kind == "transcription-youtube":
-            acquisition = provenance.get("acquisition", {})
-            if (
-                acquisition.get("video_id") != spec["configuration"]["video_id"]
-                or acquisition.get("canonical_url")
-                != spec["configuration"]["canonical_url"]
-                or acquisition.get("byte_length", 0) < 1
-                or not re.fullmatch(r"[a-f0-9]{64}", acquisition.get("digest", ""))
-            ):
-                raise RuntimeError("YouTube transcription provenance has invalid media identity")
+    print(json.dumps({
+        "job_id": completed["job"]["job_id"],
+        "run_id": completed["run"]["run_id"],
+        "state": completed["job"]["state"],
+        "artifact": completed["job"]["result"],
+        "result": result,
+    }, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def run_local_youtube_transcription_smoke(args: argparse.Namespace) -> int:
+    control = operator_client(args.operator_token_source)
+    staging = r2_staging_writer(args.r2_staging_credentials_source)
+    video_id = youtube_video_id(args.youtube_url)
+    canonical_url = canonical_youtube_url(video_id)
+    reference = None
+    submitted = None
+    completed = None
+    with tempfile.TemporaryDirectory(prefix="watchcraft-youtube-acquisition-") as directory:
+        audio_path = Path(directory) / "source-audio"
+        print(f"acquiring {canonical_url} anonymously on this Mac", flush=True)
+        acquisition_result = download_youtube_audio(
+            video_id,
+            audio_path,
+            maximum_bytes=YOUTUBE_TRANSCRIPTION_MAX_BYTES,
+            maximum_duration_seconds=YOUTUBE_TRANSCRIPTION_MAX_DURATION_SECONDS,
+            timeout_seconds=YOUTUBE_TRANSCRIPTION_TIMEOUT_SECONDS,
+        )
+        acquisition = youtube_acquisition_provenance(acquisition_result)
+        reference = staging.put_staged_file(
+            audio_path,
+            {
+                "artifact_kind": "source-audio",
+                "media_type": source_audio_media_type(
+                    acquisition_result.get("container")
+                ),
+                "schema": SOURCE_AUDIO_SCHEMA,
+            },
+            acquisition_id=str(uuid.uuid4()),
+            expires_at=(
+                int(time.time() * 1000) + SOURCE_AUDIO_RETENTION_MILLISECONDS
+            ),
+        )
+    print(
+        f"staged {reference['byte_length']} bytes as {reference['digest']}",
+        flush=True,
+    )
+    spec = staged_transcription_spec(
+        source={"media_asset_id": f"youtube:{video_id}"},
+        source_audio=reference,
+        acquisition=acquisition,
+    )
+    try:
+        submitted = submit_spec(
+            control,
+            request=ephemeral_request(
+                "mlx-transcription-youtube-local-smoke",
+                spec["source"]["media_asset_id"],
+                args.retention_days,
+            ),
+            spec=spec,
+        )
+        job = submitted["job"]
+        print(f"submitted {job['job_id']} ({job['spec']['handler']['id']})", flush=True)
+        approved = control.post("/submissions/approve", {
+            "job_id": job["job_id"],
+            "command_id": str(uuid.uuid4()),
+            "expected_revision": job["revision"],
+            "actor": "watchcraft-author-cli:smoke",
+            "spec_sha256": job["spec_sha256"],
+        })
+        pending = dispatch_submission(control, approved["job"])
+        print(
+            f"dispatched {pending['job_id']} via {dispatch_workflow(pending)} "
+            f"generation {pending['dispatch']['generation']}",
+            flush=True,
+        )
+        completed = wait_for_terminal_job(
+            control,
+            job["job_id"],
+            args.timeout_seconds,
+        )
+        result = verified_json_result(
+            completed["job"],
+            args.r2_credentials_source,
+        )
+        provenance = result.get("provenance", {})
+        source_audio = provenance.get("source_audio", {})
+        if (
+            result.get("kind") != "watchcraft.transcript"
+            or not result.get("text")
+            or not result.get("segments")
+            or provenance.get("handler_id") != STAGED_TRANSCRIPTION_HANDLER[0]
+            or source_audio.get("digest") != reference["digest"]
+            or source_audio.get("byte_length") != reference["byte_length"]
+        ):
+            raise RuntimeError("Staged YouTube transcription returned an invalid result")
+    except Exception:
+        if submitted is None and reference is not None:
+            staging.delete(reference)
+        raise
+
+    staging.delete(reference)
+    print(f"deleted staged source audio {reference['key']}", flush=True)
     print(json.dumps({
         "job_id": completed["job"]["job_id"],
         "run_id": completed["run"]["run_id"],
@@ -1436,17 +1770,6 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         ),
     )
     http_transcription_submit.add_argument("--retention-days", type=int, default=7)
-    youtube_transcription_submit = commands.add_parser(
-        "submit-transcription-youtube",
-        parents=[credentials],
-        help="Submit MLX transcription of one public YouTube video",
-        description=(
-            "Submit one canonical YouTube video for bounded, temporary audio "
-            "acquisition and macOS/MLX transcription."
-        ),
-    )
-    youtube_transcription_submit.add_argument("youtube_url")
-    youtube_transcription_submit.add_argument("--retention-days", type=int, default=7)
     command_help = {
         "status": "Show the authoritative job and run aggregates",
         "approve": "Approve the immutable job specification",
@@ -1498,7 +1821,7 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         ),
         (
             "smoke-transcription-youtube",
-            "Run the complete single-video YouTube macOS/MLX transcription smoke",
+            "Acquire one YouTube audio stream locally, then run the cloud MLX smoke",
             1800,
         ),
     ):
@@ -1518,6 +1841,17 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
             default="auto",
         )
         if name == "smoke-transcription-youtube":
+            smoke.add_argument(
+                "--r2-staging-credentials-source",
+                choices=("auto", "keychain", "environment"),
+                default="auto",
+                help=(
+                    f"Temporary source-media uploader credential source: environment "
+                    f"uses {R2_STAGING_ACCESS_KEY_ENV} and {R2_STAGING_SECRET_KEY_ENV}; "
+                    "auto uses them when set and otherwise reads the macOS Keychain "
+                    "(default: auto)"
+                ),
+            )
             smoke.add_argument(
                 "youtube_url",
                 nargs="?",
@@ -1696,7 +2030,6 @@ def run_queue_command(args: argparse.Namespace) -> int:
         "smoke-analysis",
         "smoke-transcription",
         "smoke-transcription-http",
-        "smoke-transcription-youtube",
     }:
         return run_smoke_command(
             args,
@@ -1704,9 +2037,10 @@ def run_queue_command(args: argparse.Namespace) -> int:
                 "smoke-analysis": "analysis",
                 "smoke-transcription": "transcription",
                 "smoke-transcription-http": "transcription-http",
-                "smoke-transcription-youtube": "transcription-youtube",
             }[args.queue_command],
         )
+    if args.queue_command == "smoke-transcription-youtube":
+        return run_local_youtube_transcription_smoke(args)
 
     control = operator_client(args.operator_token_source)
     if args.queue_command == "registry-status":
@@ -1738,16 +2072,6 @@ def run_queue_command(args: argparse.Namespace) -> int:
         ), spec=spec)
         print(canonical_json({"job": result["job"], "run": result["run"]}))
         return 0
-    if args.queue_command == "submit-transcription-youtube":
-        spec = youtube_transcription_spec(args.youtube_url)
-        result = submit_spec(control, request=ephemeral_request(
-            "mlx-transcription-youtube",
-            spec["source"]["media_asset_id"],
-            args.retention_days,
-        ), spec=spec)
-        print(canonical_json({"job": result["job"], "run": result["run"]}))
-        return 0
-
     submission = control.post("/submissions/get", {"job_id": args.job_id})
     job = submission["job"]
     if args.queue_command == "status":

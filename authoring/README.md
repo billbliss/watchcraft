@@ -230,7 +230,7 @@ alternate JSON path may be supplied as their positional argument. Before activat
 the CLI uses the registry-admin credential to read the current activation-pointer
 revision and supplies it to the compare-and-set mutation. This preserves stale-write
 protection without requiring the operator to copy a revision manually. The immutable
-registry document version (for example `2026-09-05.1`) and the activation-pointer
+registry document version (for example `2026-09-05.3`) and the activation-pointer
 revision (for example `2`) are separate values. Advanced scripts may explicitly pass
 `--expected-active-revision`; the older `--expected-revision` spelling remains an
 alias. Publishing the same version with different content is rejected.
@@ -299,35 +299,45 @@ transcribes it with the same MLX implementation, then deletes the audio:
   --r2-credentials-source keychain
 ```
 
-Only the transcript JSON enters R2. The result provenance records the verified media
-identity but not a retained audio object. A later YouTube adapter can resolve a watch
-URL to a temporary media stream and hand that stream to the same bounded acquisition
-boundary; YouTube extraction and access behavior remain the single variable deferred
-by this smoke.
+Only the transcript JSON enters authoritative R2 storage. The result provenance
+records the verified media identity but not a retained audio object.
 
-The first provider-backed handler processes exactly one public YouTube video. Shorts,
-share, embed, and watch URLs are normalized to the stable video ID and canonical watch
-URL before the job specification is approved. The worker uses the pinned `yt-dlp`
-module from its Python environment, Node.js 22 for YouTube's JavaScript challenges,
-and FFmpeg already present on the macOS runner. It prefers the provider-designated
-original audio track, which avoids silently selecting one of YouTube's automatic
-dubs, and enforces reviewed transfer, duration, and timeout ceilings:
+Direct YouTube acquisition is intentionally not assigned to a GitHub-hosted worker:
+both `yt-dlp` on hosted macOS and full Chromium on hosted Ubuntu were denied before
+media playback. The single-video smoke instead acquires bounded audio anonymously on
+the operator's Mac, uploads it under an expiring private `staging/` key, and submits
+that exact digest as the input to the provider-neutral MLX handler. The cloud worker
+reads and verifies R2; it never contacts YouTube. Shorts, share, embed, and watch URLs
+are normalized to the stable video ID and canonical watch URL before acquisition:
 
 ```bash
 ./authoring/watchcraft-author queue smoke-transcription-youtube \
   --operator-token-source keychain \
+  --r2-staging-credentials-source keychain \
   --r2-credentials-source keychain
 ```
 
-The default two-minute fixture is `WPtpUu3uIUI`; one other public YouTube URL or ID may
-be supplied as the positional argument. Acquisition records the canonical identity,
-selected format and language, `yt-dlp` version, duration, byte count, and observed
-SHA-256. Temporary playback URLs are neither persisted nor included in the job.
-Provider access denial, disappearance, rate limiting, timeout, and general extraction
-failure are classified separately. As with the HTTP fixture, the compressed source
-audio exists only in the runner's temporary directory and only transcript JSON enters
-R2. This command still does not discover playlists, create a collection, or assign the
-video to any authored grouping.
+The default fixture is the 59-second `D_jOvlB_D7A`, previously acquired successfully
+while authoring the All About Lights collection. One other public YouTube URL or ID
+may be supplied as the positional argument. The local adapter invokes pinned `yt-dlp`
+with `--ignore-config`, no browser cookies, explicit transfer limits, and the
+provider-designated original audio track. It records canonical source identity,
+selected format and language, tool version, duration, byte count, and SHA-256. The
+approved job binds that provenance and the staged object reference. After a successful
+transcription and verified result download, the CLI deletes the staged audio. An R2
+lifecycle rule on the `staging/` prefix must remove interrupted or abandoned uploads
+after one day. This command still does not discover playlists, create a collection,
+or assign the video to an authored grouping.
+
+Local staging upload uses a write-capable credential distinct from the result reader.
+Its Keychain service is `Watchcraft R2 staging uploader`, with accounts
+`access-key-id` and `secret-access-key`. Select
+`--r2-staging-credentials-source environment` to use
+`WATCHCRAFT_R2_STAGING_ACCESS_KEY_ID` and
+`WATCHCRAFT_R2_STAGING_SECRET_ACCESS_KEY`; `auto` prefers that complete pair and
+otherwise uses Keychain. This bootstrap credential belongs only on the operator's
+machine. A future browser or multi-user acquisition client must receive a short-lived,
+job-scoped presigned upload instead.
 
 `queue result` resolves the artifact reference from the authoritative completed job,
 downloads the object from private R2, and verifies its declared byte length and SHA-256

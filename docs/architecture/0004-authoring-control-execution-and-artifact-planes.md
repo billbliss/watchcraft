@@ -258,24 +258,62 @@ worker downloads into ephemeral local storage, verifies the exact bytes before
 inference, transcribes through the same MLX implementation, and deletes the audio.
 Only the transcript artifact is uploaded to R2.
 
-The direct-HTTPS fixture stands in for the output of a future provider adapter, not
-for the adapter itself. For YouTube, that adapter will retain the canonical watch URL
-and video identity, resolve an attempt-scoped media stream and required request
-headers, and classify provider access failures. Temporary signed or session-bound
-media URLs are execution details and must not become durable source identity. Keeping
-the provider boundary separate lets the HTTP smoke validate bounded transport,
-content identity, cleanup, and inference before YouTube reachability is introduced.
+The direct-HTTPS fixture stands in for a source-media artifact produced by an
+acquisition client, not for a provider adapter running on the processing worker.
+Temporary signed or session-bound media URLs are execution details and must not become
+durable source identity. Keeping the provider boundary separate lets the HTTP smoke
+validate bounded transport, content identity, cleanup, and inference independently of
+provider reachability.
 
-The first YouTube-backed handler remains single-item and grouping-neutral. Its durable
-specification contains the stable YouTube video ID and canonical watch URL, while the
-macOS attempt resolves and downloads the provider-designated original audio under
-reviewed size, duration, and timeout ceilings. This matters for videos that advertise
-automatic dubbed tracks: `bestaudio` alone is not treated as adequate source-language
-selection. The attempt records the selected format, reported language, duration,
-observed byte length and SHA-256, and acquisition-tool version, but never the temporary
-playback URL. The compressed audio is deleted after MLX inference and is not uploaded
-to R2. Playlist traversal, course structure, collection authorship, and curricular
-placement remain explicitly outside this handler.
+### Edge acquisition and staged source media
+
+Provider acquisition and artifact processing are separate capabilities. Experiments
+on GitHub-hosted macOS and Ubuntu runners established that YouTube can reject both
+`yt-dlp` and a full headed Chromium session with `LOGIN_REQUIRED: Sign in to confirm
+you're not a bot` before media playback. Installing more extraction dependencies or
+waiting through real-time playback does not make shared cloud-runner network identity
+a dependable provider-access profile. The active registry therefore must not route
+direct YouTube acquisition to a GitHub-hosted processing profile.
+
+The first supported acquisition client is the single-operator CLI running on the
+operator's Mac and ordinary network. It acquires one approved public YouTube source
+anonymously, with `yt-dlp --ignore-config` and no browser cookies or account token,
+under explicit byte, duration, and timeout ceilings. It uploads the exact compressed
+audio to the private R2 `staging/` namespace and then submits a transcription job whose
+approved input is that staged object. Acquisition remains grouping-neutral: playlist
+traversal, course structure, collection authorship, and curricular placement are not
+part of this command.
+
+A staged source-media reference carries the same SHA-256, byte length, media type,
+artifact kind, and schema identity as an authoritative artifact reference, plus an
+`ephemeral` retention record with an absolute expiration time. Its key includes a
+random acquisition ID and the digest:
+
+```text
+staging/<acquisition-id>/sha256/<first-two-hex>/<remaining-hex>
+```
+
+The job specification also binds source-neutral acquisition provenance: acquisition
+method and version, stable source identity, observation time, acquisition-tool
+identity, selected format/language/container, duration, and the exact media digest and
+length. Approval therefore covers both the intended source and the bytes that the
+worker will process.
+
+The provider-neutral `mlx-whisper` handler receives one `source-audio` input. The
+GitHub-hosted macOS worker never contacts YouTube: it rejects expired, oversized,
+mis-typed, or provenance-inconsistent inputs; downloads the private R2 object; verifies
+its length and digest; transcribes it from ephemeral local storage; and publishes only
+the transcript as an authoritative content-addressed object. A successful one-command
+operator run deletes the staged audio after retrieving and verifying the transcript.
+An R2 lifecycle rule for the `staging/` prefix remains the backstop for interrupted
+clients and abandoned jobs; an expired input fails closed rather than being silently
+reacquired.
+
+This handoff does not assume a browser extension. A future extension, self-hosted
+runner, licensed provider integration, or direct file importer may produce the same
+typed input without changing transcription. Non-operator clients must receive a
+job-scoped presigned upload rather than persistent R2 credentials. Source rights and
+retention policy still determine whether any acquisition client may upload media.
 
 ### Operational retention and cleanup
 
@@ -319,9 +357,10 @@ an existing object is reused only after its stored length and downloaded digest 
 verified. Consumers never trust the key alone.
 
 Temporary acquisitions and diagnostic bundles use a separate `staging/` prefix with
-an explicit lifecycle policy. No lifecycle expiration applies to an object while an
-authoritative run or job references it. Garbage collection is reachability-based and
-must tolerate orphan uploads from failed attempts.
+an explicit expiration recorded in every reference. Workers reject expired inputs.
+Successful operator flows delete staged media immediately; a prefix lifecycle rule is
+the bounded backstop for interrupted uploads and abandoned runs. Authoritative objects
+remain reachability-managed and must not inherit the staging lifecycle rule.
 
 Source rights and privacy determine whether media itself may enter R2. A self-hosted
 worker may consume a local media binding and upload only permitted derived artifacts.

@@ -16,6 +16,10 @@ export interface ArtifactReference {
     version: number;
   };
   key: string;
+  retention?: {
+    class: "ephemeral";
+    expires_at: number;
+  };
 }
 
 export type AuthoringOperation = "generate" | "import" | "validate" | "compile";
@@ -444,14 +448,39 @@ export function parseRegistryResolutionSnapshot(value: unknown): RegistryResolut
   };
 }
 
-export function parseArtifactReference(value: unknown): ArtifactReference {
+export function parseArtifactReference(
+  value: unknown,
+  options: { allowEphemeral?: boolean } = {},
+): ArtifactReference {
   const candidate = objectValue(value, "Artifact reference");
   const schema = objectValue(candidate.schema, "Artifact schema");
   const digest = sha256Value(candidate.digest, "Artifact digest");
   const key = stringValue(candidate.key, "Artifact key");
-  const expectedKey = `objects/sha256/${digest.slice(0, 2)}/${digest.slice(2)}`;
-  if (key !== expectedKey) {
-    throw new TypeError(`Artifact key must be ${expectedKey}.`);
+  const authoritativeKey = `objects/sha256/${digest.slice(0, 2)}/${digest.slice(2)}`;
+  const retentionValue = candidate.retention;
+  let retention: ArtifactReference["retention"];
+  if (retentionValue === undefined) {
+    if (key !== authoritativeKey) {
+      throw new TypeError(`Authoritative artifact key must be ${authoritativeKey}.`);
+    }
+  } else {
+    if (!options.allowEphemeral) {
+      throw new TypeError("Ephemeral artifacts are allowed only as staged job inputs.");
+    }
+    const candidateRetention = objectValue(retentionValue, "Artifact retention");
+    if (candidateRetention.class !== "ephemeral") {
+      throw new TypeError("Staged artifact retention class must be ephemeral.");
+    }
+    retention = {
+      class: "ephemeral",
+      expires_at: integerValue(candidateRetention.expires_at, "Artifact expiration", 1),
+    };
+    const escapedDigest = `${digest.slice(0, 2)}/${digest.slice(2)}`;
+    const acquisitionId =
+      "[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
+    if (!new RegExp(`^staging/${acquisitionId}/sha256/${escapedDigest}$`).test(key)) {
+      throw new TypeError("Staged artifact key must bind its acquisition ID and digest.");
+    }
   }
   if (candidate.store !== "r2" || candidate.algorithm !== "sha256") {
     throw new TypeError("Artifact reference must use R2 and SHA-256.");
@@ -468,6 +497,7 @@ export function parseArtifactReference(value: unknown): ArtifactReference {
       version: integerValue(schema.version, "Artifact schema version", 1),
     },
     key,
+    ...(retention ? { retention } : {}),
   };
 }
 
@@ -513,8 +543,8 @@ export function parseAuthoringJobSpec(value: unknown): AuthoringJobSpec {
       ...(editionId === undefined ? {} : { edition_id: editionId }),
       ...(coordinateId === undefined ? {} : { coordinate_id: coordinateId }),
     },
-    inputs: inputs.map(parseArtifactReference),
-    dependencies: dependencies.map(parseArtifactReference),
+    inputs: inputs.map((input) => parseArtifactReference(input, { allowEphemeral: true })),
+    dependencies: dependencies.map((dependency) => parseArtifactReference(dependency)),
     configuration,
     ...(candidate.registry_snapshot === undefined
       ? {}

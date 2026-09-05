@@ -188,4 +188,16 @@ test("artifact output kind and schema must match the approved task", () => {
     attempt_id: "attempt-1",
     artifact: { ...transcriptArtifact(), artifact_kind: "chapters" },
   }, 202), /does not match/);
+  const artifact = transcriptArtifact();
+  assert.throws(() => applyJobCommand(job, {
+    type: "succeed",
+    command_id: "staged-success",
+    expected_revision: job.revision,
+    attempt_id: "attempt-1",
+    artifact: {
+      ...artifact,
+      key: `staging/00000000-0000-4000-8000-000000000000/sha256/${artifact.digest.slice(0, 2)}/${artifact.digest.slice(2)}`,
+      retention: { class: "ephemeral", expires_at: 2_000_000_000_000 },
+    },
+  }, 202), /Ephemeral artifacts are allowed only as staged job inputs/);
 });
