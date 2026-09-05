@@ -19,13 +19,21 @@ from typing import Any, Callable
 
 OPERATOR_KEYCHAIN_ACCOUNT = "watchcraft-operator-cli"
 OPERATOR_KEYCHAIN_SERVICE = "Watchcraft authoring operator token"
+REGISTRY_ADMIN_KEYCHAIN_ACCOUNT = "watchcraft-registry-admin-cli"
+REGISTRY_ADMIN_KEYCHAIN_SERVICE = "Watchcraft authoring registry admin token"
 R2_READER_KEYCHAIN_SERVICE = "Watchcraft R2 artifact reader"
 R2_READER_ACCESS_KEY_ACCOUNT = "access-key-id"
 R2_READER_SECRET_KEY_ACCOUNT = "secret-access-key"
 R2_READER_ACCESS_KEY_ENV = "WATCHCRAFT_R2_READER_ACCESS_KEY_ID"
 R2_READER_SECRET_KEY_ENV = "WATCHCRAFT_R2_READER_SECRET_ACCESS_KEY"
 DEFAULT_GITHUB_REPOSITORY = "billbliss/watchcraft"
+DEFAULT_REGISTRY_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "packages" / "authoring-pipeline" / "registry" / "default-registry.json"
+)
 ANALYSIS_HANDLER = ("watchcraft.analysis.lexical", "1")
+PYTHON_EXECUTION_PROFILE = ("python-portable", "1")
+PYTHON_EXECUTION_WORKFLOW = "authoring-worker.yml"
 WORD_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9'-]{2,}")
 STOP_WORDS = {
     "and", "are", "but", "for", "from", "has", "have", "into", "its", "not",
@@ -93,6 +101,36 @@ def operator_token(token_source: str = "auto") -> str:
         ) from error
     if len(token) != 64:
         raise RuntimeError("The Keychain operator token is not a 64-character token")
+    return token
+
+
+def registry_admin_token(token_source: str = "auto") -> str:
+    if token_source not in {"auto", "keychain", "environment"}:
+        raise ValueError(f"Unsupported registry admin token source {token_source!r}")
+    environment_name = "WATCHCRAFT_AUTHORING_REGISTRY_ADMIN_TOKEN"
+    explicit = os.environ.get(environment_name)
+    if token_source in {"auto", "environment"} and explicit:
+        if len(explicit) != 64:
+            raise RuntimeError(f"{environment_name} must contain 64 characters")
+        return explicit
+    if token_source == "environment":
+        raise RuntimeError(
+            f"{environment_name} is required when --registry-admin-token-source "
+            "environment is selected"
+        )
+    try:
+        token = keychain_password(
+            REGISTRY_ADMIN_KEYCHAIN_SERVICE,
+            REGISTRY_ADMIN_KEYCHAIN_ACCOUNT,
+        )
+    except RuntimeError as error:
+        raise RuntimeError(
+            f"Could not retrieve {REGISTRY_ADMIN_KEYCHAIN_SERVICE!r} from Keychain. "
+            f"Set {environment_name} and select --registry-admin-token-source "
+            "environment to use an explicit override"
+        ) from error
+    if len(token) != 64:
+        raise RuntimeError("The Keychain registry admin token is not a 64-character token")
     return token
 
 
@@ -196,6 +234,14 @@ def operator_client(token_source: str = "auto") -> AuthoringHttpClient:
     )
 
 
+def registry_admin_client(token_source: str = "auto") -> AuthoringHttpClient:
+    return AuthoringHttpClient(
+        production_convex_url(),
+        registry_admin_token(token_source),
+        "/authoring/admin",
+    )
+
+
 def worker_client() -> AuthoringHttpClient:
     deployment_url = os.environ.get("WATCHCRAFT_CONVEX_URL", "")
     token = os.environ.get("WATCHCRAFT_AUTHORING_WORKER_TOKEN", "")
@@ -246,6 +292,135 @@ def lexical_analysis(job: dict[str, Any]) -> dict[str, Any]:
 HANDLERS: dict[tuple[str, str], Callable[[dict[str, Any]], dict[str, Any]]] = {
     ANALYSIS_HANDLER: lexical_analysis,
 }
+LOCAL_HANDLER_CONTRACTS: dict[tuple[str, str], dict[str, Any]] = {
+    ANALYSIS_HANDLER: {
+        "id": ANALYSIS_HANDLER[0],
+        "version": ANALYSIS_HANDLER[1],
+        "operation": "generate",
+        "inputs": [],
+        "dependencies": [],
+        "output": {
+            "artifact_kind": "analysis",
+            "schema": {"id": "watchcraft.analysis.lexical", "version": 1},
+        },
+        "execution_profile": {
+            "id": PYTHON_EXECUTION_PROFILE[0],
+            "version": PYTHON_EXECUTION_PROFILE[1],
+        },
+        "lease_class": "short",
+        "retry_policy": {
+            "max_attempts": 3,
+            "retryable_classifications": ["artifact_store_failed", "lease_expired"],
+        },
+    },
+}
+LOCAL_EXECUTION_PROFILE = {
+    "id": PYTHON_EXECUTION_PROFILE[0],
+    "version": PYTHON_EXECUTION_PROFILE[1],
+    "dispatcher": {"kind": "github-actions", "workflow": PYTHON_EXECUTION_WORKFLOW},
+    "platform": {"os": "linux", "architecture": "x64"},
+    "dependency_class": "python-authoring-worker",
+    "cache_class": "pip",
+    "timeout_minutes": 15,
+    "lease_duration_ms": 300_000,
+    "heartbeat_interval_ms": 60_000,
+    "data_access": "public",
+    "secret_capabilities": ["convex.worker", "r2.read-write"],
+}
+
+
+class RegistrySupportError(RuntimeError):
+    """An approved registry resolution cannot be executed by this worker."""
+
+    def __init__(self, message: str, classification: str = "invalid_registry_snapshot"):
+        super().__init__(message)
+        self.classification = classification
+
+
+def validate_registry_snapshot(job: dict[str, Any]) -> dict[str, Any]:
+    spec = job.get("spec")
+    if not isinstance(spec, dict):
+        raise RegistrySupportError("Job specification is missing")
+    snapshot = spec.get("registry_snapshot")
+    if not isinstance(snapshot, dict):
+        raise RegistrySupportError("Job specification has no capability registry snapshot")
+    registry_digest = snapshot.get("registry_sha256")
+    if not isinstance(registry_digest, str) or not re.fullmatch(r"[a-f0-9]{64}", registry_digest):
+        raise RegistrySupportError("Job registry snapshot has an invalid digest")
+    handler = snapshot.get("handler")
+    profile = snapshot.get("execution_profile")
+    if not isinstance(handler, dict) or not isinstance(profile, dict):
+        raise RegistrySupportError("Job registry snapshot is incomplete")
+
+    handler_key = (spec.get("handler", {}).get("id"), spec.get("handler", {}).get("version"))
+    if handler_key not in HANDLERS:
+        raise RegistrySupportError(
+            f"Unsupported authoring handler {handler_key[0]}@{handler_key[1]}",
+            "unsupported_handler",
+        )
+    if handler != LOCAL_HANDLER_CONTRACTS[handler_key]:
+        raise RegistrySupportError(
+            "Resolved handler contract is unsupported by this worker",
+            "unsupported_handler",
+        )
+    if handler.get("operation") != spec.get("operation") or handler.get("output") != {
+        "artifact_kind": spec.get("artifact_kind"), "schema": spec.get("output_schema")
+    }:
+        raise RegistrySupportError("Resolved handler contract does not match the job specification")
+    for field in ("inputs", "dependencies"):
+        references = spec.get(field)
+        contracts = handler.get(field)
+        if not isinstance(references, list) or len(references) != len(contracts):
+            raise RegistrySupportError(
+                f"Resolved handler {field} do not match the job specification"
+            )
+        for reference, contract in zip(references, contracts):
+            if not isinstance(reference, dict) or {
+                "artifact_kind": reference.get("artifact_kind"),
+                "schema": reference.get("schema"),
+            } != contract:
+                raise RegistrySupportError(
+                    f"Resolved handler {field} do not match the job specification"
+                )
+
+    expected_profile = (
+        os.environ.get("WATCHCRAFT_EXECUTION_PROFILE_ID", PYTHON_EXECUTION_PROFILE[0]),
+        os.environ.get("WATCHCRAFT_EXECUTION_PROFILE_VERSION", PYTHON_EXECUTION_PROFILE[1]),
+    )
+    profile_key = (profile.get("id"), profile.get("version"))
+    if profile_key != expected_profile:
+        raise RegistrySupportError(
+            f"Worker profile {expected_profile[0]}@{expected_profile[1]} cannot execute "
+            f"{profile_key[0]}@{profile_key[1]}",
+            "unsupported_execution_profile",
+        )
+    if handler.get("execution_profile") != {
+        "id": profile_key[0], "version": profile_key[1]
+    }:
+        raise RegistrySupportError("Resolved handler references a different execution profile")
+    if profile != LOCAL_EXECUTION_PROFILE:
+        raise RegistrySupportError(
+            "Execution profile contract is unsupported by this worker",
+            "unsupported_execution_profile",
+        )
+    return profile
+
+
+def dispatch_workflow(job: dict[str, Any]) -> str:
+    snapshot = job.get("spec", {}).get("registry_snapshot")
+    if snapshot is None:
+        return PYTHON_EXECUTION_WORKFLOW
+    try:
+        dispatcher = snapshot["execution_profile"]["dispatcher"]
+        kind = dispatcher["kind"]
+        workflow = dispatcher["workflow"]
+    except (KeyError, TypeError) as error:
+        raise RuntimeError("Approved job has an invalid execution dispatcher") from error
+    if kind != "github-actions" or not isinstance(workflow, str):
+        raise RuntimeError("Approved job has an unsupported execution dispatcher")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+\.ya?ml", workflow):
+        raise RuntimeError("Approved job has an unsafe GitHub Actions workflow name")
+    return workflow
 
 
 class R2ArtifactStore:
@@ -390,6 +565,13 @@ def run_worker(*, job_id: str, spec_sha256: str, dispatch_generation: int, expec
         "github_run_id": run_id,
         "github_run_url": run_url,
     })
+    snapshot = job.get("spec", {}).get("registry_snapshot", {})
+    configured_lease = snapshot.get("execution_profile", {}).get("lease_duration_ms")
+    lease_duration_ms = (
+        configured_lease
+        if isinstance(configured_lease, int) and 1_000 <= configured_lease <= 3_600_000
+        else 300_000
+    )
     attempt_id = str(uuid.uuid4())
     job = control.post("/jobs/claim", {
         "job_id": job_id,
@@ -399,9 +581,24 @@ def run_worker(*, job_id: str, spec_sha256: str, dispatch_generation: int, expec
         "owner": f"github-actions:{run_id}",
         "spec_sha256": spec_sha256,
         "dispatch_generation": dispatch_generation,
-        "lease_duration_ms": 300_000,
+        "lease_duration_ms": lease_duration_ms,
         "github_run_id": run_id,
     })
+    try:
+        validate_registry_snapshot(job)
+    except RegistrySupportError as error:
+        control.post("/jobs/fail", {
+            "job_id": job_id,
+            "command_id": f"{attempt_id}:registry-reject",
+            "expected_revision": job["revision"],
+            "attempt_id": attempt_id,
+            "failure": {
+                "classification": error.classification,
+                "message": str(error)[:500],
+                "retryable": False,
+            },
+        })
+        raise
     job = control.post("/jobs/start", {
         "job_id": job_id,
         "command_id": f"{attempt_id}:start",
@@ -409,21 +606,7 @@ def run_worker(*, job_id: str, spec_sha256: str, dispatch_generation: int, expec
         "attempt_id": attempt_id,
     })
     handler_key = (job["spec"]["handler"]["id"], job["spec"]["handler"]["version"])
-    handler = HANDLERS.get(handler_key)
-    if handler is None:
-        error = RuntimeError(f"Unsupported authoring handler {handler_key[0]}@{handler_key[1]}")
-        control.post("/jobs/fail", {
-            "job_id": job_id,
-            "command_id": f"{attempt_id}:unsupported-handler",
-            "expected_revision": job["revision"],
-            "attempt_id": attempt_id,
-            "failure": {
-                "classification": "unsupported_handler",
-                "message": str(error),
-                "retryable": False,
-            },
-        })
-        raise error
+    handler = HANDLERS[handler_key]
     try:
         output = handler(job)
     except Exception as error:
@@ -504,6 +687,17 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
             "reads the macOS Keychain (default: auto)"
         ),
     )
+    admin_credentials = argparse.ArgumentParser(add_help=False)
+    admin_credentials.add_argument(
+        "--registry-admin-token-source",
+        choices=("auto", "keychain", "environment"),
+        default="auto",
+        help=(
+            "Registry administrator credential source: environment requires "
+            "WATCHCRAFT_AUTHORING_REGISTRY_ADMIN_TOKEN; auto uses it when set and "
+            "otherwise reads the macOS Keychain (default: auto)"
+        ),
+    )
     submit = commands.add_parser(
         "submit-analysis",
         parents=[credentials],
@@ -555,10 +749,78 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         metavar="PATH",
         help="Write the exact verified bytes to a new file instead of displaying JSON",
     )
+    registry_status = commands.add_parser(
+        "registry-status",
+        parents=[credentials],
+        help="Show the active capability registry",
+        description="Show the active immutable capability registry for an environment.",
+    )
+    registry_status.add_argument("--environment", default="production")
+    for name, help_text in {
+        "registry-publish": "Publish an immutable capability registry version",
+        "registry-activate": "Activate a published capability registry version",
+    }.items():
+        command = commands.add_parser(
+            name,
+            parents=[admin_credentials],
+            help=help_text,
+            description=help_text + ".",
+        )
+        command.add_argument(
+            "registry_file",
+            nargs="?",
+            type=Path,
+            default=DEFAULT_REGISTRY_PATH,
+            help=f"Registry JSON document (default: {DEFAULT_REGISTRY_PATH})",
+        )
+        if name == "registry-activate":
+            command.add_argument("--environment", default="production")
+            command.add_argument("--expected-revision", required=True, type=int)
+
+
+def load_registry_document(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"Could not read capability registry {path}: {error}") from error
+    if not isinstance(value, dict):
+        raise RuntimeError("Capability registry must be a JSON object")
+    if (
+        value.get("kind") != "watchcraft.authoring-capability-registry"
+        or value.get("schema_version") != 1
+        or not isinstance(value.get("registry_version"), str)
+    ):
+        raise RuntimeError("Capability registry has an unsupported schema")
+    return value
 
 
 def run_queue_command(args: argparse.Namespace) -> int:
+    if args.queue_command in {"registry-publish", "registry-activate"}:
+        registry = load_registry_document(args.registry_file)
+        control = registry_admin_client(args.registry_admin_token_source)
+        if args.queue_command == "registry-publish":
+            result = control.post("/registry/publish", {
+                "command_id": str(uuid.uuid4()),
+                "actor": "watchcraft-author-cli",
+                "registry": registry,
+            })
+        else:
+            result = control.post("/registry/activate", {
+                "environment": args.environment,
+                "command_id": str(uuid.uuid4()),
+                "actor": "watchcraft-author-cli",
+                "registry_version": registry["registry_version"],
+                "registry_sha256": sha256_hex(canonical_json(registry)),
+                "expected_revision": args.expected_revision,
+            })
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+
     control = operator_client(args.operator_token_source)
+    if args.queue_command == "registry-status":
+        result = control.post("/registry/get-active", {"environment": args.environment})
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
     if args.queue_command == "submit-analysis":
         if not 1 <= args.max_topics <= 20:
             raise ValueError("--max-topics must be between 1 and 20")
@@ -634,8 +896,9 @@ def run_queue_command(args: argparse.Namespace) -> int:
             raise RuntimeError(
                 f"Job {job['job_id']} is {job['state']}; expected ready or dispatch_pending"
             )
+        workflow = dispatch_workflow(pending)
         subprocess.run([
-            "gh", "workflow", "run", "authoring-worker.yml", "--ref", "main",
+            "gh", "workflow", "run", workflow, "--ref", "main",
             "--repo", DEFAULT_GITHUB_REPOSITORY,
             "-f", f"job_id={pending['job_id']}",
             "-f", f"spec_sha256={pending['spec_sha256']}",

@@ -5,6 +5,9 @@ import { convexTest } from "convex-test";
 
 import {
   artifactKey,
+  capabilityRegistrySha256,
+  DEFAULT_CAPABILITY_REGISTRY,
+  resolveJobSpecAgainstRegistry,
   sha256Hex,
   syntheticTranscriptJobSpec,
 } from "../packages/authoring-pipeline/src/index.ts";
@@ -18,10 +21,12 @@ const modules = import.meta.glob([
 ]);
 const workerToken = "test-worker-token-that-is-not-a-production-secret";
 const operatorToken = "test-operator-token-that-is-not-a-production-secret";
+const registryAdminToken = "test-registry-admin-token-that-is-not-a-production-secret";
 
 beforeEach(() => {
   vi.stubEnv("AUTHORING_WORKER_TOKEN_SHA256", sha256Hex(workerToken));
   vi.stubEnv("AUTHORING_OPERATOR_TOKEN_SHA256", sha256Hex(operatorToken));
+  vi.stubEnv("AUTHORING_REGISTRY_ADMIN_TOKEN_SHA256", sha256Hex(registryAdminToken));
 });
 
 afterEach(() => {
@@ -37,6 +42,26 @@ async function post(t: ReturnType<typeof convexTest>, path: string, body: unknow
     },
     body: JSON.stringify(body),
   });
+}
+
+async function publishAndActivateDefaultRegistry(t: ReturnType<typeof convexTest>) {
+  const registrySha256 = capabilityRegistrySha256(DEFAULT_CAPABILITY_REGISTRY);
+  const published = await post(t, "/authoring/admin/registry/publish", {
+    command_id: "publish-default-registry",
+    actor: "test-registry-admin",
+    registry: DEFAULT_CAPABILITY_REGISTRY,
+  }, registryAdminToken);
+  expect(published.status).toBe(200);
+  const activated = await post(t, "/authoring/admin/registry/activate", {
+    environment: "production",
+    command_id: "activate-default-registry",
+    actor: "test-registry-admin",
+    registry_version: DEFAULT_CAPABILITY_REGISTRY.registry_version,
+    registry_sha256: registrySha256,
+    expected_revision: 0,
+  }, registryAdminToken);
+  expect(activated.status).toBe(200);
+  return activated.json();
 }
 
 test("worker endpoints reject missing or incorrect credentials", async () => {
@@ -218,6 +243,129 @@ test("generic control mutations persist a retryable failure, retry, and cancella
   expect(snapshot.jobs[0]?.aggregate).toEqual(cancelled);
 });
 
+test("registry publication is immutable and activation is environment-scoped and compare-and-set", async () => {
+  const t = convexTest(schema, modules);
+  const unauthorized = await post(t, "/authoring/admin/registry/publish", {
+    command_id: "publish-default-registry",
+    actor: "wrong",
+    registry: DEFAULT_CAPABILITY_REGISTRY,
+  }, operatorToken);
+  expect(unauthorized.status).toBe(401);
+
+  const active = await publishAndActivateDefaultRegistry(t) as any;
+  expect(active).toMatchObject({
+    environment: "production",
+    revision: 1,
+    registry_version: DEFAULT_CAPABILITY_REGISTRY.registry_version,
+  });
+
+  const operatorView = await post(t, "/authoring/operator/registry/get-active", {
+    environment: "production",
+  }, operatorToken);
+  expect(operatorView.status).toBe(200);
+  const view = await operatorView.json() as any;
+  expect(view.active).toEqual(active);
+  expect(view.registry).toEqual(DEFAULT_CAPABILITY_REGISTRY);
+
+  const changed = structuredClone(DEFAULT_CAPABILITY_REGISTRY);
+  changed.execution_profiles[0].timeout_minutes += 1;
+  const overwrite = await post(t, "/authoring/admin/registry/publish", {
+    command_id: "publish-mutated-registry",
+    actor: "test-registry-admin",
+    registry: changed,
+  }, registryAdminToken);
+  expect(overwrite.status).toBe(409);
+
+  const staleActivation = await post(t, "/authoring/admin/registry/activate", {
+    environment: "production",
+    command_id: "stale-activation",
+    actor: "test-registry-admin",
+    registry_version: DEFAULT_CAPABILITY_REGISTRY.registry_version,
+    registry_sha256: capabilityRegistrySha256(DEFAULT_CAPABILITY_REGISTRY),
+    expected_revision: 0,
+  }, registryAdminToken);
+  expect(staleActivation.status).toBe(409);
+  const events = await t.run((ctx) => ctx.db.query("authoring_registry_events").collect());
+  expect(events).toHaveLength(1);
+  expect(events[0]).toMatchObject({
+    actor: "test-registry-admin",
+    from_revision: 0,
+    to_registry_sha256: capabilityRegistrySha256(DEFAULT_CAPABILITY_REGISTRY),
+  });
+});
+
+test("registered lease and retry policy are enforced by the control plane", async () => {
+  const t = convexTest(schema, modules);
+  const spec = resolveJobSpecAgainstRegistry({
+    operation: "generate",
+    artifact_kind: "analysis",
+    output_schema: { id: "watchcraft.analysis.lexical", version: 1 },
+    handler: { id: "watchcraft.analysis.lexical", version: "1" },
+    source: { media_asset_id: "lesson-policy" },
+    inputs: [],
+    dependencies: [],
+    configuration: { title: "Policy", text: "Policy test" },
+  }, DEFAULT_CAPABILITY_REGISTRY);
+  const created = await t.mutation(internal.authoringInternal.createJob, {
+    job_id: "job-policy",
+    run_id: "run-policy",
+    command_id: "create-policy",
+    spec,
+  }) as any;
+  const awaiting = await t.mutation(internal.authoringInternal.requestApproval, {
+    job_id: created.job_id,
+    command_id: "request-policy",
+    expected_revision: created.revision,
+  }) as any;
+  const ready = await t.mutation(internal.authoringInternal.approveJob, {
+    job_id: created.job_id,
+    command_id: "approve-policy",
+    expected_revision: awaiting.revision,
+    actor: "operator",
+    spec_sha256: created.spec_sha256,
+  }) as any;
+  const pending = await t.mutation(internal.authoringInternal.requestDispatch, {
+    job_id: created.job_id,
+    command_id: "pending-policy",
+    expected_revision: ready.revision,
+  }) as any;
+  const dispatched = await t.mutation(internal.authoringInternal.recordDispatch, {
+    job_id: created.job_id,
+    command_id: "dispatch-policy",
+    expected_revision: pending.revision,
+    generation: 1,
+    github_run_id: "policy-run",
+    github_run_url: "https://github.com/billbliss/watchcraft/actions/runs/policy-run",
+  }) as any;
+  const claimed = await t.mutation(internal.authoringInternal.claimJob, {
+    job_id: created.job_id,
+    command_id: "claim-policy",
+    expected_revision: dispatched.revision,
+    attempt_id: "attempt-policy",
+    owner: "worker",
+    spec_sha256: created.spec_sha256,
+    dispatch_generation: 1,
+    lease_duration_ms: 1_000,
+  }) as any;
+  expect(claimed.lease.expires_at - claimed.lease.acquired_at).toBe(300_000);
+
+  const failed = await t.mutation(internal.authoringInternal.failJob, {
+    job_id: created.job_id,
+    command_id: "fail-policy",
+    expected_revision: claimed.revision,
+    attempt_id: "attempt-policy",
+    failure: {
+      classification: "unregistered_transient_failure",
+      message: "The worker cannot make this retryable by assertion.",
+      retryable: true,
+    },
+  }) as any;
+  expect(failed).toMatchObject({
+    state: "terminal_failed",
+    failure: { classification: "unregistered_transient_failure", retryable: false },
+  });
+});
+
 test("operator and worker credentials drive a persisted non-transcript analysis run", async () => {
   const t = convexTest(schema, modules);
   const spec = {
@@ -243,6 +391,19 @@ test("operator and worker credentials drive a persisted non-transcript analysis 
   }, workerToken);
   expect(rejected.status).toBe(401);
 
+  const missingRegistry = await post(t, "/authoring/operator/submissions/submit", {
+    job_id: "analysis-job",
+    run_id: "analysis-run",
+    command_prefix: "submit",
+    request: { kind: "lexical-analysis" },
+    spec,
+  }, operatorToken);
+  expect(missingRegistry.status).toBe(409);
+  await expect(missingRegistry.json()).resolves.toMatchObject({
+    error: expect.stringContaining("No active authoring capability registry"),
+  });
+  await publishAndActivateDefaultRegistry(t);
+
   const submittedResponse = await post(t, "/authoring/operator/submissions/submit", {
     job_id: "analysis-job",
     run_id: "analysis-run",
@@ -253,6 +414,10 @@ test("operator and worker credentials drive a persisted non-transcript analysis 
   expect(submittedResponse.status).toBe(200);
   const submitted = await submittedResponse.json() as any;
   expect(submitted.job).toMatchObject({ state: "awaiting_approval", revision: 2 });
+  expect(submitted.job.spec.registry_snapshot).toMatchObject({
+    registry_version: DEFAULT_CAPABILITY_REGISTRY.registry_version,
+    execution_profile: { id: "python-portable", version: "1" },
+  });
   expect(submitted.run).toMatchObject({ state: "planned", revision: 2 });
 
   const changedReplay = await post(t, "/authoring/operator/submissions/submit", {

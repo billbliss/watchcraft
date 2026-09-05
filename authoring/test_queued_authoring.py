@@ -8,11 +8,61 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from jsonschema import Draft202012Validator
+
 import queued_authoring
 from watchcraft_author import build_parser, main
 
 
+def registry_snapshot():
+    return {
+        "registry_version": "2026-09-04.1",
+        "registry_sha256": "c" * 64,
+        "handler": {
+            "id": "watchcraft.analysis.lexical",
+            "version": "1",
+            "operation": "generate",
+            "inputs": [],
+            "dependencies": [],
+            "output": {
+                "artifact_kind": "analysis",
+                "schema": {"id": "watchcraft.analysis.lexical", "version": 1},
+            },
+            "execution_profile": {"id": "python-portable", "version": "1"},
+            "lease_class": "short",
+            "retry_policy": {
+                "max_attempts": 3,
+                "retryable_classifications": ["artifact_store_failed", "lease_expired"],
+            },
+        },
+        "execution_profile": {
+            "id": "python-portable",
+            "version": "1",
+            "dispatcher": {"kind": "github-actions", "workflow": "authoring-worker.yml"},
+            "platform": {"os": "linux", "architecture": "x64"},
+            "dependency_class": "python-authoring-worker",
+            "cache_class": "pip",
+            "timeout_minutes": 15,
+            "lease_duration_ms": 300_000,
+            "heartbeat_interval_ms": 60_000,
+            "data_access": "public",
+            "secret_capabilities": ["convex.worker", "r2.read-write"],
+        },
+    }
+
+
 class QueuedAuthoringTests(unittest.TestCase):
+    def test_default_capability_registry_conforms_to_its_language_neutral_schema(self):
+        registry_directory = queued_authoring.DEFAULT_REGISTRY_PATH.parent
+        schema = json.loads(
+            (registry_directory / "authoring-capability-registry.schema.json").read_text()
+        )
+        registry = queued_authoring.load_registry_document(
+            queued_authoring.DEFAULT_REGISTRY_PATH
+        )
+        Draft202012Validator.check_schema(schema)
+        Draft202012Validator(schema).validate(registry)
+
     def test_queue_parser_exposes_non_transcript_analysis_submission(self):
         args = build_parser().parse_args([
             "queue", "submit-analysis", "--title", "Color workflow",
@@ -64,6 +114,14 @@ class QueuedAuthoringTests(unittest.TestCase):
                 token = queued_authoring.operator_token("keychain")
         self.assertEqual(token, "b" * 64)
         self.assertIn("Watchcraft authoring operator token", run.call_args.args[0])
+
+    def test_registry_admin_token_uses_a_separate_keychain_item(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("queued_authoring.subprocess.run") as run:
+                run.return_value = Mock(stdout="d" * 64 + "\n")
+                token = queued_authoring.registry_admin_token("keychain")
+        self.assertEqual(token, "d" * 64)
+        self.assertIn("Watchcraft authoring registry admin token", run.call_args.args[0])
 
     def test_r2_reader_credentials_support_environment_and_keychain_sources(self):
         environment = {
@@ -153,6 +211,7 @@ class QueuedAuthoringTests(unittest.TestCase):
             "revision": 3,
             "state": "ready",
             "spec_sha256": "a" * 64,
+            "spec": {"registry_snapshot": registry_snapshot()},
         }
         pending = {
             **job,
@@ -175,6 +234,34 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertIn("spec_sha256=" + "a" * 64, command)
         self.assertIn("dispatch_generation=1", command)
         self.assertIn("expected_revision=4", command)
+        self.assertEqual(command[3], "authoring-worker.yml")
+
+    def test_dispatch_rejects_an_unsafe_workflow_name(self):
+        job = {"spec": {"registry_snapshot": registry_snapshot()}}
+        job["spec"]["registry_snapshot"]["execution_profile"]["dispatcher"]["workflow"] = "../bad.yml"
+        with self.assertRaisesRegex(RuntimeError, "unsafe"):
+            queued_authoring.dispatch_workflow(job)
+
+    def test_registry_commands_separate_operator_visibility_from_admin_changes(self):
+        status = build_parser().parse_args(["queue", "registry-status"])
+        self.assertEqual(status.operator_token_source, "auto")
+        self.assertEqual(status.environment, "production")
+        activate = build_parser().parse_args([
+            "queue", "registry-activate", "--registry-admin-token-source", "keychain",
+            "--expected-revision", "0",
+        ])
+        self.assertEqual(activate.registry_admin_token_source, "keychain")
+        self.assertEqual(activate.registry_file, queued_authoring.DEFAULT_REGISTRY_PATH)
+
+        client = Mock()
+        client.post.return_value = {"registry_version": "2026-09-04.1"}
+        with patch("queued_authoring.registry_admin_client", return_value=client):
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(queued_authoring.run_queue_command(activate), 0)
+        path, payload = client.post.call_args.args
+        self.assertEqual(path, "/registry/activate")
+        self.assertEqual(payload["expected_revision"], 0)
+        self.assertRegex(payload["registry_sha256"], r"^[a-f0-9]{64}$")
 
     def test_result_displays_verified_json_from_the_authoritative_reference(self):
         payload = queued_authoring.canonical_json({
@@ -243,11 +330,14 @@ class QueuedAuthoringTests(unittest.TestCase):
             "output_schema": {"id": "watchcraft.analysis.lexical", "version": 1},
             "handler": {"id": "watchcraft.analysis.lexical", "version": "1"},
             "source": {"media_asset_id": "lesson-1"},
+            "inputs": [],
+            "dependencies": [],
             "configuration": {
                 "title": "Color workflow",
                 "text": "Color balance improves exposure balance.",
                 "max_topics": 3,
             },
+            "registry_snapshot": registry_snapshot(),
         }
         job = {
             "job_id": "job-1",
@@ -318,6 +408,52 @@ class QueuedAuthoringTests(unittest.TestCase):
             "/jobs/start",
             "/jobs/succeed",
         ])
+
+    def test_python_worker_rejects_a_job_routed_to_another_execution_profile(self):
+        spec = {
+            "operation": "generate",
+            "artifact_kind": "analysis",
+            "output_schema": {"id": "watchcraft.analysis.lexical", "version": 1},
+            "handler": {"id": "watchcraft.analysis.lexical", "version": "1"},
+            "source": {"media_asset_id": "lesson-1"},
+            "inputs": [],
+            "dependencies": [],
+            "configuration": {},
+            "registry_snapshot": registry_snapshot(),
+        }
+        spec["registry_snapshot"]["execution_profile"]["id"] = "macos-mlx"
+        job = {
+            "job_id": "job-1",
+            "revision": 4,
+            "spec_sha256": "a" * 64,
+            "spec": spec,
+        }
+
+        class Control:
+            def __init__(self):
+                self.failure = None
+
+            def post(self, path, payload):
+                if path == "/jobs/dispatch/record":
+                    return {**job, "revision": 5, "state": "dispatched"}
+                if path == "/jobs/claim":
+                    return {**job, "revision": 6, "state": "claimed"}
+                if path == "/jobs/fail":
+                    self.failure = payload["failure"]
+                    return {**job, "revision": 7, "state": "terminal_failed"}
+                raise AssertionError(path)
+
+        control = Control()
+        with patch("queued_authoring.worker_client", return_value=control):
+            with self.assertRaisesRegex(queued_authoring.RegistrySupportError, "cannot execute"):
+                queued_authoring.run_worker(
+                    job_id="job-1",
+                    spec_sha256="a" * 64,
+                    dispatch_generation=1,
+                    expected_revision=4,
+                )
+        self.assertEqual(control.failure["classification"], "unsupported_execution_profile")
+        self.assertFalse(control.failure["retryable"])
 
 
 if __name__ == "__main__":

@@ -197,6 +197,41 @@ otherwise uses Keychain. `keychain` deliberately ignores the environment overrid
 `environment` requires it. Raw token values are not accepted as command-line arguments
 because they can leak through shell history and process listings.
 
+Handler availability and runner routing come from an immutable capability-registry
+document. The checked-in bootstrap document is
+`packages/authoring-pipeline/registry/default-registry.json`; its language-neutral
+contract is the adjacent JSON Schema. Convex stores published versions and a separate
+revisioned active pointer for each environment. Deploying code never publishes or
+activates this document implicitly.
+
+Registry publication and activation use a credential distinct from both operator and
+worker credentials. On macOS the CLI reads the raw value from the login Keychain item
+named `Watchcraft authoring registry admin token`, account
+`watchcraft-registry-admin-cli`. Convex stores only its SHA-256 verifier as
+`AUTHORING_REGISTRY_ADMIN_TOKEN_SHA256`. An explicit override may use
+`WATCHCRAFT_AUTHORING_REGISTRY_ADMIN_TOKEN` with
+`--registry-admin-token-source environment`.
+
+After deploying registry-aware control-plane code, bootstrap production explicitly:
+
+```bash
+./authoring/watchcraft-author queue registry-publish \
+  --registry-admin-token-source keychain
+
+./authoring/watchcraft-author queue registry-activate \
+  --registry-admin-token-source keychain \
+  --expected-revision 0
+
+./authoring/watchcraft-author queue registry-status \
+  --operator-token-source keychain
+```
+
+`registry-publish` and `registry-activate` default to the checked-in document; an
+alternate JSON path may be supplied as their positional argument. Activation requires
+the currently observed pointer revision, so a stale administrator cannot overwrite a
+newer selection. Use the revision returned by `registry-status` after the first
+activation. Publishing the same version with different content is rejected.
+
 The first Python worker handler produces a deterministic lexical-analysis artifact.
 It is an infrastructure and protocol proof, not the model-backed instructional-video
 analysis used by the existing local authoring commands. Submit, approve, dispatch, and
@@ -213,7 +248,9 @@ inspect it separately:
 ./authoring/watchcraft-author queue result JOB_ID
 ```
 
-`dispatch` starts the manual `Authoring worker` GitHub workflow with identifiers only.
+`dispatch` starts the reviewed GitHub workflow named by the approved execution-profile
+snapshot, with identifiers only. The initial `python-portable@1` profile selects the
+`Authoring worker` workflow on Ubuntu.
 The Python worker records the GitHub run, claims a lease, selects its handler from the
 approved specification, writes and verifies the result in private R2, and reports the
 authoritative artifact reference to Convex. `queue retry JOB_ID` and

@@ -59,6 +59,7 @@ function queryRoute(functionReference: any, verifierName: string) {
 
 const workerVerifier = "AUTHORING_WORKER_TOKEN_SHA256";
 const operatorVerifier = "AUTHORING_OPERATOR_TOKEN_SHA256";
+const registryAdminVerifier = "AUTHORING_REGISTRY_ADMIN_TOKEN_SHA256";
 
 http.route({ path: "/authoring/smoke/prepare", method: "POST", handler: mutationRoute(internal.authoringInternal.prepareSmokeJob, workerVerifier) });
 http.route({ path: "/authoring/jobs/dispatch/record", method: "POST", handler: mutationRoute(internal.authoringInternal.recordDispatch, workerVerifier) });
@@ -74,5 +75,9 @@ http.route({ path: "/authoring/operator/submissions/approve", method: "POST", ha
 http.route({ path: "/authoring/operator/submissions/request-dispatch", method: "POST", handler: mutationRoute(internal.authoringInternal.requestDispatch, operatorVerifier) });
 http.route({ path: "/authoring/operator/submissions/cancel", method: "POST", handler: mutationRoute(internal.authoringInternal.cancelJob, operatorVerifier) });
 http.route({ path: "/authoring/operator/submissions/retry", method: "POST", handler: mutationRoute(internal.authoringInternal.retryJob, operatorVerifier) });
+http.route({ path: "/authoring/operator/registry/get-active", method: "POST", handler: queryRoute(internal.authoringRegistry.getActiveRegistry, operatorVerifier) });
+
+http.route({ path: "/authoring/admin/registry/publish", method: "POST", handler: mutationRoute(internal.authoringRegistry.publishRegistry, registryAdminVerifier) });
+http.route({ path: "/authoring/admin/registry/activate", method: "POST", handler: mutationRoute(internal.authoringRegistry.activateRegistry, registryAdminVerifier) });
 
 export default http;

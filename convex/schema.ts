@@ -28,4 +28,30 @@ export default defineSchema({
     recorded_at: v.number(),
     result: v.any(),
   }).index("by_run_command", ["run_id", "command_id"]),
+  authoring_registry_versions: defineTable({
+    registry_version: v.string(),
+    registry_sha256: v.string(),
+    document: v.any(),
+    created_at: v.number(),
+    created_by: v.string(),
+    command_id: v.string(),
+  })
+    .index("by_registry_version", ["registry_version"])
+    .index("by_registry_digest", ["registry_sha256"])
+    .index("by_publish_command", ["command_id"]),
+  authoring_registry_active: defineTable({
+    environment: v.string(),
+    aggregate: v.any(),
+  }).index("by_environment", ["environment"]),
+  authoring_registry_events: defineTable({
+    environment: v.string(),
+    command_id: v.string(),
+    actor: v.string(),
+    from_revision: v.number(),
+    from_registry_sha256: v.optional(v.string()),
+    to_registry_sha256: v.string(),
+    revision: v.number(),
+    recorded_at: v.number(),
+    result: v.any(),
+  }).index("by_environment_command", ["environment", "command_id"]),
 });

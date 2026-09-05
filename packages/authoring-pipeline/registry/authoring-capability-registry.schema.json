@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://watchcraft.dev/schemas/authoring-capability-registry-v1.json",
+  "title": "Watchcraft authoring capability registry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "schema_version",
+    "registry_version",
+    "handlers",
+    "execution_profiles"
+  ],
+  "properties": {
+    "kind": { "const": "watchcraft.authoring-capability-registry" },
+    "schema_version": { "const": 1 },
+    "registry_version": { "type": "string", "minLength": 1 },
+    "handlers": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/handler" }
+    },
+    "execution_profiles": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/executionProfile" }
+    }
+  },
+  "$defs": {
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "artifactContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_kind", "schema"],
+      "properties": {
+        "artifact_kind": { "type": "string", "minLength": 1 },
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "version"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "version": { "type": "integer", "minimum": 1 }
+          }
+        }
+      }
+    },
+    "handler": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version",
+        "operation",
+        "inputs",
+        "dependencies",
+        "output",
+        "execution_profile",
+        "lease_class",
+        "retry_policy"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "operation": { "enum": ["generate", "import", "validate", "compile"] },
+        "inputs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/artifactContract" }
+        },
+        "dependencies": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/artifactContract" }
+        },
+        "output": { "$ref": "#/$defs/artifactContract" },
+        "execution_profile": { "$ref": "#/$defs/identity" },
+        "lease_class": { "type": "string", "minLength": 1 },
+        "retry_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["max_attempts", "retryable_classifications"],
+          "properties": {
+            "max_attempts": { "type": "integer", "minimum": 1, "maximum": 20 },
+            "retryable_classifications": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "uniqueItems": true
+            }
+          }
+        }
+      }
+    },
+    "executionProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version",
+        "dispatcher",
+        "platform",
+        "dependency_class",
+        "cache_class",
+        "timeout_minutes",
+        "lease_duration_ms",
+        "heartbeat_interval_ms",
+        "data_access",
+        "secret_capabilities"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "dispatcher": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "workflow"],
+          "properties": {
+            "kind": { "const": "github-actions" },
+            "workflow": { "type": "string", "pattern": "^[A-Za-z0-9._-]+\\.ya?ml$" }
+          }
+        },
+        "platform": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["os", "architecture"],
+          "properties": {
+            "os": { "enum": ["linux", "macos", "windows"] },
+            "architecture": { "enum": ["x64", "arm64"] }
+          }
+        },
+        "dependency_class": { "type": "string", "minLength": 1 },
+        "cache_class": { "type": "string", "minLength": 1 },
+        "timeout_minutes": { "type": "integer", "minimum": 1, "maximum": 360 },
+        "lease_duration_ms": { "type": "integer", "minimum": 1000 },
+        "heartbeat_interval_ms": { "type": "integer", "minimum": 1000 },
+        "data_access": { "enum": ["public", "private-derived", "private-source"] },
+        "secret_capabilities": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        }
+      }
+    }
+  }
+}

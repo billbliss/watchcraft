@@ -12,7 +12,6 @@ import {
   type AuthoringJob,
   type AuthoringRun,
   type JsonValue,
-  jobSpecSha256,
   parseAuthoringJob,
   parseAuthoringJobSpec,
   parseAuthoringRun,
@@ -28,6 +27,8 @@ import {
   createAuthoringJob,
   syntheticTranscriptJobSpec,
 } from "../packages/authoring-pipeline/src/state-machine.ts";
+import { resolveJobSpecAgainstRegistry } from "../packages/authoring-pipeline/src/registry.ts";
+import { activeRegistry } from "./authoringRegistry.ts";
 
 type RunCommandWithoutRevision = RunCommand extends infer Command
   ? Command extends RunCommand
@@ -187,18 +188,25 @@ export const submitJob = internalMutation({
     command_prefix: v.string(),
     request: v.any(),
     spec: v.any(),
+    environment: v.optional(v.string()),
   },
   returns: v.any(),
   handler: async (ctx, args) => {
     const now = Date.now();
-    const spec = parseAuthoringJobSpec(args.spec);
+    const proposedSpec = parseAuthoringJobSpec(args.spec);
+    const { registry_snapshot: _submittedSnapshot, ...unresolvedSpec } = proposedSpec;
     const createJobCommand = `${args.command_prefix}:create-job`;
     const existingJob = await jobDocument(ctx, args.job_id);
     if (existingJob) {
       const duplicate = await commandEvent(ctx, args.job_id, createJobCommand);
       if (!duplicate) throw new Error(`Authoring job ${args.job_id} already exists.`);
       const job = parseAuthoringJob(existingJob.aggregate);
-      if (job.run_id !== args.run_id || job.spec_sha256 !== jobSpecSha256(spec)) {
+      const { registry_snapshot: _storedSnapshot, ...storedUnresolvedSpec } = job.spec;
+      if (
+        job.run_id !== args.run_id
+        || canonicalJson(storedUnresolvedSpec as unknown as JsonValue)
+          !== canonicalJson(unresolvedSpec as unknown as JsonValue)
+      ) {
         throw new Error(`Submission replay for ${args.job_id} does not match its original job.`);
       }
       const storedRun = await runDocument(ctx, args.run_id);
@@ -212,6 +220,12 @@ export const submitJob = internalMutation({
     if (await runDocument(ctx, args.run_id)) {
       throw new Error(`Authoring run ${args.run_id} already exists.`);
     }
+    const environment = args.environment ?? "production";
+    const registryState = await activeRegistry(ctx, environment);
+    if (!registryState) {
+      throw new Error(`No active authoring capability registry for ${environment}.`);
+    }
+    const spec = resolveJobSpecAgainstRegistry(unresolvedSpec, registryState.registry);
 
     const run = createAuthoringRun(
       args.run_id,
@@ -495,17 +509,23 @@ export const claimJob = internalMutation({
     github_run_id: v.optional(v.string()),
   },
   returns: v.any(),
-  handler: (ctx, args) => applyStoredCommand(ctx, args.job_id, {
-    type: "claim",
-    command_id: args.command_id,
-    expected_revision: args.expected_revision,
-    attempt_id: args.attempt_id,
-    owner: args.owner,
-    spec_sha256: args.spec_sha256,
-    generation: args.dispatch_generation,
-    lease_duration_ms: args.lease_duration_ms,
-    github_run_id: args.github_run_id,
-  }, Date.now()),
+  handler: async (ctx, args) => {
+    const stored = await jobDocument(ctx, args.job_id);
+    if (!stored) throw new Error(`Unknown authoring job ${args.job_id}.`);
+    const job = parseAuthoringJob(stored.aggregate);
+    const registeredLease = job.spec.registry_snapshot?.execution_profile.lease_duration_ms;
+    return applyStoredCommand(ctx, args.job_id, {
+      type: "claim",
+      command_id: args.command_id,
+      expected_revision: args.expected_revision,
+      attempt_id: args.attempt_id,
+      owner: args.owner,
+      spec_sha256: args.spec_sha256,
+      generation: args.dispatch_generation,
+      lease_duration_ms: registeredLease ?? args.lease_duration_ms,
+      github_run_id: args.github_run_id,
+    }, Date.now());
+  },
 });
 
 export const startJob = internalMutation({
@@ -583,12 +603,21 @@ export const failJob = internalMutation({
   returns: v.any(),
   handler: async (ctx, args) => {
     const now = Date.now();
+    const stored = await jobDocument(ctx, args.job_id);
+    if (!stored) throw new Error(`Unknown authoring job ${args.job_id}.`);
+    const current = parseAuthoringJob(stored.aggregate);
+    const retryPolicy = current.spec.registry_snapshot?.handler.retry_policy;
+    const retryable = retryPolicy
+      ? args.failure.retryable
+        && retryPolicy.retryable_classifications.includes(args.failure.classification)
+        && current.attempts.length < retryPolicy.max_attempts
+      : args.failure.retryable;
     const job = await applyStoredCommand(ctx, args.job_id, {
       type: "fail",
       command_id: args.command_id,
       expected_revision: args.expected_revision,
       attempt_id: args.attempt_id,
-      failure: args.failure,
+      failure: { ...args.failure, retryable },
     }, now);
     await applyRunForJob(ctx, job, {
       type: "fail",

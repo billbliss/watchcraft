@@ -9,6 +9,7 @@
  */
 
 import type * as authoringInternal from "../authoringInternal.js";
+import type * as authoringRegistry from "../authoringRegistry.js";
 import type * as crons from "../crons.js";
 import type * as http from "../http.js";
 
@@ -20,6 +21,7 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   authoringInternal: typeof authoringInternal;
+  authoringRegistry: typeof authoringRegistry;
   crons: typeof crons;
   http: typeof http;
 }>;

@@ -173,10 +173,10 @@ The initial single-operator CLI retrieves its raw credential from the macOS logi
 Keychain (or an explicit process environment override); Convex stores only its SHA-256
 verifier. This is a bootstrap boundary, not the eventual end-user identity model.
 
-Workers advertise supported `(operation, artifact_kind, schema_version,
-handler_version)` tuples. Unsupported work fails before acquisition. Hosted and
-self-hosted runners implement the same contract; runner selection is a dispatch
-policy based on capability and data-access requirements.
+Workers verify supported `(operation, artifact_kind, schema_version,
+handler_version)` tuples when they claim work. Unsupported work fails before
+acquisition. Hosted and self-hosted runners implement the same contract; runner
+selection is a dispatch policy based on capability and data-access requirements.
 
 Convex control-plane functions are TypeScript because that is Convex's native
 execution model. The worker protocol is language-neutral JSON over authenticated HTTP,
@@ -185,6 +185,64 @@ transcription, analysis, and compilation handlers remain Python unless a particu
 handler has a reason to use another language. The initial TypeScript synthetic
 transcript handler is only an infrastructure smoke harness, not a migration of the
 authoring engine.
+
+### Capability and execution registry
+
+Handler and runner-selection policy must be visible control-plane data rather than
+opaque constants embedded in a Convex function. Convex stores the registry as an
+immutable, versioned JSON aggregate. A separate, revisioned pointer selects the active
+registry version for each environment. Publishing a change creates a new version;
+activation atomically advances the pointer. Existing versions remain available for
+audit and rollback and are never edited in place.
+
+A registry version contains two related catalogs:
+
+- **Handler definitions** identify a stable handler ID and version, operation,
+  accepted input and dependency artifact kinds and schema versions, produced artifact
+  kind and schema version, required execution profile, lease class, and retry policy.
+- **Execution profiles** identify a stable profile ID and version, dispatcher kind,
+  reviewed workflow implementation, operating system and architecture, dependency and
+  cache classes, timeout and heartbeat policy, data-access classification, and required
+  secret capabilities by name. Secret values and arbitrary commands are never registry
+  data.
+
+The aggregate is intentionally not normalized into mutable per-handler tables at this
+stage. Whole-document hashing and validation preserve file-like semantics, make a
+registry publication transactionally bounded, and allow the exact configuration to be
+exported and compared. A checked-in JSON document may bootstrap or propose a version,
+but it must not silently overwrite production state during deployment. The active
+Convex version, its digest, and its history are queryable operational state.
+
+Submission resolves a requested handler against the active registry before approval.
+The job specification records the registry digest and copies the resolved handler and
+execution-profile identities and material constraints. Approval therefore binds the
+operator to the exact routing and capability requirements as well as the processing
+inputs. Dispatch and claim use this snapshot; they do not reinterpret an approved job
+through a newer active registry version.
+
+The registry describes capabilities and routing but cannot create executable code. A
+worker retains a local, versioned mapping from supported handler identities to reviewed
+implementations. On claim it verifies that the approved handler, input/output contract,
+and execution profile match its local capabilities. Any mismatch fails as
+`unsupported_handler` before input acquisition or billable processing.
+
+Registry publication and activation require authority distinct from routine operator
+submission and approval. The initial implementation may use a narrowly scoped
+deployment/admin operation. Every publication and activation records actor, time,
+command ID, previous revision, and digest so retries are idempotent and changes are
+auditable.
+
+The initial HTTP boundary authenticates that administrator with a third high-entropy
+shared secret. Convex stores only its SHA-256 verifier in
+`AUTHORING_REGISTRY_ADMIN_TOKEN_SHA256`; the local CLI retrieves the raw token from a
+dedicated Keychain item or an explicit process environment override. Code deployment
+does not activate the checked-in default. An administrator explicitly publishes the
+document and advances the environment pointer with its expected current revision.
+
+Individual GitHub-hosted workers are ephemeral executions, not durable registry
+members. Dynamic worker-instance registration, capacity advertisement, and scheduling
+are deferred. If introduced later, those lease-backed observations remain separate
+from the versioned capability and execution policy described here.
 
 ### Artifact identity and storage
 
@@ -285,6 +343,11 @@ The design preserves file-like aggregate semantics while gaining atomic
 compare-and-swap transitions, durable coordination, and queryability. Convex's
 transaction model handles the few cross-document updates introduced by genuine
 concurrency boundaries; it does not justify normalizing the domain model.
+
+The versioned capability registry makes dispatch policy inspectable and reversible
+without allowing mutable configuration to reinterpret approved work. It adds a
+separate administrative authority and requires workers and the control plane to share
+and validate the same language-neutral registry schema.
 
 GitHub Actions can be replaced or supplemented without migrating authoritative state
 or artifacts. R2 can contain orphan objects safely because existence does not confer

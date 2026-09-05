@@ -18,8 +18,71 @@ export interface ArtifactReference {
   key: string;
 }
 
+export type AuthoringOperation = "generate" | "import" | "validate" | "compile";
+
+export interface RegistryArtifactContract {
+  artifact_kind: string;
+  schema: {
+    id: string;
+    version: number;
+  };
+}
+
+export interface RegistryHandlerDefinition {
+  id: string;
+  version: string;
+  operation: AuthoringOperation;
+  inputs: RegistryArtifactContract[];
+  dependencies: RegistryArtifactContract[];
+  output: RegistryArtifactContract;
+  execution_profile: {
+    id: string;
+    version: string;
+  };
+  lease_class: string;
+  retry_policy: {
+    max_attempts: number;
+    retryable_classifications: string[];
+  };
+}
+
+export interface RegistryExecutionProfile {
+  id: string;
+  version: string;
+  dispatcher: {
+    kind: "github-actions";
+    workflow: string;
+  };
+  platform: {
+    os: "linux" | "macos" | "windows";
+    architecture: "x64" | "arm64";
+  };
+  dependency_class: string;
+  cache_class: string;
+  timeout_minutes: number;
+  lease_duration_ms: number;
+  heartbeat_interval_ms: number;
+  data_access: "public" | "private-derived" | "private-source";
+  secret_capabilities: string[];
+}
+
+export interface AuthoringCapabilityRegistry {
+  kind: "watchcraft.authoring-capability-registry";
+  schema_version: 1;
+  registry_version: string;
+  handlers: RegistryHandlerDefinition[];
+  execution_profiles: RegistryExecutionProfile[];
+}
+
+export interface RegistryResolutionSnapshot {
+  registry_version: string;
+  registry_sha256: string;
+  handler: RegistryHandlerDefinition;
+  execution_profile: RegistryExecutionProfile;
+}
+
 export interface AuthoringJobSpec {
-  operation: "generate" | "import" | "validate" | "compile";
+  operation: AuthoringOperation;
   artifact_kind: string;
   output_schema: {
     id: string;
@@ -37,6 +100,8 @@ export interface AuthoringJobSpec {
   inputs: ArtifactReference[];
   dependencies: ArtifactReference[];
   configuration: { [key: string]: JsonValue };
+  /** Absent only on pre-registry jobs and the synthetic control-plane smoke. */
+  registry_snapshot?: RegistryResolutionSnapshot;
 }
 
 export type AuthoringJobState =
@@ -158,6 +223,10 @@ export function jobSpecSha256(spec: AuthoringJobSpec): string {
   return sha256Hex(canonicalJson(spec as unknown as JsonValue));
 }
 
+export function capabilityRegistrySha256(registry: AuthoringCapabilityRegistry): string {
+  return sha256Hex(canonicalJson(registry as unknown as JsonValue));
+}
+
 function objectValue(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError(`${label} must be an object.`);
@@ -214,6 +283,165 @@ function sha256Value(value: unknown, label: string): string {
     throw new TypeError(`${label} must be a lowercase SHA-256 digest.`);
   }
   return digest;
+}
+
+function uniqueStrings(value: unknown, label: string): string[] {
+  if (!Array.isArray(value)) throw new TypeError(`${label} must be an array.`);
+  const entries = value.map((entry, index) => stringValue(entry, `${label}[${index}]`));
+  if (new Set(entries).size !== entries.length) {
+    throw new TypeError(`${label} must not contain duplicates.`);
+  }
+  return entries;
+}
+
+function parseRegistryArtifactContract(value: unknown, label: string): RegistryArtifactContract {
+  const candidate = objectValue(value, label);
+  const schema = objectValue(candidate.schema, `${label} schema`);
+  return {
+    artifact_kind: stringValue(candidate.artifact_kind, `${label} artifact kind`),
+    schema: {
+      id: stringValue(schema.id, `${label} schema ID`),
+      version: integerValue(schema.version, `${label} schema version`, 1),
+    },
+  };
+}
+
+function parseRegistryHandler(value: unknown, label: string): RegistryHandlerDefinition {
+  const candidate = objectValue(value, label);
+  const operation = stringValue(candidate.operation, `${label} operation`);
+  if (!["generate", "import", "validate", "compile"].includes(operation)) {
+    throw new TypeError(`Unsupported registry handler operation ${operation}.`);
+  }
+  if (!Array.isArray(candidate.inputs) || !Array.isArray(candidate.dependencies)) {
+    throw new TypeError(`${label} inputs and dependencies must be arrays.`);
+  }
+  const executionProfile = objectValue(candidate.execution_profile, `${label} execution profile`);
+  const retryPolicy = objectValue(candidate.retry_policy, `${label} retry policy`);
+  const maximumAttempts = integerValue(retryPolicy.max_attempts, `${label} maximum attempts`, 1);
+  if (maximumAttempts > 20) {
+    throw new TypeError(`${label} maximum attempts must not exceed 20.`);
+  }
+  return {
+    id: stringValue(candidate.id, `${label} ID`),
+    version: stringValue(candidate.version, `${label} version`),
+    operation: operation as AuthoringOperation,
+    inputs: candidate.inputs.map((entry, index) => parseRegistryArtifactContract(entry, `${label} input ${index}`)),
+    dependencies: candidate.dependencies.map((entry, index) => parseRegistryArtifactContract(entry, `${label} dependency ${index}`)),
+    output: parseRegistryArtifactContract(candidate.output, `${label} output`),
+    execution_profile: {
+      id: stringValue(executionProfile.id, `${label} execution profile ID`),
+      version: stringValue(executionProfile.version, `${label} execution profile version`),
+    },
+    lease_class: stringValue(candidate.lease_class, `${label} lease class`),
+    retry_policy: {
+      max_attempts: maximumAttempts,
+      retryable_classifications: uniqueStrings(
+        retryPolicy.retryable_classifications,
+        `${label} retryable classifications`,
+      ),
+    },
+  };
+}
+
+function parseRegistryExecutionProfile(value: unknown, label: string): RegistryExecutionProfile {
+  const candidate = objectValue(value, label);
+  const dispatcher = objectValue(candidate.dispatcher, `${label} dispatcher`);
+  const platform = objectValue(candidate.platform, `${label} platform`);
+  if (dispatcher.kind !== "github-actions") {
+    throw new TypeError(`${label} dispatcher must be github-actions.`);
+  }
+  const workflow = stringValue(dispatcher.workflow, `${label} workflow`);
+  if (!/^[A-Za-z0-9._-]+\.ya?ml$/.test(workflow)) {
+    throw new TypeError(`${label} workflow must be a workflow filename.`);
+  }
+  const os = stringValue(platform.os, `${label} operating system`);
+  if (!["linux", "macos", "windows"].includes(os)) {
+    throw new TypeError(`Unsupported execution operating system ${os}.`);
+  }
+  const architecture = stringValue(platform.architecture, `${label} architecture`);
+  if (!["x64", "arm64"].includes(architecture)) {
+    throw new TypeError(`Unsupported execution architecture ${architecture}.`);
+  }
+  const timeoutMinutes = integerValue(candidate.timeout_minutes, `${label} timeout`, 1);
+  if (timeoutMinutes > 360) throw new TypeError(`${label} timeout must not exceed 360 minutes.`);
+  const leaseDurationMs = integerValue(candidate.lease_duration_ms, `${label} lease duration`, 1_000);
+  const heartbeatIntervalMs = integerValue(
+    candidate.heartbeat_interval_ms,
+    `${label} heartbeat interval`,
+    1_000,
+  );
+  if (heartbeatIntervalMs >= leaseDurationMs) {
+    throw new TypeError(`${label} heartbeat interval must be shorter than its lease duration.`);
+  }
+  const dataAccess = stringValue(candidate.data_access, `${label} data access`);
+  if (!["public", "private-derived", "private-source"].includes(dataAccess)) {
+    throw new TypeError(`Unsupported execution data access ${dataAccess}.`);
+  }
+  return {
+    id: stringValue(candidate.id, `${label} ID`),
+    version: stringValue(candidate.version, `${label} version`),
+    dispatcher: { kind: "github-actions", workflow },
+    platform: {
+      os: os as RegistryExecutionProfile["platform"]["os"],
+      architecture: architecture as RegistryExecutionProfile["platform"]["architecture"],
+    },
+    dependency_class: stringValue(candidate.dependency_class, `${label} dependency class`),
+    cache_class: stringValue(candidate.cache_class, `${label} cache class`),
+    timeout_minutes: timeoutMinutes,
+    lease_duration_ms: leaseDurationMs,
+    heartbeat_interval_ms: heartbeatIntervalMs,
+    data_access: dataAccess as RegistryExecutionProfile["data_access"],
+    secret_capabilities: uniqueStrings(candidate.secret_capabilities, `${label} secret capabilities`),
+  };
+}
+
+export function parseCapabilityRegistry(value: unknown): AuthoringCapabilityRegistry {
+  const candidate = objectValue(value, "Authoring capability registry");
+  if (candidate.kind !== "watchcraft.authoring-capability-registry" || candidate.schema_version !== 1) {
+    throw new TypeError("Unsupported authoring capability registry schema.");
+  }
+  if (!Array.isArray(candidate.handlers) || !Array.isArray(candidate.execution_profiles)) {
+    throw new TypeError("Registry handlers and execution profiles must be arrays.");
+  }
+  const handlers = candidate.handlers.map((entry, index) => parseRegistryHandler(entry, `Registry handler ${index}`));
+  const executionProfiles = candidate.execution_profiles.map(
+    (entry, index) => parseRegistryExecutionProfile(entry, `Registry execution profile ${index}`),
+  );
+  const handlerKeys = handlers.map((handler) => `${handler.id}@${handler.version}`);
+  const profileKeys = executionProfiles.map((profile) => `${profile.id}@${profile.version}`);
+  if (new Set(handlerKeys).size !== handlerKeys.length) {
+    throw new TypeError("Registry handler identities must be unique.");
+  }
+  if (new Set(profileKeys).size !== profileKeys.length) {
+    throw new TypeError("Registry execution profile identities must be unique.");
+  }
+  const profileSet = new Set(profileKeys);
+  for (const handler of handlers) {
+    const profileKey = `${handler.execution_profile.id}@${handler.execution_profile.version}`;
+    if (!profileSet.has(profileKey)) {
+      throw new TypeError(`Registry handler ${handler.id}@${handler.version} references missing profile ${profileKey}.`);
+    }
+  }
+  return {
+    kind: "watchcraft.authoring-capability-registry",
+    schema_version: 1,
+    registry_version: stringValue(candidate.registry_version, "Registry version"),
+    handlers,
+    execution_profiles: executionProfiles,
+  };
+}
+
+export function parseRegistryResolutionSnapshot(value: unknown): RegistryResolutionSnapshot {
+  const candidate = objectValue(value, "Registry resolution snapshot");
+  return {
+    registry_version: stringValue(candidate.registry_version, "Registry snapshot version"),
+    registry_sha256: sha256Value(candidate.registry_sha256, "Registry snapshot digest"),
+    handler: parseRegistryHandler(candidate.handler, "Registry snapshot handler"),
+    execution_profile: parseRegistryExecutionProfile(
+      candidate.execution_profile,
+      "Registry snapshot execution profile",
+    ),
+  };
 }
 
 export function parseArtifactReference(value: unknown): ArtifactReference {
@@ -288,6 +516,9 @@ export function parseAuthoringJobSpec(value: unknown): AuthoringJobSpec {
     inputs: inputs.map(parseArtifactReference),
     dependencies: dependencies.map(parseArtifactReference),
     configuration,
+    ...(candidate.registry_snapshot === undefined
+      ? {}
+      : { registry_snapshot: parseRegistryResolutionSnapshot(candidate.registry_snapshot) }),
   };
 }
 
