@@ -296,8 +296,8 @@ staging/<acquisition-id>/sha256/<first-two-hex>/<remaining-hex>
 The job specification also binds source-neutral acquisition provenance: acquisition
 method and version, stable source identity, observation time, acquisition-tool
 identity, selected format/language/container, duration, and the exact media digest and
-length. Approval therefore covers both the intended source and the bytes that the
-worker will process.
+length. It also records acquisition elapsed time as structured milliseconds. Approval
+therefore covers both the intended source and the bytes that the worker will process.
 
 Provider-neutral MLX handlers receive one `source-audio` input. Handler identity binds
 the exact model policy instead of accepting an arbitrary operator-selected model. The
@@ -310,7 +310,15 @@ The GitHub-hosted macOS worker never contacts YouTube: it rejects expired, overs
 mis-typed, model-inconsistent, or provenance-inconsistent inputs; downloads the private
 R2 object; verifies its length and digest; transcribes it from ephemeral local storage;
 and publishes only the transcript as an authoritative content-addressed object. The
-five-minute staged smoke remains an ephemeral diagnostic run. The production
+transcript provenance records input-fetch, model-transcription, and total-handler
+elapsed milliseconds. Together with the ledger's submission, dispatch, attempt-start,
+attempt-completion, and job-completion timestamps, these measurements form durable
+estimator inputs; workflow logs and an operator's terminal counter are not timing
+authority. The operator command may additionally summarize local staging, result
+download, and end-to-end elapsed time without storing those incidental client phases in
+the control plane.
+
+The five-minute staged smoke remains an ephemeral diagnostic run. The production
 single-video command permits up to two hours and 100 MB of compressed source audio and
 creates a durable run with no diagnostic-retention marker. A successful one-command
 operator run deletes the staged audio after retrieving and verifying the transcript.

@@ -435,7 +435,11 @@ class QueuedAuthoringTests(unittest.TestCase):
                 },
             ) as transcribe:
                 with patch("queued_authoring.time.time", return_value=1_788_000_000):
-                    result = queued_authoring.mlx_staged_transcription(job)
+                    with patch(
+                        "queued_authoring.time.monotonic",
+                        side_effect=(0.0, 1.0, 1.25, 1.5, 4.0, 4.1),
+                    ):
+                        result = queued_authoring.mlx_staged_transcription(job)
         audio_path = transcribe.call_args.args[0]
         self.assertFalse(audio_path.exists())
         self.assertEqual(
@@ -451,6 +455,11 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertEqual(result["provenance"]["acquisition"], acquisition)
         self.assertEqual(result["provenance"]["source_audio"], reference)
         self.assertFalse(result["provenance"]["worker_audio_retained"])
+        self.assertEqual(result["provenance"]["timing"], {
+            "input_fetch_ms": 250,
+            "transcription_ms": 2500,
+            "handler_ms": 4100,
+        })
 
         wrong_model_job = {
             **job,
@@ -971,6 +980,17 @@ class QueuedAuthoringTests(unittest.TestCase):
                             "revision": 8,
                             "state": "succeeded",
                             "result": {"digest": "c" * 64},
+                            "created_at": 1_000,
+                            "updated_at": 5_500,
+                            "dispatch": {
+                                "generation": 1,
+                                "requested_at": 2_000,
+                            },
+                            "attempts": [{
+                                "state": "succeeded",
+                                "started_at": 2_750,
+                                "updated_at": 5_250,
+                            }],
                         },
                         "run": {
                             "run_id": captured["job"]["run_id"],
@@ -980,11 +1000,22 @@ class QueuedAuthoringTests(unittest.TestCase):
 
                 verified_result = {
                     "kind": "watchcraft.transcript",
+                    "source": {"media_asset_id": "youtube:WPtpUu3uIUI"},
+                    "model": expected_model,
+                    "language": "en",
                     "text": "Welcome to the hotel.",
                     "segments": [{"text": "Welcome to the hotel."}],
                     "provenance": {
                         "handler_id": expected_handler[0],
                         "source_audio": reference,
+                        "acquisition": {
+                            "media": {"duration_seconds": 120.0},
+                        },
+                        "timing": {
+                            "input_fetch_ms": 100,
+                            "transcription_ms": 2_000,
+                            "handler_ms": 2_200,
+                        },
                     },
                 }
                 args = build_parser().parse_args([
@@ -1027,7 +1058,8 @@ class QueuedAuthoringTests(unittest.TestCase):
                                             "queued_authoring.verified_json_result",
                                             return_value=verified_result,
                                         ):
-                                            with redirect_stdout(io.StringIO()):
+                                            output = io.StringIO()
+                                            with redirect_stdout(output):
                                                 self.assertEqual(
                                                     queued_authoring.run_queue_command(args),
                                                     0,
@@ -1048,6 +1080,15 @@ class QueuedAuthoringTests(unittest.TestCase):
                 self.assertEqual(captured["spec"]["inputs"], [reference])
                 self.assertEqual(captured["spec"]["handler"]["id"], expected_handler[0])
                 self.assertEqual(captured["spec"]["configuration"]["model"], expected_model)
+                self.assertGreaterEqual(
+                    captured["spec"]["configuration"]["acquisition"]["timing"]["acquisition_ms"],
+                    0,
+                )
+                self.assertIn('"submitted_to_completed_ms": 4500', output.getvalue())
+                self.assertIn('"transcription_ms": 2000', output.getvalue())
+                self.assertIn("(worker transcription 2s)", output.getvalue())
+                self.assertIn("Full transcript:", output.getvalue())
+                self.assertNotIn('"segments": [', output.getvalue())
                 if smoke:
                     self.assertEqual(captured["request"]["purpose"], "smoke")
                 else:

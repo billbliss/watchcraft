@@ -623,7 +623,18 @@ MLX_MODEL_CACHE_KEYS = {
 }
 
 
+def elapsed_milliseconds(started_at: float) -> int:
+    return max(0, round((time.monotonic() - started_at) * 1000))
+
+
+def format_elapsed(milliseconds: int) -> str:
+    total_seconds = round(milliseconds / 1000)
+    minutes, seconds = divmod(total_seconds, 60)
+    return f"{minutes}m {seconds:02d}s" if minutes else f"{seconds}s"
+
+
 def mlx_staged_transcription(job: dict[str, Any]) -> dict[str, Any]:
+    handler_started_at = time.monotonic()
     spec = job["spec"]
     handler_identity = (
         spec.get("handler", {}).get("id"),
@@ -699,6 +710,7 @@ def mlx_staged_transcription(job: dict[str, Any]) -> dict[str, Any]:
     ):
         raise ValueError("the staged source-audio provenance does not match its input")
 
+    input_fetch_started_at = time.monotonic()
     try:
         payload = R2ArtifactStore.from_environment().get_bytes(reference)
     except Exception as error:
@@ -707,14 +719,17 @@ def mlx_staged_transcription(job: dict[str, Any]) -> dict[str, Any]:
             "source_input_unavailable",
             True,
         ) from error
+    input_fetch_ms = elapsed_milliseconds(input_fetch_started_at)
     with tempfile.TemporaryDirectory(prefix="watchcraft-mlx-staged-") as directory:
         audio_path = Path(directory) / "source-audio"
         audio_path.write_bytes(payload)
+        transcription_started_at = time.monotonic()
         transcript = mlx_transcribe_file(
             audio_path,
             language=configuration["language"],
             model=configuration["model"],
         )
+        transcription_ms = elapsed_milliseconds(transcription_started_at)
 
     return {
         "kind": "watchcraft.transcript",
@@ -730,6 +745,11 @@ def mlx_staged_transcription(job: dict[str, Any]) -> dict[str, Any]:
             "acquisition": acquisition,
             "source_audio": reference,
             "worker_audio_retained": False,
+            "timing": {
+                "input_fetch_ms": input_fetch_ms,
+                "transcription_ms": transcription_ms,
+                "handler_ms": elapsed_milliseconds(handler_started_at),
+            },
         },
     }
 
@@ -1402,7 +1422,11 @@ def source_audio_media_type(container: Any) -> str:
     }.get(str(container).casefold(), "audio/x-unknown")
 
 
-def youtube_acquisition_provenance(acquisition: dict[str, Any]) -> dict[str, Any]:
+def youtube_acquisition_provenance(
+    acquisition: dict[str, Any],
+    *,
+    elapsed_ms: int,
+) -> dict[str, Any]:
     video_id = acquisition["video_id"]
     return {
         "method": {
@@ -1420,6 +1444,7 @@ def youtube_acquisition_provenance(acquisition: dict[str, Any]) -> dict[str, Any
             "id": "yt-dlp",
             "version": acquisition["yt_dlp_version"],
         },
+        "timing": {"acquisition_ms": elapsed_ms},
         "media": {
             "algorithm": acquisition["algorithm"],
             "digest": acquisition["digest"],
@@ -1428,6 +1453,100 @@ def youtube_acquisition_provenance(acquisition: dict[str, Any]) -> dict[str, Any
             "format_id": acquisition.get("format_id"),
             "language": acquisition.get("audio_language"),
             "container": acquisition.get("container"),
+        },
+    }
+
+
+def timestamp_delta_ms(later: Any, earlier: Any) -> int | None:
+    if (
+        isinstance(later, bool)
+        or not isinstance(later, (int, float))
+        or isinstance(earlier, bool)
+        or not isinstance(earlier, (int, float))
+        or later < earlier
+    ):
+        return None
+    return round(later - earlier)
+
+
+def completed_job_timing(job: dict[str, Any]) -> dict[str, int]:
+    timing: dict[str, int] = {}
+    submitted_to_completed_ms = timestamp_delta_ms(
+        job.get("updated_at"), job.get("created_at")
+    )
+    if submitted_to_completed_ms is not None:
+        timing["submitted_to_completed_ms"] = submitted_to_completed_ms
+
+    attempts = job.get("attempts")
+    succeeded = (
+        [attempt for attempt in attempts if attempt.get("state") == "succeeded"]
+        if isinstance(attempts, list)
+        else []
+    )
+    if succeeded:
+        attempt = succeeded[-1]
+        attempt_ms = timestamp_delta_ms(
+            attempt.get("updated_at"), attempt.get("started_at")
+        )
+        if attempt_ms is not None:
+            timing["worker_attempt_ms"] = attempt_ms
+        dispatch = job.get("dispatch")
+        dispatch_requested_at = (
+            dispatch.get("requested_at") if isinstance(dispatch, dict) else None
+        )
+        dispatch_to_worker_ms = timestamp_delta_ms(
+            attempt.get("started_at"), dispatch_requested_at
+        )
+        if dispatch_to_worker_ms is not None:
+            timing["dispatch_to_worker_ms"] = dispatch_to_worker_ms
+    return timing
+
+
+def compact_transcription_result(
+    completed: dict[str, Any],
+    result: dict[str, Any],
+    *,
+    local_timing: dict[str, int],
+) -> dict[str, Any]:
+    text = result.get("text")
+    normalized_text = " ".join(text.split()) if isinstance(text, str) else ""
+    preview = normalized_text[:240]
+    if len(normalized_text) > len(preview):
+        preview += "…"
+    provenance = result.get("provenance")
+    worker_timing = (
+        provenance.get("timing") if isinstance(provenance, dict) else None
+    )
+    acquisition = (
+        provenance.get("acquisition") if isinstance(provenance, dict) else None
+    )
+    media = acquisition.get("media") if isinstance(acquisition, dict) else None
+    source = result.get("source")
+    segments = result.get("segments")
+    return {
+        "job_id": completed["job"]["job_id"],
+        "run_id": completed["run"]["run_id"],
+        "state": completed["job"]["state"],
+        "artifact": completed["job"]["result"],
+        "source": {
+            "media_asset_id": (
+                source.get("media_asset_id") if isinstance(source, dict) else None
+            ),
+            "audio_duration_seconds": (
+                media.get("duration_seconds") if isinstance(media, dict) else None
+            ),
+        },
+        "transcript": {
+            "model": result.get("model"),
+            "language": result.get("language"),
+            "characters": len(text) if isinstance(text, str) else 0,
+            "segments": len(segments) if isinstance(segments, list) else 0,
+            "preview": preview,
+        },
+        "timing": {
+            "local": local_timing,
+            "ledger": completed_job_timing(completed["job"]),
+            "worker": worker_timing if isinstance(worker_timing, dict) else {},
         },
     }
 
@@ -1699,6 +1818,7 @@ def run_local_youtube_transcription(
     *,
     smoke: bool,
 ) -> int:
+    command_started_at = time.monotonic()
     control = operator_client(args.operator_token_source)
     staging = r2_staging_writer(args.r2_staging_credentials_source)
     handler = (
@@ -1720,6 +1840,7 @@ def run_local_youtube_transcription(
     with tempfile.TemporaryDirectory(prefix="watchcraft-youtube-acquisition-") as directory:
         audio_path = Path(directory) / "source-audio"
         print(f"acquiring {canonical_url} anonymously on this Mac", flush=True)
+        acquisition_started_at = time.monotonic()
         acquisition_result = download_youtube_audio(
             video_id,
             audio_path,
@@ -1727,7 +1848,12 @@ def run_local_youtube_transcription(
             maximum_duration_seconds=settings["maximum_duration_seconds"],
             timeout_seconds=acquisition_timeout,
         )
-        acquisition = youtube_acquisition_provenance(acquisition_result)
+        acquisition_ms = elapsed_milliseconds(acquisition_started_at)
+        acquisition = youtube_acquisition_provenance(
+            acquisition_result,
+            elapsed_ms=acquisition_ms,
+        )
+        staging_started_at = time.monotonic()
         reference = staging.put_staged_file(
             audio_path,
             {
@@ -1742,6 +1868,7 @@ def run_local_youtube_transcription(
                 int(time.time() * 1000) + SOURCE_AUDIO_RETENTION_MILLISECONDS
             ),
         )
+        staging_upload_ms = elapsed_milliseconds(staging_started_at)
     print(
         f"staged {reference['byte_length']} bytes as {reference['digest']}",
         flush=True,
@@ -1790,15 +1917,19 @@ def run_local_youtube_transcription(
             f"generation {pending['dispatch']['generation']}",
             flush=True,
         )
+        terminal_wait_started_at = time.monotonic()
         completed = wait_for_terminal_job(
             control,
             job["job_id"],
             args.timeout_seconds,
         )
+        terminal_wait_ms = elapsed_milliseconds(terminal_wait_started_at)
+        result_download_started_at = time.monotonic()
         result = verified_json_result(
             completed["job"],
             args.r2_credentials_source,
         )
+        result_download_ms = elapsed_milliseconds(result_download_started_at)
         provenance = result.get("provenance", {})
         source_audio = provenance.get("source_audio", {})
         if (
@@ -1817,13 +1948,34 @@ def run_local_youtube_transcription(
 
     staging.delete(reference)
     print(f"deleted staged source audio {reference['key']}", flush=True)
-    print(json.dumps({
-        "job_id": completed["job"]["job_id"],
-        "run_id": completed["run"]["run_id"],
-        "state": completed["job"]["state"],
-        "artifact": completed["job"]["result"],
-        "result": result,
-    }, ensure_ascii=False, indent=2, sort_keys=True))
+    summary = compact_transcription_result(
+        completed,
+        result,
+        local_timing={
+            "acquisition_ms": acquisition_ms,
+            "staging_upload_ms": staging_upload_ms,
+            "terminal_wait_ms": terminal_wait_ms,
+            "result_download_ms": result_download_ms,
+            "command_total_ms": elapsed_milliseconds(command_started_at),
+        },
+    )
+    worker_transcription_ms = summary["timing"]["worker"].get("transcription_ms")
+    completion_line = (
+        f"completed {completed['job']['job_id']} in "
+        f"{format_elapsed(summary['timing']['local']['command_total_ms'])}"
+    )
+    if isinstance(worker_transcription_ms, int):
+        completion_line += (
+            f" (worker transcription {format_elapsed(worker_transcription_ms)})"
+        )
+    print(completion_line, flush=True)
+    print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
+    print(
+        "Full transcript: ./authoring/watchcraft-author queue result "
+        "--operator-token-source keychain --r2-credentials-source keychain "
+        f"{completed['job']['job_id']}",
+        flush=True,
+    )
     return 0
 
 

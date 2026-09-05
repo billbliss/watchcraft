@@ -360,6 +360,15 @@ accepts English videos up to two hours and 100 MB of compressed source audio. Us
 `queue result --output PATH JOB_ID` later to retrieve the exact authoritative transcript
 artifact again.
 
+The command finishes with a compact summary rather than printing every transcript
+segment. Its `timing` object reports local acquisition, staging upload, terminal wait,
+result download, and total command milliseconds; durable ledger timestamps provide
+dispatch-to-worker, worker-attempt, and submission-to-completion milliseconds; and the
+transcript provenance records worker input-fetch, model-transcription, and total-handler
+milliseconds. The audio duration, byte length, handler/model identity, and these phase
+measurements are machine-readable inputs for future runtime estimates. Use the printed
+`queue result` command when the full transcript is needed.
+
 `queue result` resolves the artifact reference from the authoritative completed job,
 downloads the object from private R2, and verifies its declared byte length and SHA-256
 digest. JSON is displayed in readable form by default; `--output PATH` writes the exact
