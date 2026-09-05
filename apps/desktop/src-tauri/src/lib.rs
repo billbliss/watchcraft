@@ -19,8 +19,10 @@ use tauri::{Manager, Runtime};
 use tauri_plugin_dialog::DialogExt;
 use url::Url;
 
+mod diagnostics;
 mod library;
 
+use diagnostics::{DiagnosticSnapshot, DiagnosticsState};
 use library::{LibraryLocation, RegisteredCollection};
 
 const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "webm", "mkv"];
@@ -505,6 +507,22 @@ fn app_data_root<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, Strin
         .map_err(|error| format!("Could not locate Watchcraft's private data folder: {error}"))
 }
 
+fn diagnostics_enabled_for_identifier(identifier: &str) -> bool {
+    identifier.ends_with(".beta") || identifier.ends_with(".dev") || identifier.ends_with(".smoke")
+}
+
+fn record_diagnostic<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    level: &str,
+    category: &str,
+    event: &str,
+    message: &str,
+    fields: serde_json::Value,
+) {
+    app.state::<DiagnosticsState>()
+        .record(level, category, event, message, fields);
+}
+
 fn approve_library_location<R: Runtime>(
     app: &tauri::AppHandle<R>,
     location: LibraryLocation,
@@ -535,6 +553,19 @@ fn approve_library_location<R: Runtime>(
         .0
         .write()
         .map_err(|_| "The selected library state is unavailable.")? = roots;
+    record_diagnostic(
+        app,
+        "info",
+        "binding",
+        "scope.approved",
+        "Approved collection and media roots for this session",
+        serde_json::json!({
+            "collectionId": location.collection_id,
+            "metadataRoot": location.metadata_root,
+            "mediaRoot": location.media_root,
+            "managedMediaRoot": location.managed_media_root,
+        }),
+    );
     Ok(location)
 }
 
@@ -697,12 +728,37 @@ fn video_stream_response<R: Runtime>(
 ) -> Result<Response<Vec<u8>>, Box<dyn Error>> {
     let decoded_path =
         percent_decode_str(request.uri().path().trim_start_matches('/')).decode_utf8()?;
+    let requested_range = request
+        .headers()
+        .get("range")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    record_diagnostic(
+        app,
+        "debug",
+        "stream",
+        "request.received",
+        "Received a local video stream request",
+        serde_json::json!({
+            "method": request.method().as_str(),
+            "requestedPath": decoded_path.as_ref(),
+            "range": requested_range,
+        }),
+    );
     let path = match validated_video_path(app, decoded_path.as_ref()) {
         Ok(path) => path,
         Err(error) => {
             eprintln!(
                 "Watchcraft stream rejected {}: {error}",
                 decoded_path.as_ref()
+            );
+            record_diagnostic(
+                app,
+                "error",
+                "stream",
+                "request.rejected",
+                "Rejected a local video stream path",
+                serde_json::json!({ "requestedPath": decoded_path.as_ref(), "error": error }),
             );
             return Ok(Response::builder()
                 .status(StatusCode::FORBIDDEN)
@@ -717,12 +773,32 @@ fn video_stream_response<R: Runtime>(
 
     let mut file = std::fs::File::open(&path)?;
     let length = file.metadata()?.len();
+    record_diagnostic(
+        app,
+        "debug",
+        "stream",
+        "file.opened",
+        "Opened the requested local video",
+        serde_json::json!({
+            "path": path,
+            "length": length,
+            "contentType": video_content_type(&path),
+        }),
+    );
     let response = Response::builder()
         .header(CONTENT_TYPE, video_content_type(&path))
         .header(ACCEPT_RANGES, "bytes")
         .header(CACHE_CONTROL, "no-store");
 
     if request.method() == Method::HEAD {
+        record_diagnostic(
+            app,
+            "debug",
+            "stream",
+            "response.sent",
+            "Returned local video metadata",
+            serde_json::json!({ "status": 200, "length": length }),
+        );
         return Ok(response
             .status(StatusCode::OK)
             .header(CONTENT_LENGTH, length)
@@ -742,12 +818,37 @@ fn video_stream_response<R: Runtime>(
             .and_then(|value| value.to_str().ok());
         let (start, bytes_to_read) = match requested_byte_range(range_header, length) {
             Ok(Some(range)) => range,
-            _ => return Ok(not_satisfiable()?),
+            _ => {
+                record_diagnostic(
+                    app,
+                    "warn",
+                    "stream",
+                    "range.rejected",
+                    "Rejected an invalid local video byte range",
+                    serde_json::json!({ "range": range_header, "length": length, "status": 416 }),
+                );
+                return Ok(not_satisfiable()?);
+            }
         };
         let end = start + bytes_to_read - 1;
         let mut body = Vec::with_capacity(bytes_to_read as usize);
         file.seek(SeekFrom::Start(start))?;
         file.take(bytes_to_read).read_to_end(&mut body)?;
+
+        record_diagnostic(
+            app,
+            "debug",
+            "stream",
+            "response.sent",
+            "Returned a local video byte range",
+            serde_json::json!({
+                "status": 206,
+                "start": start,
+                "end": end,
+                "fileLength": length,
+                "responseBytes": body.len(),
+            }),
+        );
 
         return Ok(response
             .status(StatusCode::PARTIAL_CONTENT)
@@ -758,6 +859,14 @@ fn video_stream_response<R: Runtime>(
 
     let mut body = Vec::with_capacity(length as usize);
     file.read_to_end(&mut body)?;
+    record_diagnostic(
+        app,
+        "debug",
+        "stream",
+        "response.sent",
+        "Returned a complete local video",
+        serde_json::json!({ "status": 200, "fileLength": length, "responseBytes": body.len() }),
+    );
     Ok(response
         .status(StatusCode::OK)
         .header(CONTENT_LENGTH, body.len())
@@ -766,7 +875,28 @@ fn video_stream_response<R: Runtime>(
 
 #[tauri::command]
 fn open_video(app: tauri::AppHandle, path: String) -> Result<bool, String> {
-    let path = validated_video_path(&app, &path)?;
+    record_diagnostic(
+        &app,
+        "info",
+        "playback",
+        "external.requested",
+        "Requested playback in the operating system's default player",
+        serde_json::json!({ "path": path }),
+    );
+    let path = match validated_video_path(&app, &path) {
+        Ok(path) => path,
+        Err(error) => {
+            record_diagnostic(
+                &app,
+                "error",
+                "playback",
+                "external.rejected",
+                "Rejected the external playback path",
+                serde_json::json!({ "path": path, "error": error }),
+            );
+            return Err(error);
+        }
+    };
 
     #[cfg(target_os = "macos")]
     let mut command = Command::new("open");
@@ -782,11 +912,30 @@ fn open_video(app: tauri::AppHandle, path: String) -> Result<bool, String> {
 
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
-        command
-            .arg(&path)
-            .spawn()
-            .map(|_| true)
-            .map_err(|error| format!("Could not open the video: {error}"))
+        match command.arg(&path).spawn() {
+            Ok(_) => {
+                record_diagnostic(
+                    &app,
+                    "info",
+                    "playback",
+                    "external.opened",
+                    "Sent the video to the operating system's default player",
+                    serde_json::json!({ "path": path }),
+                );
+                Ok(true)
+            }
+            Err(error) => {
+                record_diagnostic(
+                    &app,
+                    "error",
+                    "playback",
+                    "external.failed",
+                    "The operating system could not open the video",
+                    serde_json::json!({ "path": path, "error": error.to_string() }),
+                );
+                Err(format!("Could not open the video: {error}"))
+            }
+        }
     }
 }
 
@@ -872,6 +1021,59 @@ fn video_stream_base_url(
 }
 
 #[tauri::command]
+fn diagnostics_snapshot(diagnostics: tauri::State<DiagnosticsState>) -> DiagnosticSnapshot {
+    diagnostics.snapshot()
+}
+
+#[tauri::command]
+fn record_frontend_diagnostic(
+    diagnostics: tauri::State<DiagnosticsState>,
+    level: String,
+    category: String,
+    event: String,
+    message: String,
+    fields: serde_json::Value,
+) {
+    diagnostics.record(&level, &category, &event, &message, fields);
+}
+
+#[tauri::command]
+fn clear_diagnostics(diagnostics: tauri::State<DiagnosticsState>) -> Result<(), String> {
+    diagnostics.clear()
+}
+
+#[tauri::command]
+async fn export_diagnostics(
+    app: tauri::AppHandle,
+    include_paths: bool,
+) -> Result<Option<String>, String> {
+    let Some(destination) = app
+        .dialog()
+        .file()
+        .set_title("Export Watchcraft diagnostic report")
+        .set_file_name("watchcraft-diagnostics.jsonl")
+        .add_filter("JSON Lines", &["jsonl"])
+        .blocking_save_file()
+    else {
+        return Ok(None);
+    };
+    let destination = destination
+        .into_path()
+        .map_err(|error| format!("Could not read the diagnostic report destination: {error}"))?;
+    app.state::<DiagnosticsState>()
+        .export(&destination, include_paths)?;
+    record_diagnostic(
+        &app,
+        "info",
+        "diagnostics",
+        "report.exported",
+        "Exported a diagnostic report",
+        serde_json::json!({ "path": destination, "includedPaths": include_paths }),
+    );
+    Ok(Some(destination.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
 fn load_current_collection(app: tauri::AppHandle) -> Result<Option<LibraryLocation>, String> {
     load_current_library(&app)
 }
@@ -946,12 +1148,60 @@ async fn choose_collection_media_folder(
         picker = picker.set_directory(path);
     }
     let Some(selected) = picker.blocking_pick_folder() else {
+        record_diagnostic(
+            &app,
+            "info",
+            "binding",
+            "folder.cancelled",
+            "Media folder selection was cancelled",
+            serde_json::json!({ "collectionId": collection_id }),
+        );
         return Ok(None);
     };
     let selected = selected
         .into_path()
         .map_err(|error| format!("Could not read the selected folder: {error}"))?;
-    library::bind_collection_media(&data_root, &collection_id, &selected)?;
+    record_diagnostic(
+        &app,
+        "info",
+        "binding",
+        "folder.selected",
+        "Selected a folder for referenced local media",
+        serde_json::json!({ "collectionId": collection_id, "selectedPath": selected }),
+    );
+    let bound = match library::bind_collection_media(&data_root, &collection_id, &selected) {
+        Ok(bound) => bound,
+        Err(error) => {
+            record_diagnostic(
+                &app,
+                "error",
+                "binding",
+                "folder.rejected",
+                "The selected media folder could not be bound",
+                serde_json::json!({
+                    "collectionId": collection_id,
+                    "selectedPath": selected,
+                    "error": error,
+                }),
+            );
+            return Err(error);
+        }
+    };
+    record_diagnostic(
+        &app,
+        "info",
+        "binding",
+        "folder.bound",
+        "Bound the collection to its referenced local media",
+        serde_json::json!({
+            "collectionId": collection_id,
+            "mediaRoot": bound.media_root,
+            "mediaPathPrefix": bound.media_path_prefix,
+            "mediaExpected": bound.media_expected,
+            "mediaFound": bound.media_found,
+            "mediaExtra": bound.media_extra,
+        }),
+    );
     load_current_library(&app)
 }
 
@@ -1043,6 +1293,7 @@ pub fn run() {
         .manage(ApprovedLibraryRoots::default())
         .manage(YoutubeBridgeBaseUrl(configured_youtube_bridge_base_url))
         .manage(VideoStreamBaseUrl::default())
+        .manage(DiagnosticsState::default())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_persisted_scope::init())
         .plugin(tauri_plugin_dialog::init())
@@ -1050,6 +1301,14 @@ pub fn run() {
             let response =
                 video_stream_response(context.app_handle(), request).unwrap_or_else(|error| {
                     eprintln!("Watchcraft stream failed: {error}");
+                    record_diagnostic(
+                        context.app_handle(),
+                        "error",
+                        "stream",
+                        "response.failed",
+                        "The local video stream failed",
+                        serde_json::json!({ "error": error.to_string() }),
+                    );
                     Response::builder()
                         .status(StatusCode::INTERNAL_SERVER_ERROR)
                         .body(Vec::new())
@@ -1058,6 +1317,16 @@ pub fn run() {
             responder.respond(response);
         })
         .setup(|_app| {
+            let identifier = _app.config().identifier.clone();
+            let diagnostics_enabled = diagnostics_enabled_for_identifier(&identifier);
+            _app.state::<DiagnosticsState>()
+                .initialize(
+                    diagnostics_enabled,
+                    &app_data_root(_app.handle()).map_err(std::io::Error::other)?,
+                    &_app.package_info().version.to_string(),
+                    &identifier,
+                )
+                .map_err(std::io::Error::other)?;
             #[cfg(any(target_os = "linux", test))]
             {
                 let base_url = start_linux_video_stream_server(_app.handle().clone())
@@ -1083,6 +1352,10 @@ pub fn run() {
             default_video_player,
             youtube_bridge_base_url,
             video_stream_base_url,
+            diagnostics_snapshot,
+            record_frontend_diagnostic,
+            clear_diagnostics,
+            export_diagnostics,
             load_current_collection,
             list_registered_collections,
             choose_collection_folder,
@@ -1101,13 +1374,28 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_video_roots, configured_youtube_bridge_base_url, is_video_path,
-        is_within_approved_roots, linux_deep_link_schemes_to_register, requested_byte_range,
-        validated_external_url, video_content_type, write_linux_video_response, MAX_STREAM_CHUNK,
+        canonical_video_roots, configured_youtube_bridge_base_url,
+        diagnostics_enabled_for_identifier, is_video_path, is_within_approved_roots,
+        linux_deep_link_schemes_to_register, requested_byte_range, validated_external_url,
+        video_content_type, write_linux_video_response, MAX_STREAM_CHUNK,
     };
     use std::fs;
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn diagnostics_follow_the_application_channel_identity() {
+        assert!(diagnostics_enabled_for_identifier(
+            "app.watchcraft.reader.beta"
+        ));
+        assert!(diagnostics_enabled_for_identifier(
+            "app.watchcraft.reader.dev"
+        ));
+        assert!(diagnostics_enabled_for_identifier(
+            "app.watchcraft.reader.smoke"
+        ));
+        assert!(!diagnostics_enabled_for_identifier("app.watchcraft.reader"));
+    }
 
     #[cfg(target_os = "macos")]
     use super::{macos_application_name, macos_handler_for_content_type};

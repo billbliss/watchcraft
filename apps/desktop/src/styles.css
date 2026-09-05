@@ -46,6 +46,9 @@
   margin: 0;
 }
 
+.settings-build-actions { display: flex; gap: 10px; align-items: center; }
+.settings-build-actions button { padding: 5px 8px; font-size: .75rem; }
+
 .welcome-actions button,
 .settings-dialog button,
 .collection-url-form input {

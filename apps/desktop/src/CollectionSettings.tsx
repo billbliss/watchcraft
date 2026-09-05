@@ -46,6 +46,7 @@ interface CollectionSettingsProps {
   onAddUrl: (url: string, openAfter: boolean) => Promise<boolean>;
   onClose: () => void;
   onLocateMedia: (collection: RegisteredCollection) => Promise<void>;
+  onOpenDiagnostics?: () => void;
   onRemove: (collection: RegisteredCollection) => Promise<void>;
   onSetArchived: (collection: RegisteredCollection, archived: boolean) => Promise<void>;
   onSwitch: (collection: RegisteredCollection) => Promise<void>;
@@ -68,6 +69,7 @@ export function CollectionSettings({
   onAddUrl,
   onClose,
   onLocateMedia,
+  onOpenDiagnostics,
   onRemove,
   onSetArchived,
   onSwitch,
@@ -416,7 +418,10 @@ export function CollectionSettings({
                 <input checked={openAfter} disabled={busy} onChange={(event) => setOpenAfter(event.target.checked)} type="checkbox" />
                 <span>Open the collection after adding it</span>
               </label>
-              <span className="settings-version">Version {appVersion ?? "unavailable"}</span>
+              <div className="settings-build-actions">
+                {onOpenDiagnostics ? <button onClick={onOpenDiagnostics} type="button">View diagnostics…</button> : null}
+                <span className="settings-version">Version {appVersion ?? "unavailable"}</span>
+              </div>
             </div>
           </section>
 

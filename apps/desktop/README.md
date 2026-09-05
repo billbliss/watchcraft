@@ -20,6 +20,22 @@ into private application storage.
 Its only writes are versioned collection metadata and `library.json` inside
 Watchcraft's private app-data directory.
 
+## Diagnostics
+
+Development, smoke-test, and beta application identities record diagnostics
+automatically from startup. Open **Settings → View diagnostics…** to inspect,
+copy, clear, or export the combined browser and native log. The current and two
+previous sessions are retained as bounded JSONL files in Watchcraft's private
+application-data directory. Full local paths are excluded from exports unless
+the user explicitly includes them. Stable desktop builds do not record or show
+diagnostics.
+
+Folder binding records selected and canonical media roots, the portable path
+prefix, match counts, and approved runtime scope. Playback records resolved
+media sources, HTML media state, native path validation, file metadata, byte
+ranges, stream responses, and default-player outcomes. Reports never contain
+video bytes.
+
 ## Run
 
 ```sh

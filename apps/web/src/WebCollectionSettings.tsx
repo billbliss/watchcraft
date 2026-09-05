@@ -24,6 +24,7 @@ interface WebCollectionSettingsProps {
   openFeaturedPicker: boolean;
   onAddUrl: (url: string, openAfter: boolean) => Promise<boolean>;
   onClose: () => void;
+  onOpenDiagnostics: () => void;
   onRemove: (collection: SavedWebCollection) => void;
   onSwitch: (collection: SavedWebCollection) => void;
 }
@@ -36,6 +37,7 @@ export function WebCollectionSettings({
   openFeaturedPicker,
   onAddUrl,
   onClose,
+  onOpenDiagnostics,
   onRemove,
   onSwitch,
 }: WebCollectionSettingsProps): ReactElement {
@@ -319,6 +321,10 @@ export function WebCollectionSettings({
             Watchcraft Web plays web video. Collections that use videos on your computer
             require the <a href="/#download">desktop app</a>.
           </p>
+
+          <button className="web-diagnostics-button" onClick={onOpenDiagnostics} type="button">
+            View diagnostics…
+          </button>
 
           {error ? <p className="web-settings-error" role="alert">{error}</p> : null}
           {busy ? <p className="web-settings-progress" role="status">Loading collection…</p> : null}

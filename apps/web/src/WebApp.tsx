@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useState, type ReactElement } from "re
 import type { CollectionManifest } from "@watchcraft/catalog-core";
 import { App } from "./App";
 import { WebCollectionSettings } from "./WebCollectionSettings";
+import { DiagnosticsDialog } from "./DiagnosticsDialog";
+import { installBrowserDiagnostics, WebDiagnosticsService, type DiagnosticEvent } from "./diagnostics";
 import {
   HttpCatalogRepository,
   repositoryFromLocation,
@@ -159,6 +161,7 @@ function EmptyWebApp({ onChoose }: { onChoose: () => void }): ReactElement {
 }
 
 export function WebApp(): ReactElement {
+  const [diagnostics] = useState(() => new WebDiagnosticsService());
   const [initialState] = useState<InitialWebAppState>(initialWebAppState);
   const [currentLocation, setCurrentLocation] = useState<WebLocationState | null>(
     initialState.currentLocation,
@@ -170,6 +173,12 @@ export function WebApp(): ReactElement {
   const [settingsOpen, setSettingsOpen] = useState(initialState.settingsOpen);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const recordDiagnostic = useCallback((event: DiagnosticEvent): void => {
+    diagnostics.record(event);
+  }, [diagnostics]);
+
+  useEffect(() => installBrowserDiagnostics(diagnostics), [diagnostics]);
 
   const repository = useMemo(() => currentLocation
     ? new HttpCatalogRepository({
@@ -236,7 +245,21 @@ export function WebApp(): ReactElement {
     setSettingsError(null);
     try {
       const manifestUrl = new URL(rawUrl, window.location.href).href;
+      diagnostics.record({
+        level: "info",
+        category: "collection",
+        event: "manifest.requested",
+        message: "Requested a web collection manifest",
+        fields: { manifestUrl },
+      });
       const response = await fetch(manifestUrl, { cache: "no-store" });
+      diagnostics.record({
+        level: response.ok ? "info" : "error",
+        category: "network",
+        event: "manifest.response",
+        message: "Received a web collection manifest response",
+        fields: { manifestUrl, status: response.status, ok: response.ok },
+      });
       if (!response.ok) throw new Error(`Could not load the collection (${response.status}).`);
       const value: unknown = await response.json();
       if (!isCollectionManifest(value)) {
@@ -258,6 +281,13 @@ export function WebApp(): ReactElement {
       }
       return true;
     } catch (error) {
+      diagnostics.record({
+        level: "error",
+        category: "collection",
+        event: "manifest.failed",
+        message: error instanceof Error ? error.message : "Could not add that collection",
+        fields: { requestedUrl: rawUrl },
+      });
       setSettingsError(error instanceof Error ? error.message : "Could not add that collection.");
       return false;
     } finally {
@@ -311,6 +341,8 @@ export function WebApp(): ReactElement {
         <App
           key={repository.manifestLocation}
           onCollectionLoaded={rememberLoadedCollection}
+          onDiagnosticEvent={recordDiagnostic}
+          onOpenDiagnostics={() => setDiagnosticsOpen(true)}
           repository={repository}
           routeBasePath={import.meta.env.BASE_URL}
           sidebarFooter={settingsButton}
@@ -322,7 +354,7 @@ export function WebApp(): ReactElement {
           setSettingsOpen(true);
         }} />
       )}
-      {settingsOpen ? (
+      {settingsOpen && !diagnosticsOpen ? (
         <WebCollectionSettings
           activeCollectionId={currentCollectionId}
           busy={settingsBusy}
@@ -331,9 +363,13 @@ export function WebApp(): ReactElement {
           openFeaturedPicker={repository === null}
           onAddUrl={addCollection}
           onClose={() => setSettingsOpen(false)}
+          onOpenDiagnostics={() => setDiagnosticsOpen(true)}
           onRemove={removeCollection}
           onSwitch={switchCollection}
         />
+      ) : null}
+      {diagnosticsOpen ? (
+        <DiagnosticsDialog onClose={() => setDiagnosticsOpen(false)} service={diagnostics} />
       ) : null}
     </>
   );

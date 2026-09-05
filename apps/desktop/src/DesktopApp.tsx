@@ -10,6 +10,9 @@ import {
 } from "./desktopCatalogRepository";
 import { collectionUrlFromDeepLink } from "./deepLink";
 import { singleFlight } from "./singleFlight";
+import { DiagnosticsDialog } from "../../web/src/DiagnosticsDialog";
+import { installBrowserDiagnostics, type DiagnosticEvent } from "../../web/src/diagnostics";
+import { DesktopDiagnosticsService } from "./desktopDiagnostics";
 
 type ScopeStatus = "checking" | "ready" | "needs-access";
 
@@ -32,6 +35,9 @@ function SettingsIcon(): ReactElement {
 }
 
 export function DesktopApp(): ReactElement {
+  const [diagnostics] = useState(() => new DesktopDiagnosticsService());
+  const [diagnosticsEnabled, setDiagnosticsEnabled] = useState(false);
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const [libraryRoot, setLibraryRoot] = useState<string | null>(null);
   const [scopeStatus, setScopeStatus] = useState<ScopeStatus>("checking");
@@ -45,6 +51,9 @@ export function DesktopApp(): ReactElement {
   const [busy, setBusy] = useState(false);
   const [pendingDeepLinkUrl, setPendingDeepLinkUrl] = useState<string | null>(null);
   const processingDeepLink = useRef<string | null>(null);
+  const recordDiagnostic = useCallback((event: DiagnosticEvent): void => {
+    diagnostics.record(event);
+  }, [diagnostics]);
   const repository = useMemo(
     () => libraryLocation
       && youtubeBridgeBaseUrl
@@ -75,6 +84,20 @@ export function DesktopApp(): ReactElement {
   useEffect(() => {
     void getVersion().then(setAppVersion).catch(() => setAppVersion(null));
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    let uninstall: (() => void) | undefined;
+    void diagnostics.snapshot().then((snapshot) => {
+      if (!active) return;
+      setDiagnosticsEnabled(snapshot.enabled);
+      if (snapshot.enabled) uninstall = installBrowserDiagnostics(diagnostics);
+    }).catch(() => undefined);
+    return () => {
+      active = false;
+      uninstall?.();
+    };
+  }, [diagnostics]);
 
   useEffect(() => {
     let current = true;
@@ -352,7 +375,7 @@ export function DesktopApp(): ReactElement {
     });
   }, [pendingDeepLinkUrl, scopeStatus, youtubeBridgeBaseUrl]);
 
-  const settings = settingsOpen ? (
+  const settings = settingsOpen && !diagnosticsOpen ? (
     <CollectionSettings
       appVersion={appVersion}
       busy={busy}
@@ -362,6 +385,7 @@ export function DesktopApp(): ReactElement {
       onAddUrl={addUrl}
       onClose={() => setSettingsOpen(false)}
       onLocateMedia={locateCollectionMedia}
+      onOpenDiagnostics={diagnosticsEnabled ? () => setDiagnosticsOpen(true) : undefined}
       onRemove={removeCollection}
       onSetArchived={setCollectionArchived}
       onSwitch={switchCollection}
@@ -391,6 +415,7 @@ export function DesktopApp(): ReactElement {
           </section>
         </main>
         {settings}
+        {diagnosticsOpen ? <DiagnosticsDialog onClose={() => setDiagnosticsOpen(false)} service={diagnostics} /> : null}
       </>
     );
   }
@@ -399,6 +424,8 @@ export function DesktopApp(): ReactElement {
     <div className="desktop-root">
       <App
         key={libraryLocation?.manifestPath}
+        onDiagnosticEvent={diagnosticsEnabled ? recordDiagnostic : undefined}
+        onOpenDiagnostics={diagnosticsEnabled ? () => setDiagnosticsOpen(true) : undefined}
         repository={repository}
         sidebarFooter={(
           <button
@@ -414,6 +441,7 @@ export function DesktopApp(): ReactElement {
         )}
       />
       {settings}
+      {diagnosticsOpen ? <DiagnosticsDialog onClose={() => setDiagnosticsOpen(false)} service={diagnostics} /> : null}
     </div>
   );
 }

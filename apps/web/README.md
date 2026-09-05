@@ -31,6 +31,12 @@ capability. Collections with fewer than five videos bypass corpus-frequency
 filtering because percentage and repetition thresholds are not meaningful at
 that size.
 
+Browser diagnostics are recorded automatically in a bounded local-storage
+buffer. Open **Settings → View diagnostics…** to inspect, copy, clear, or
+download the JSONL report. Web reports cover collection loading, browser errors,
+and playback events; native folder binding and local stream details are available
+only in beta, development, and smoke-test desktop builds.
+
 Topic labels are compact UI names. Search and the topic facet also match their
 canonical keys and longer source aliases, preserving the analytical detail that
 was removed from display.

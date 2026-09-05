@@ -20,10 +20,13 @@ import {
   type CSSProperties,
   type ReactElement,
 } from "react";
+import type { DiagnosticEvent } from "./diagnostics";
 
 interface AppProps {
   repository: CatalogRepository;
   onCollectionLoaded?: (manifest: CollectionManifest) => void;
+  onDiagnosticEvent?: (event: DiagnosticEvent) => void;
+  onOpenDiagnostics?: () => void;
   routeBasePath?: string;
   sidebarFooter?: ReactElement;
   videoRouteMode?: "path" | "query";
@@ -201,6 +204,8 @@ function LoadingScreen(): ReactElement {
 
 export function App({
   onCollectionLoaded,
+  onDiagnosticEvent,
+  onOpenDiagnostics,
   repository,
   routeBasePath = "/",
   sidebarFooter,
@@ -239,23 +244,49 @@ export function App({
 
   useEffect(() => {
     let current = true;
+    onDiagnosticEvent?.({
+      level: "info",
+      category: "collection",
+      event: "catalog.loading",
+      message: "Loading the collection catalog",
+      fields: { manifestLocation: repository.manifestLocation },
+    });
     repository
       .loadCollection()
       .then((collection) => {
         if (!current) return;
         setManifest(collection);
         onCollectionLoaded?.(collection);
+        onDiagnosticEvent?.({
+          level: "info",
+          category: "collection",
+          event: "catalog.loaded",
+          message: "Loaded the collection catalog",
+          fields: {
+            collectionId: collection.collection_id,
+            revision: collection.revision,
+            videoCount: collection.stats.video_count,
+          },
+        });
         document.title = `${collection.title} — Watchcraft`;
       })
       .catch((error: unknown) => {
         if (current) {
-          setLoadError(error instanceof Error ? error.message : String(error));
+          const message = error instanceof Error ? error.message : String(error);
+          setLoadError(message);
+          onDiagnosticEvent?.({
+            level: "error",
+            category: "collection",
+            event: "catalog.failed",
+            message,
+            fields: { manifestLocation: repository.manifestLocation },
+          });
         }
       });
     return () => {
       current = false;
     };
-  }, [onCollectionLoaded, repository]);
+  }, [onCollectionLoaded, onDiagnosticEvent, repository]);
 
   const items = useMemo(
     () => (manifest ? orderedItems(manifest) : []),
@@ -326,17 +357,34 @@ export function App({
     repository
       .loadAnalysis(selectedItem)
       .then((loaded) => {
-        if (current) setAnalysis(loaded);
+        if (current) {
+          setAnalysis(loaded);
+          onDiagnosticEvent?.({
+            level: "debug",
+            category: "collection",
+            event: "analysis.loaded",
+            message: "Loaded video analysis",
+            fields: { itemId: selectedItem.item_id },
+          });
+        }
       })
       .catch((error: unknown) => {
         if (current) {
-          setAnalysisError(error instanceof Error ? error.message : String(error));
+          const message = error instanceof Error ? error.message : String(error);
+          setAnalysisError(message);
+          onDiagnosticEvent?.({
+            level: "error",
+            category: "collection",
+            event: "analysis.failed",
+            message,
+            fields: { itemId: selectedItem.item_id, analysisPath: selectedItem.analysis.path },
+          });
         }
       });
     return () => {
       current = false;
     };
-  }, [repository, selectedItem]);
+  }, [onDiagnosticEvent, repository, selectedItem]);
 
   useEffect(() => {
     let current = true;
@@ -433,6 +481,41 @@ export function App({
     query.trim() || topicFilterQuery.trim() || selectedTopics.size || selectedFamilies.size,
   );
 
+  useEffect(() => {
+    if (!selectedItem) return;
+    onDiagnosticEvent?.({
+      level: mediaUrl ? "info" : "warn",
+      category: "playback",
+      event: "media.selected",
+      message: mediaUrl ? "Resolved a media source for playback" : "No playable media source was resolved",
+      fields: {
+        itemId: selectedItem.item_id,
+        mediaUrl,
+        media: selectedItem.media,
+      },
+    });
+  }, [mediaUrl, onDiagnosticEvent, selectedItem]);
+
+  function recordMediaState(event: string, player: HTMLVideoElement, level: "debug" | "info" | "warn" = "debug"): void {
+    onDiagnosticEvent?.({
+      level,
+      category: "playback",
+      event: `media.${event}`,
+      message: `HTML media event: ${event}`,
+      fields: {
+        itemId: selectedItem?.item_id,
+        mediaUrl,
+        currentTime: player.currentTime,
+        duration: Number.isFinite(player.duration) ? player.duration : null,
+        readyState: player.readyState,
+        networkState: player.networkState,
+        paused: player.paused,
+        videoWidth: player.videoWidth,
+        videoHeight: player.videoHeight,
+      },
+    });
+  }
+
   function toggleTopic(topicId: string): void {
     setSelectedTopics((previous) => {
       const next = new Set(previous);
@@ -455,6 +538,13 @@ export function App({
     if (!selectedItem || openStatus === "opening") return;
     setOpenStatus("opening");
     const opened = await repository.openInDefaultPlayer(selectedItem);
+    onDiagnosticEvent?.({
+      level: opened ? "info" : "error",
+      category: "playback",
+      event: opened ? "external.opened" : "external.failed",
+      message: opened ? "Opened the video in the default player" : "Could not open the video in the default player",
+      fields: { itemId: selectedItem.item_id, mediaUrl },
+    });
     setOpenStatus(opened ? "opened" : "error");
     window.setTimeout(() => setOpenStatus("idle"), 1800);
   }
@@ -463,6 +553,13 @@ export function App({
     if (!selectedItem || !repository.openExternalMedia || openStatus === "opening") return;
     setOpenStatus("opening");
     const opened = await repository.openExternalMedia(selectedItem);
+    onDiagnosticEvent?.({
+      level: opened ? "info" : "error",
+      category: "playback",
+      event: opened ? "external.opened" : "external.failed",
+      message: opened ? "Opened external media" : "Could not open external media",
+      fields: { itemId: selectedItem.item_id, mediaUrl },
+    });
     setOpenStatus(opened ? "opened" : "error");
     window.setTimeout(() => setOpenStatus("idle"), 1800);
   }
@@ -492,6 +589,20 @@ export function App({
   function handleMediaError(sourceUrl: string, player: HTMLVideoElement): void {
     if (player.error?.code === MediaError.MEDIA_ERR_ABORTED) return;
     const retryCount = mediaRetryCountsRef.current.get(sourceUrl) ?? 0;
+    onDiagnosticEvent?.({
+      level: "error",
+      category: "playback",
+      event: "media.error",
+      message: player.error?.message || "Embedded playback failed",
+      fields: {
+        itemId: selectedItem?.item_id,
+        mediaUrl: sourceUrl,
+        mediaErrorCode: player.error?.code,
+        retryCount,
+        networkState: player.networkState,
+        readyState: player.readyState,
+      },
+    });
     const retryDelays = [500, 1_200, 2_500];
     if (retryCount < retryDelays.length) {
       mediaRetryCountsRef.current.set(sourceUrl, retryCount + 1);
@@ -510,7 +621,13 @@ export function App({
     if (!player) return;
     setMediaErrorUrl(null);
     player.load();
-    void player.play().catch(() => undefined);
+    void player.play().catch((error: unknown) => onDiagnosticEvent?.({
+      level: "error",
+      category: "playback",
+      event: "play.rejected",
+      message: error instanceof Error ? error.message : String(error),
+      fields: { itemId: selectedItem?.item_id, mediaUrl },
+    }));
   }
 
   function saveSidebarWidth(width: number): void {
@@ -755,15 +872,22 @@ export function App({
                       <video
                         controls
                         key={mediaUrl}
-                        onCanPlay={() => {
+                        onCanPlayThrough={(event) => recordMediaState("canplaythrough", event.currentTarget)}
+                        onCanPlay={(event) => {
                           mediaRetryCountsRef.current.delete(mediaUrl);
                           setMediaErrorUrl(null);
+                          recordMediaState("canplay", event.currentTarget, "info");
                         }}
+                        onLoadStart={(event) => recordMediaState("loadstart", event.currentTarget)}
                         onError={(event) => handleMediaError(mediaUrl, event.currentTarget)}
                         onLoadedMetadata={(event) => {
                           const duration = event.currentTarget.duration;
                           setMediaDuration(Number.isFinite(duration) ? duration : null);
+                          recordMediaState("loadedmetadata", event.currentTarget, "info");
                         }}
+                        onPlaying={(event) => recordMediaState("playing", event.currentTarget, "info")}
+                        onStalled={(event) => recordMediaState("stalled", event.currentTarget, "warn")}
+                        onWaiting={(event) => recordMediaState("waiting", event.currentTarget, "warn")}
                         playsInline
                         preload="auto"
                         ref={playerRef}
@@ -773,6 +897,7 @@ export function App({
                         <div className="media-error" role="status">
                           <span>Embedded playback failed.</span>
                           <button onClick={retryMedia} type="button">Retry</button>
+                          {onOpenDiagnostics ? <button onClick={onOpenDiagnostics} type="button">View diagnostics</button> : null}
                         </div>
                       )}
                     </>
