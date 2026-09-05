@@ -244,6 +244,40 @@ members. Dynamic worker-instance registration, capacity advertisement, and sched
 are deferred. If introduced later, those lease-backed observations remain separate
 from the versioned capability and execution policy described here.
 
+The first hardware-specific profile is `macos-mlx@1`. It routes a bounded, public-data
+speech-recognition smoke to a reviewed Apple-silicon GitHub-hosted workflow. That smoke
+generates a temporary audio fixture on the runner, executes the real MLX Whisper
+implementation, and publishes a transcript artifact. Its dedicated handler identity
+ends in `-smoke`: it is not the future production handler for acquired or private
+audio, and its fixture is never an authoritative input or retained artifact.
+
+### Operational retention and cleanup
+
+Test and diagnostic runs identify their purpose in the run request and may carry an
+explicit retention object with an `ephemeral` class and absolute expiration time.
+Retention is a property of the coherent run aggregate, not a heuristic inferred from
+names, dates, handler types, or current state. Unmarked historical records are never
+silently classified as disposable.
+
+Administrative cleanup operates on one exact run ID at a time. It requires a second
+exact-ID confirmation and the registry-administrator authority. A transaction may
+delete the run aggregate, all jobs belonging to it, and their event projections only
+when the run and every job are terminal. Marked runs cannot be removed before their
+deadline. Legacy unmarked runs require a separate explicit override. The mutation
+writes a bounded cleanup audit record and is command-idempotent so a retry reports the
+same deletion result.
+
+The original infrastructure smoke predates run aggregates and can leave a terminal
+job whose referenced run does not exist. Cleanup may identify these as a distinct
+legacy-orphan category and delete one only by an exact confirmed job ID after proving
+that it is terminal and still has no run. A job that belongs to an existing run can
+only be removed through the run-level operation, preserving aggregate ownership.
+
+Convex cleanup does not delete referenced R2 objects. Content-addressed objects can be
+shared, and an upload may also be an intentional orphan after a failed attempt. R2
+garbage collection therefore remains a separate, reachability-based operation that
+must scan every authoritative reference and honor source-rights and retention policy.
+
 ### Artifact identity and storage
 
 The R2 bucket is private. Authoritative objects use canonical keys of the form:

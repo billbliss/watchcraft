@@ -8,6 +8,7 @@
  * @module
  */
 
+import type * as authoringCleanup from "../authoringCleanup.js";
 import type * as authoringInternal from "../authoringInternal.js";
 import type * as authoringRegistry from "../authoringRegistry.js";
 import type * as crons from "../crons.js";
@@ -20,6 +21,7 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  authoringCleanup: typeof authoringCleanup;
   authoringInternal: typeof authoringInternal;
   authoringRegistry: typeof authoringRegistry;
   crons: typeof crons;

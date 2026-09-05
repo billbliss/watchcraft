@@ -54,4 +54,14 @@ export default defineSchema({
     recorded_at: v.number(),
     result: v.any(),
   }).index("by_environment_command", ["environment", "command_id"]),
+  authoring_cleanup_events: defineTable({
+    command_id: v.string(),
+    target_kind: v.string(),
+    target_id: v.string(),
+    actor: v.string(),
+    recorded_at: v.number(),
+    result: v.any(),
+  })
+    .index("by_cleanup_command", ["command_id"])
+    .index("by_cleanup_target", ["target_kind", "target_id"]),
 });

@@ -2,6 +2,7 @@ import argparse
 import io
 import json
 import os
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -14,9 +15,20 @@ import queued_authoring
 from watchcraft_author import build_parser, main
 
 
-def registry_snapshot():
+def registry_snapshot(*, transcription=False):
+    if transcription:
+        return {
+            "registry_version": "2026-09-04.2",
+            "registry_sha256": "c" * 64,
+            "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
+                queued_authoring.TRANSCRIPTION_SMOKE_HANDLER
+            ],
+            "execution_profile": queued_authoring.LOCAL_EXECUTION_PROFILES[
+                queued_authoring.MLX_EXECUTION_PROFILE
+            ],
+        }
     return {
-        "registry_version": "2026-09-04.1",
+        "registry_version": "2026-09-04.2",
         "registry_sha256": "c" * 64,
         "handler": {
             "id": "watchcraft.analysis.lexical",
@@ -72,6 +84,28 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertEqual(args.queue_command, "submit-analysis")
         self.assertEqual(args.max_topics, 8)
         self.assertEqual(args.operator_token_source, "auto")
+
+    def test_queue_parser_exposes_one_command_smokes_and_guarded_cleanup(self):
+        smoke = build_parser().parse_args([
+            "queue", "smoke-transcription",
+            "--operator-token-source", "keychain",
+            "--r2-credentials-source", "keychain",
+        ])
+        self.assertEqual(smoke.timeout_seconds, 1800)
+        self.assertEqual(smoke.retention_days, 7)
+
+        cleanup = build_parser().parse_args([
+            "queue", "cleanup-run", "run-1", "--confirm", "run-1",
+            "--allow-unmarked",
+        ])
+        self.assertEqual(cleanup.run_id, "run-1")
+        self.assertEqual(cleanup.confirm, "run-1")
+        self.assertTrue(cleanup.allow_unmarked)
+        orphan = build_parser().parse_args([
+            "queue", "cleanup-orphan-job", "job-1", "--confirm", "job-1",
+        ])
+        self.assertEqual(orphan.job_id, "job-1")
+        self.assertEqual(orphan.confirm, "job-1")
 
     def test_result_parser_exposes_separate_control_and_artifact_credentials(self):
         args = build_parser().parse_args([
@@ -160,6 +194,33 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertEqual(result["topics"], ["balance", "color", "exposure"])
         self.assertNotIn("segments", result)
 
+    def test_mlx_smoke_transcribes_a_temporary_generated_audio_fixture(self):
+        transcription_smoke_spec = queued_authoring.transcription_smoke_spec(
+            "Watchcraft verifies audio."
+        )
+        job = {
+            "job_id": "job-mlx",
+            "spec_sha256": "a" * 64,
+            "spec": transcription_smoke_spec,
+        }
+        mlx_whisper = Mock()
+        mlx_whisper.transcribe.return_value = {
+            "language": "en",
+            "segments": [{"start": 0.0, "end": 1.0, "text": " Watchcraft verifies audio."}],
+        }
+        with patch.dict(sys.modules, {"mlx_whisper": mlx_whisper}):
+            with patch("queued_authoring.subprocess.run") as run:
+                result = queued_authoring.mlx_transcription_smoke(job)
+        run.assert_called_once()
+        generated_path = Path(run.call_args.args[0][4])
+        self.assertEqual(run.call_args.args[0][:5], ["say", "-r", "155", "-o", str(generated_path)])
+        self.assertFalse(generated_path.exists())
+        mlx_whisper.transcribe.assert_called_once()
+        self.assertEqual(result["kind"], "watchcraft.transcript")
+        self.assertEqual(result["text"], "Watchcraft verifies audio.")
+        self.assertFalse(result["provenance"]["audio_retained"])
+        self.assertEqual(transcription_smoke_spec["artifact_kind"], "transcript")
+
     def test_python_r2_store_is_content_addressed_and_create_once(self):
         class MissingObject(Exception):
             response = {
@@ -236,6 +297,24 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertIn("expected_revision=4", command)
         self.assertEqual(command[3], "authoring-worker.yml")
 
+    def test_dispatch_routes_mlx_transcription_to_the_macos_workflow(self):
+        job = {
+            "job_id": "job-mlx",
+            "revision": 4,
+            "state": "dispatch_pending",
+            "spec_sha256": "a" * 64,
+            "dispatch": {"generation": 1},
+            "spec": {
+                **queued_authoring.transcription_smoke_spec(),
+                "registry_snapshot": registry_snapshot(transcription=True),
+            },
+        }
+        client = Mock()
+        with patch("queued_authoring.subprocess.run") as run:
+            queued_authoring.dispatch_submission(client, job)
+        self.assertEqual(run.call_args.args[0][3], "authoring-mlx-worker.yml")
+        client.post.assert_not_called()
+
     def test_dispatch_rejects_an_unsafe_workflow_name(self):
         job = {"spec": {"registry_snapshot": registry_snapshot()}}
         job["spec"]["registry_snapshot"]["execution_profile"]["dispatcher"]["workflow"] = "../bad.yml"
@@ -254,7 +333,7 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertEqual(activate.registry_file, queued_authoring.DEFAULT_REGISTRY_PATH)
 
         client = Mock()
-        client.post.return_value = {"registry_version": "2026-09-04.1"}
+        client.post.return_value = {"registry_version": "2026-09-04.2"}
         with patch("queued_authoring.registry_admin_client", return_value=client):
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(queued_authoring.run_queue_command(activate), 0)
@@ -262,6 +341,130 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertEqual(path, "/registry/activate")
         self.assertEqual(payload["expected_revision"], 0)
         self.assertRegex(payload["registry_sha256"], r"^[a-f0-9]{64}$")
+
+    def test_cleanup_command_uses_admin_authority_and_exact_confirmation(self):
+        client = Mock()
+        client.post.return_value = {"run_id": "run-1", "deleted_jobs": 1}
+        args = build_parser().parse_args([
+            "queue", "cleanup-run", "run-1", "--confirm", "run-1",
+        ])
+        with patch("queued_authoring.registry_admin_client", return_value=client):
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(queued_authoring.run_queue_command(args), 0)
+        path, payload = client.post.call_args.args
+        self.assertEqual(path, "/cleanup/purge-run")
+        self.assertEqual(payload["confirmation"], "run-1")
+        self.assertFalse(payload["allow_unmarked"])
+        self.assertRegex(payload["command_id"], r"^[a-f0-9-]{36}$")
+
+        orphan_client = Mock()
+        orphan_client.post.return_value = {"job_id": "job-1", "deleted_job_events": 8}
+        orphan_args = build_parser().parse_args([
+            "queue", "cleanup-orphan-job", "job-1", "--confirm", "job-1",
+        ])
+        with patch("queued_authoring.registry_admin_client", return_value=orphan_client):
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(queued_authoring.run_queue_command(orphan_args), 0)
+        orphan_path, orphan_payload = orphan_client.post.call_args.args
+        self.assertEqual(orphan_path, "/cleanup/purge-orphan-job")
+        self.assertEqual(orphan_payload["confirmation"], "job-1")
+
+    def test_one_command_analysis_smoke_runs_the_full_remote_ritual(self):
+        result_document = {
+            "kind": "watchcraft.analysis.lexical",
+            "topics": ["color", "exposure"],
+        }
+        payload = queued_authoring.canonical_json(result_document).encode("utf-8")
+        digest = queued_authoring.sha256_hex(payload)
+        reference = {
+            "store": "r2",
+            "algorithm": "sha256",
+            "digest": digest,
+            "byte_length": len(payload),
+            "media_type": "application/json",
+            "artifact_kind": "analysis",
+            "schema": {"id": "watchcraft.analysis.lexical", "version": 1},
+            "key": f"objects/sha256/{digest[:2]}/{digest[2:]}",
+        }
+        submitted_job = {
+            "job_id": "job-smoke",
+            "run_id": "run-smoke",
+            "revision": 2,
+            "state": "awaiting_approval",
+            "spec_sha256": "a" * 64,
+            "spec": {
+                **queued_authoring.analysis_spec(argparse.Namespace(
+                    source_id="synthetic:lexical-analysis-smoke",
+                    title="Watchcraft lexical smoke",
+                    text="Balance exposure and color.",
+                    max_topics=8,
+                )),
+                "registry_snapshot": registry_snapshot(),
+            },
+        }
+        ready_job = {**submitted_job, "revision": 3, "state": "ready"}
+        pending_job = {
+            **ready_job,
+            "revision": 4,
+            "state": "dispatch_pending",
+            "dispatch": {"generation": 1},
+        }
+        succeeded_job = {
+            **pending_job,
+            "revision": 8,
+            "state": "succeeded",
+            "result": reference,
+        }
+        client = Mock()
+
+        def post(path, body):
+            if path == "/submissions/submit":
+                self.assertEqual(body["request"]["purpose"], "smoke")
+                self.assertEqual(body["request"]["retention"]["class"], "ephemeral")
+                return {"job": submitted_job, "run": {"run_id": "run-smoke"}}
+            if path == "/submissions/approve":
+                return {"job": ready_job, "run": {"run_id": "run-smoke"}}
+            if path == "/submissions/request-dispatch":
+                return pending_job
+            if path == "/submissions/get":
+                return {
+                    "job": succeeded_job,
+                    "run": {"run_id": "run-smoke", "state": "complete"},
+                }
+            raise AssertionError(path)
+
+        client.post.side_effect = post
+        reader = Mock()
+        reader.get_bytes.return_value = payload
+        args = build_parser().parse_args([
+            "queue", "smoke-analysis", "--operator-token-source", "keychain",
+            "--r2-credentials-source", "keychain",
+        ])
+        output = io.StringIO()
+        with patch("queued_authoring.operator_client", return_value=client):
+            with patch("queued_authoring.r2_artifact_reader", return_value=reader):
+                with patch("queued_authoring.subprocess.run") as run:
+                    with redirect_stdout(output):
+                        self.assertEqual(queued_authoring.run_queue_command(args), 0)
+        self.assertEqual(run.call_args.args[0][3], "authoring-worker.yml")
+        self.assertIn('"state": "succeeded"', output.getvalue())
+        reader.get_bytes.assert_called_once_with(reference)
+
+    def test_mlx_registry_snapshot_is_accepted_only_by_the_macos_profile(self):
+        job = {
+            "job_id": "job-mlx",
+            "spec": {
+                **queued_authoring.transcription_smoke_spec(),
+                "registry_snapshot": registry_snapshot(transcription=True),
+            },
+        }
+        environment = {
+            "WATCHCRAFT_EXECUTION_PROFILE_ID": "macos-mlx",
+            "WATCHCRAFT_EXECUTION_PROFILE_VERSION": "1",
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            profile = queued_authoring.validate_registry_snapshot(job)
+        self.assertEqual(profile["dispatcher"]["workflow"], "authoring-mlx-worker.yml")
 
     def test_result_displays_verified_json_from_the_authoritative_reference(self):
         payload = queued_authoring.canonical_json({

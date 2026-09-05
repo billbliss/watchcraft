@@ -256,6 +256,33 @@ approved specification, writes and verifies the result in private R2, and report
 authoritative artifact reference to Convex. `queue retry JOB_ID` and
 `queue cancel JOB_ID` use the same compare-and-swap state transitions.
 
+The repeatable queue regression is available as a single command. It performs the
+complete submit, approve, dispatch, wait, artifact-download, and digest-verification
+ritual and marks the resulting run as ephemeral with a seven-day retention deadline:
+
+```bash
+./authoring/watchcraft-author queue smoke-analysis \
+  --operator-token-source keychain \
+  --r2-credentials-source keychain
+```
+
+The first real speech-recognition slice uses the same envelope but resolves to the
+`macos-mlx@1` execution profile and its dedicated Apple-silicon GitHub Actions
+workflow. The worker synthesizes a short public audio fixture with macOS `say`,
+transcribes it with MLX Whisper, discards the temporary audio, and retains only the
+content-addressed transcript JSON:
+
+```bash
+./authoring/watchcraft-author queue smoke-transcription \
+  --operator-token-source keychain \
+  --r2-credentials-source keychain
+```
+
+This is intentionally a real inference smoke rather than the eventual production
+audio-input handler. It proves capability-based routing and MLX execution without
+requiring an input uploader, retaining source audio, or granting the worker private
+source access.
+
 `queue result` resolves the artifact reference from the authoritative completed job,
 downloads the object from private R2, and verifies its declared byte length and SHA-256
 digest. JSON is displayed in readable form by default; `--output PATH` writes the exact
@@ -269,6 +296,39 @@ environment pair and otherwise uses Keychain. These names are deliberately disti
 from the worker's write-capable credential. The non-secret bucket and endpoint use the
 corresponding environment variables when present and otherwise come from the GitHub
 `authoring-production` environment variables.
+
+Smoke runs carry an explicit ephemeral retention policy. List expired or upcoming
+marked runs with:
+
+```bash
+./authoring/watchcraft-author queue cleanup-list \
+  --registry-admin-token-source keychain
+```
+
+After the reported deadline, purge one run's Convex aggregate and event projections
+by repeating its exact ID as confirmation:
+
+```bash
+./authoring/watchcraft-author queue cleanup-run RUN_ID \
+  --confirm RUN_ID \
+  --registry-admin-token-source keychain
+```
+
+Use `cleanup-list --include-unmarked` to audit older debug runs and terminal jobs left
+by the original synthetic smoke before it created run aggregates. Removing an unmarked
+run requires the additional `cleanup-run --allow-unmarked` flag. Remove a listed
+orphan only by its exact job ID:
+
+```bash
+./authoring/watchcraft-author queue cleanup-orphan-job JOB_ID \
+  --confirm JOB_ID \
+  --registry-admin-token-source keychain
+```
+
+Cleanup is restricted to terminal runs and jobs, is command-idempotent, and records
+its own audit event. It reports but does not delete R2 artifacts; object deletion
+remains deferred until reachability-based garbage collection can prove that no
+authoritative record references the content-addressed object.
 
 Use `--dry-run` to inspect the playlist without writing files or making AI calls,
 `--import-only` to postpone analysis, `--exclude VIDEO_ID` to omit a video, or

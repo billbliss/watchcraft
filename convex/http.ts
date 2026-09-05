@@ -79,5 +79,8 @@ http.route({ path: "/authoring/operator/registry/get-active", method: "POST", ha
 
 http.route({ path: "/authoring/admin/registry/publish", method: "POST", handler: mutationRoute(internal.authoringRegistry.publishRegistry, registryAdminVerifier) });
 http.route({ path: "/authoring/admin/registry/activate", method: "POST", handler: mutationRoute(internal.authoringRegistry.activateRegistry, registryAdminVerifier) });
+http.route({ path: "/authoring/admin/cleanup/list", method: "POST", handler: queryRoute(internal.authoringCleanup.listRuns, registryAdminVerifier) });
+http.route({ path: "/authoring/admin/cleanup/purge-run", method: "POST", handler: mutationRoute(internal.authoringCleanup.purgeRun, registryAdminVerifier) });
+http.route({ path: "/authoring/admin/cleanup/purge-orphan-job", method: "POST", handler: mutationRoute(internal.authoringCleanup.purgeOrphanJob, registryAdminVerifier) });
 
 export default http;

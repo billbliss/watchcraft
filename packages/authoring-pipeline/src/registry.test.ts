@@ -20,15 +20,39 @@ const lexicalSpec = {
   configuration: { title: "Color workflow", text: "Balance exposure first." },
 };
 
+const transcriptionSmokeSpec = {
+  operation: "generate" as const,
+  artifact_kind: "transcript",
+  output_schema: { id: "watchcraft.transcript", version: 1 },
+  handler: { id: "watchcraft.transcript.mlx-whisper-smoke", version: "1" },
+  source: { media_asset_id: "synthetic:mlx-audio-smoke" },
+  inputs: [],
+  dependencies: [],
+  configuration: { fixture_text: "Watchcraft verifies audio." },
+};
+
 test("the checked-in registry is valid, stable, and fully resolves an approved job", () => {
   const registry = parseCapabilityRegistry(DEFAULT_CAPABILITY_REGISTRY);
   const spec = resolveJobSpecAgainstRegistry(lexicalSpec, registry);
 
-  assert.equal(spec.registry_snapshot?.registry_version, "2026-09-04.1");
+  assert.equal(spec.registry_snapshot?.registry_version, "2026-09-04.2");
   assert.equal(spec.registry_snapshot?.registry_sha256, capabilityRegistrySha256(registry));
   assert.equal(spec.registry_snapshot?.execution_profile.id, "python-portable");
   assert.equal(spec.registry_snapshot?.execution_profile.dispatcher.workflow, "authoring-worker.yml");
   assert.deepEqual(verifyRegistryResolutionSnapshot(spec, registry), spec.registry_snapshot);
+});
+
+test("the MLX transcription smoke resolves to its dedicated Apple silicon workflow", () => {
+  const spec = resolveJobSpecAgainstRegistry(transcriptionSmokeSpec, DEFAULT_CAPABILITY_REGISTRY);
+  assert.equal(spec.registry_snapshot?.execution_profile.id, "macos-mlx");
+  assert.deepEqual(spec.registry_snapshot?.execution_profile.platform, {
+    os: "macos",
+    architecture: "arm64",
+  });
+  assert.equal(
+    spec.registry_snapshot?.execution_profile.dispatcher.workflow,
+    "authoring-mlx-worker.yml",
+  );
 });
 
 test("registry validation rejects duplicate identities and dangling profiles", () => {

@@ -5,9 +5,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
+import tempfile
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -32,8 +35,15 @@ DEFAULT_REGISTRY_PATH = (
     / "packages" / "authoring-pipeline" / "registry" / "default-registry.json"
 )
 ANALYSIS_HANDLER = ("watchcraft.analysis.lexical", "1")
+TRANSCRIPTION_SMOKE_HANDLER = ("watchcraft.transcript.mlx-whisper-smoke", "1")
 PYTHON_EXECUTION_PROFILE = ("python-portable", "1")
 PYTHON_EXECUTION_WORKFLOW = "authoring-worker.yml"
+MLX_EXECUTION_PROFILE = ("macos-mlx", "1")
+MLX_EXECUTION_WORKFLOW = "authoring-mlx-worker.yml"
+TRANSCRIPTION_SMOKE_MODEL = "mlx-community/whisper-tiny-mlx"
+TRANSCRIPTION_SMOKE_TEXT = (
+    "Watchcraft verifies real audio transcription on an Apple silicon worker."
+)
 WORD_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9'-]{2,}")
 STOP_WORDS = {
     "and", "are", "but", "for", "from", "has", "have", "into", "its", "not",
@@ -289,8 +299,92 @@ def lexical_analysis(job: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): json_safe(child) for key, child in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(child) for child in value]
+    if hasattr(value, "item"):
+        return json_safe(value.item())
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
+def mlx_transcription_smoke(job: dict[str, Any]) -> dict[str, Any]:
+    configuration = job["spec"]["configuration"]
+    phrase = configuration.get("fixture_text")
+    language = configuration.get("language", "en")
+    model = configuration.get("model", TRANSCRIPTION_SMOKE_MODEL)
+    if not isinstance(phrase, str) or not phrase.strip() or len(phrase) > 500:
+        raise ValueError("fixture_text must contain between 1 and 500 characters")
+    if language != "en":
+        raise ValueError("the initial MLX transcription smoke supports only English")
+    if model != TRANSCRIPTION_SMOKE_MODEL:
+        raise ValueError(f"the initial MLX transcription smoke requires {TRANSCRIPTION_SMOKE_MODEL}")
+    try:
+        import mlx_whisper
+    except ImportError as error:
+        raise RuntimeError("mlx-whisper is required by the macos-mlx worker") from error
+
+    with tempfile.TemporaryDirectory(prefix="watchcraft-mlx-smoke-") as directory:
+        audio_path = Path(directory) / "fixture.aiff"
+        try:
+            subprocess.run(
+                ["say", "-r", "155", "-o", str(audio_path), phrase],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise RuntimeError("macOS could not synthesize the transcription fixture") from error
+        result = mlx_whisper.transcribe(
+            str(audio_path),
+            path_or_hf_repo=model,
+            language=language,
+            task="transcribe",
+            word_timestamps=True,
+            temperature=0.0,
+            condition_on_previous_text=False,
+            verbose=None,
+        )
+
+    safe_result = json_safe(result)
+    if not isinstance(safe_result, dict):
+        raise RuntimeError("MLX Whisper returned an invalid transcript result")
+    segments = safe_result.get("segments", [])
+    if not isinstance(segments, list):
+        raise RuntimeError("MLX Whisper returned invalid transcript segments")
+    text = " ".join(
+        " ".join(str(segment.get("text", "")).split())
+        for segment in segments
+        if isinstance(segment, dict) and str(segment.get("text", "")).strip()
+    ).strip()
+    if not text:
+        raise RuntimeError("MLX Whisper returned an empty transcript")
+    return {
+        "kind": "watchcraft.transcript",
+        "schema_version": 1,
+        "source": job["spec"]["source"],
+        "model": model,
+        "language": safe_result.get("language") or language,
+        "text": text,
+        "segments": segments,
+        "provenance": {
+            "handler_id": TRANSCRIPTION_SMOKE_HANDLER[0],
+            "handler_version": TRANSCRIPTION_SMOKE_HANDLER[1],
+            "job_id": job["job_id"],
+            "spec_sha256": job["spec_sha256"],
+            "fixture_generator": "macos-say",
+            "fixture_text_sha256": sha256_hex(phrase),
+            "audio_retained": False,
+        },
+    }
+
+
 HANDLERS: dict[tuple[str, str], Callable[[dict[str, Any]], dict[str, Any]]] = {
     ANALYSIS_HANDLER: lexical_analysis,
+    TRANSCRIPTION_SMOKE_HANDLER: mlx_transcription_smoke,
 }
 LOCAL_HANDLER_CONTRACTS: dict[tuple[str, str], dict[str, Any]] = {
     ANALYSIS_HANDLER: {
@@ -313,19 +407,56 @@ LOCAL_HANDLER_CONTRACTS: dict[tuple[str, str], dict[str, Any]] = {
             "retryable_classifications": ["artifact_store_failed", "lease_expired"],
         },
     },
+    TRANSCRIPTION_SMOKE_HANDLER: {
+        "id": TRANSCRIPTION_SMOKE_HANDLER[0],
+        "version": TRANSCRIPTION_SMOKE_HANDLER[1],
+        "operation": "generate",
+        "inputs": [],
+        "dependencies": [],
+        "output": {
+            "artifact_kind": "transcript",
+            "schema": {"id": "watchcraft.transcript", "version": 1},
+        },
+        "execution_profile": {
+            "id": MLX_EXECUTION_PROFILE[0],
+            "version": MLX_EXECUTION_PROFILE[1],
+        },
+        "lease_class": "accelerated",
+        "retry_policy": {
+            "max_attempts": 2,
+            "retryable_classifications": [
+                "artifact_store_failed", "lease_expired",
+            ],
+        },
+    },
 }
-LOCAL_EXECUTION_PROFILE = {
-    "id": PYTHON_EXECUTION_PROFILE[0],
-    "version": PYTHON_EXECUTION_PROFILE[1],
-    "dispatcher": {"kind": "github-actions", "workflow": PYTHON_EXECUTION_WORKFLOW},
-    "platform": {"os": "linux", "architecture": "x64"},
-    "dependency_class": "python-authoring-worker",
-    "cache_class": "pip",
-    "timeout_minutes": 15,
-    "lease_duration_ms": 300_000,
-    "heartbeat_interval_ms": 60_000,
-    "data_access": "public",
-    "secret_capabilities": ["convex.worker", "r2.read-write"],
+LOCAL_EXECUTION_PROFILES = {
+    PYTHON_EXECUTION_PROFILE: {
+        "id": PYTHON_EXECUTION_PROFILE[0],
+        "version": PYTHON_EXECUTION_PROFILE[1],
+        "dispatcher": {"kind": "github-actions", "workflow": PYTHON_EXECUTION_WORKFLOW},
+        "platform": {"os": "linux", "architecture": "x64"},
+        "dependency_class": "python-authoring-worker",
+        "cache_class": "pip",
+        "timeout_minutes": 15,
+        "lease_duration_ms": 300_000,
+        "heartbeat_interval_ms": 60_000,
+        "data_access": "public",
+        "secret_capabilities": ["convex.worker", "r2.read-write"],
+    },
+    MLX_EXECUTION_PROFILE: {
+        "id": MLX_EXECUTION_PROFILE[0],
+        "version": MLX_EXECUTION_PROFILE[1],
+        "dispatcher": {"kind": "github-actions", "workflow": MLX_EXECUTION_WORKFLOW},
+        "platform": {"os": "macos", "architecture": "arm64"},
+        "dependency_class": "python-mlx-authoring-worker",
+        "cache_class": "huggingface",
+        "timeout_minutes": 30,
+        "lease_duration_ms": 2_700_000,
+        "heartbeat_interval_ms": 60_000,
+        "data_access": "public",
+        "secret_capabilities": ["convex.worker", "r2.read-write"],
+    },
 }
 
 
@@ -398,7 +529,8 @@ def validate_registry_snapshot(job: dict[str, Any]) -> dict[str, Any]:
         "id": profile_key[0], "version": profile_key[1]
     }:
         raise RegistrySupportError("Resolved handler references a different execution profile")
-    if profile != LOCAL_EXECUTION_PROFILE:
+    local_profile = LOCAL_EXECUTION_PROFILES.get(expected_profile)
+    if profile != local_profile:
         raise RegistrySupportError(
             "Execution profile contract is unsupported by this worker",
             "unsupported_execution_profile",
@@ -666,6 +798,189 @@ def analysis_spec(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def transcription_smoke_spec(fixture_text: str = TRANSCRIPTION_SMOKE_TEXT) -> dict[str, Any]:
+    return {
+        "operation": "generate",
+        "artifact_kind": "transcript",
+        "output_schema": {"id": "watchcraft.transcript", "version": 1},
+        "handler": {
+            "id": TRANSCRIPTION_SMOKE_HANDLER[0],
+            "version": TRANSCRIPTION_SMOKE_HANDLER[1],
+        },
+        "source": {"media_asset_id": "synthetic:mlx-audio-smoke"},
+        "inputs": [],
+        "dependencies": [],
+        "configuration": {
+            "fixture_text": fixture_text,
+            "language": "en",
+            "model": TRANSCRIPTION_SMOKE_MODEL,
+        },
+    }
+
+
+def ephemeral_request(kind: str, source_id: str, retention_days: int) -> dict[str, Any]:
+    if not 1 <= retention_days <= 90:
+        raise ValueError("--retention-days must be between 1 and 90")
+    return {
+        "kind": kind,
+        "source_id": source_id,
+        "purpose": "smoke",
+        "retention": {
+            "class": "ephemeral",
+            "expires_at": int(time.time() * 1000) + retention_days * 86_400_000,
+        },
+    }
+
+
+def submit_spec(
+    control: AuthoringHttpClient,
+    *,
+    request: dict[str, Any],
+    spec: dict[str, Any],
+) -> dict[str, Any]:
+    return control.post("/submissions/submit", {
+        "job_id": str(uuid.uuid4()),
+        "run_id": str(uuid.uuid4()),
+        "command_prefix": str(uuid.uuid4()),
+        "request": request,
+        "spec": spec,
+    })
+
+
+def dispatch_submission(control: AuthoringHttpClient, job: dict[str, Any]) -> dict[str, Any]:
+    if job["state"] == "ready":
+        pending = control.post("/submissions/request-dispatch", {
+            "job_id": job["job_id"],
+            "command_id": str(uuid.uuid4()),
+            "expected_revision": job["revision"],
+        })
+    elif job["state"] == "dispatch_pending":
+        pending = job
+    else:
+        raise RuntimeError(
+            f"Job {job['job_id']} is {job['state']}; expected ready or dispatch_pending"
+        )
+    workflow = dispatch_workflow(pending)
+    subprocess.run([
+        "gh", "workflow", "run", workflow, "--ref", "main",
+        "--repo", DEFAULT_GITHUB_REPOSITORY,
+        "-f", f"job_id={pending['job_id']}",
+        "-f", f"spec_sha256={pending['spec_sha256']}",
+        "-f", f"dispatch_generation={pending['dispatch']['generation']}",
+        "-f", f"expected_revision={pending['revision']}",
+    ], check=True)
+    return pending
+
+
+def verified_json_result(job: dict[str, Any], credential_source: str) -> dict[str, Any]:
+    if job.get("state") != "succeeded" or job.get("result") is None:
+        raise RuntimeError(
+            f"Job {job['job_id']} is {job.get('state', 'unknown')}; "
+            "a result is available only after it succeeds"
+        )
+    reference = validated_artifact_reference(job["result"])
+    payload = r2_artifact_reader(credential_source).get_bytes(reference)
+    if reference["media_type"] != "application/json":
+        raise RuntimeError(f"Artifact media type is {reference['media_type']}; expected JSON")
+    try:
+        result = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("The verified artifact is not valid UTF-8 JSON") from error
+    if not isinstance(result, dict):
+        raise RuntimeError("The verified JSON artifact must be an object")
+    return result
+
+
+def wait_for_terminal_job(
+    control: AuthoringHttpClient,
+    job_id: str,
+    timeout_seconds: int,
+    poll_seconds: float = 5.0,
+) -> dict[str, Any]:
+    if timeout_seconds < 1:
+        raise ValueError("--timeout-seconds must be positive")
+    deadline = time.monotonic() + timeout_seconds
+    last_state = None
+    while True:
+        submission = control.post("/submissions/get", {"job_id": job_id})
+        job = submission["job"]
+        if job.get("state") != last_state:
+            print(f"{job_id}: {job.get('state')}", flush=True)
+            last_state = job.get("state")
+        if job.get("state") == "succeeded":
+            return submission
+        if job.get("state") in {"retryable_failed", "terminal_failed", "cancelled"}:
+            failure = job.get("failure") or {}
+            raise RuntimeError(
+                f"Smoke job {job_id} ended as {job.get('state')}: "
+                f"{failure.get('classification', 'unknown')} {failure.get('message', '')}".strip()
+            )
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"Timed out after {timeout_seconds}s waiting for smoke job {job_id}")
+        time.sleep(poll_seconds)
+
+
+def run_smoke_command(args: argparse.Namespace, kind: str) -> int:
+    control = operator_client(args.operator_token_source)
+    if kind == "analysis":
+        spec_args = argparse.Namespace(
+            source_id="synthetic:lexical-analysis-smoke",
+            title="Watchcraft lexical smoke",
+            text="Balance exposure and color before applying the final grade.",
+            max_topics=8,
+        )
+        spec = analysis_spec(spec_args)
+        request_kind = "lexical-analysis-smoke"
+    else:
+        spec = transcription_smoke_spec()
+        request_kind = "mlx-transcription-smoke"
+    submitted = submit_spec(
+        control,
+        request=ephemeral_request(
+            request_kind,
+            spec["source"]["media_asset_id"],
+            args.retention_days,
+        ),
+        spec=spec,
+    )
+    job = submitted["job"]
+    print(f"submitted {job['job_id']} ({job['spec']['handler']['id']})", flush=True)
+    approved = control.post("/submissions/approve", {
+        "job_id": job["job_id"],
+        "command_id": str(uuid.uuid4()),
+        "expected_revision": job["revision"],
+        "actor": "watchcraft-author-cli:smoke",
+        "spec_sha256": job["spec_sha256"],
+    })
+    pending = dispatch_submission(control, approved["job"])
+    print(
+        f"dispatched {pending['job_id']} via {dispatch_workflow(pending)} "
+        f"generation {pending['dispatch']['generation']}",
+        flush=True,
+    )
+    completed = wait_for_terminal_job(control, job["job_id"], args.timeout_seconds)
+    result = verified_json_result(completed["job"], args.r2_credentials_source)
+    expected_kind = "watchcraft.analysis.lexical" if kind == "analysis" else "watchcraft.transcript"
+    if result.get("kind") != expected_kind:
+        raise RuntimeError(
+            f"Smoke artifact kind is {result.get('kind')!r}; expected {expected_kind!r}"
+        )
+    if kind == "transcription":
+        if not result.get("text") or not result.get("segments"):
+            raise RuntimeError("Transcription smoke returned no text or segments")
+        provenance = result.get("provenance", {})
+        if provenance.get("handler_id") != TRANSCRIPTION_SMOKE_HANDLER[0]:
+            raise RuntimeError("Transcription smoke provenance does not identify the MLX handler")
+    print(json.dumps({
+        "job_id": completed["job"]["job_id"],
+        "run_id": completed["run"]["run_id"],
+        "state": completed["job"]["state"],
+        "artifact": completed["job"]["result"],
+        "result": result,
+    }, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
 def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
     parent.description = (
         "Submit, approve, dispatch, and inspect durable remote authoring jobs."
@@ -708,6 +1023,21 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
     submit.add_argument("--text", required=True)
     submit.add_argument("--source-id", default="operator:lexical-analysis")
     submit.add_argument("--max-topics", type=int, default=8)
+    transcription_submit = commands.add_parser(
+        "submit-transcription-smoke",
+        parents=[credentials],
+        help="Submit a real MLX transcription of a generated audio fixture",
+        description=(
+            "Submit a macOS/MLX transcription job whose temporary spoken-audio "
+            "fixture is generated by the worker and never retained."
+        ),
+    )
+    transcription_submit.add_argument(
+        "--fixture-text",
+        default=TRANSCRIPTION_SMOKE_TEXT,
+        help="Short English phrase synthesized and transcribed by the worker",
+    )
+    transcription_submit.add_argument("--retention-days", type=int, default=7)
     command_help = {
         "status": "Show the authoritative job and run aggregates",
         "approve": "Approve the immutable job specification",
@@ -749,6 +1079,25 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         metavar="PATH",
         help="Write the exact verified bytes to a new file instead of displaying JSON",
     )
+    for name, help_text, timeout in (
+        ("smoke-analysis", "Run the complete lexical-analysis queue smoke", 600),
+        ("smoke-transcription", "Run the complete macOS/MLX transcription smoke", 1800),
+    ):
+        smoke = commands.add_parser(
+            name,
+            parents=[credentials],
+            help=help_text,
+            description=(
+                help_text + ": submit, approve, dispatch, wait, retrieve, and verify."
+            ),
+        )
+        smoke.add_argument("--timeout-seconds", type=int, default=timeout)
+        smoke.add_argument("--retention-days", type=int, default=7)
+        smoke.add_argument(
+            "--r2-credentials-source",
+            choices=("auto", "keychain", "environment"),
+            default="auto",
+        )
     registry_status = commands.add_parser(
         "registry-status",
         parents=[credentials],
@@ -776,6 +1125,42 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         if name == "registry-activate":
             command.add_argument("--environment", default="production")
             command.add_argument("--expected-revision", required=True, type=int)
+    cleanup_list = commands.add_parser(
+        "cleanup-list",
+        parents=[admin_credentials],
+        help="List terminal runs eligible for or relevant to cleanup",
+        description=(
+            "List terminal ephemeral runs; --include-unmarked also shows legacy "
+            "runs and orphaned terminal jobs that require explicit cleanup authority."
+        ),
+    )
+    cleanup_list.add_argument("--include-unmarked", action="store_true")
+    cleanup_list.add_argument("--limit", type=int, default=50)
+    cleanup_run = commands.add_parser(
+        "cleanup-run",
+        parents=[admin_credentials],
+        help="Purge one confirmed terminal run and its Convex event projections",
+        description=(
+            "Purge one terminal run from Convex. R2 artifacts are reported but retained."
+        ),
+    )
+    cleanup_run.add_argument("run_id")
+    cleanup_run.add_argument("--confirm", required=True, metavar="RUN_ID")
+    cleanup_run.add_argument(
+        "--allow-unmarked",
+        action="store_true",
+        help="Permit explicit cleanup of a legacy run without expired ephemeral retention",
+    )
+    cleanup_orphan = commands.add_parser(
+        "cleanup-orphan-job",
+        parents=[admin_credentials],
+        help="Purge one confirmed terminal job whose run aggregate is missing",
+        description=(
+            "Purge one legacy orphan job from Convex. R2 artifacts are reported but retained."
+        ),
+    )
+    cleanup_orphan.add_argument("job_id")
+    cleanup_orphan.add_argument("--confirm", required=True, metavar="JOB_ID")
 
 
 def load_registry_document(path: Path) -> dict[str, Any]:
@@ -795,6 +1180,30 @@ def load_registry_document(path: Path) -> dict[str, Any]:
 
 
 def run_queue_command(args: argparse.Namespace) -> int:
+    if args.queue_command in {"cleanup-list", "cleanup-run", "cleanup-orphan-job"}:
+        control = registry_admin_client(args.registry_admin_token_source)
+        if args.queue_command == "cleanup-list":
+            result = control.post("/cleanup/list", {
+                "include_unmarked": args.include_unmarked,
+                "limit": args.limit,
+            })
+        elif args.queue_command == "cleanup-run":
+            result = control.post("/cleanup/purge-run", {
+                "run_id": args.run_id,
+                "confirmation": args.confirm,
+                "command_id": str(uuid.uuid4()),
+                "actor": "watchcraft-author-cli",
+                "allow_unmarked": args.allow_unmarked,
+            })
+        else:
+            result = control.post("/cleanup/purge-orphan-job", {
+                "job_id": args.job_id,
+                "confirmation": args.confirm,
+                "command_id": str(uuid.uuid4()),
+                "actor": "watchcraft-author-cli",
+            })
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
     if args.queue_command in {"registry-publish", "registry-activate"}:
         registry = load_registry_document(args.registry_file)
         control = registry_admin_client(args.registry_admin_token_source)
@@ -816,6 +1225,12 @@ def run_queue_command(args: argparse.Namespace) -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
 
+    if args.queue_command in {"smoke-analysis", "smoke-transcription"}:
+        return run_smoke_command(
+            args,
+            "analysis" if args.queue_command == "smoke-analysis" else "transcription",
+        )
+
     control = operator_client(args.operator_token_source)
     if args.queue_command == "registry-status":
         result = control.post("/registry/get-active", {"environment": args.environment})
@@ -824,15 +1239,17 @@ def run_queue_command(args: argparse.Namespace) -> int:
     if args.queue_command == "submit-analysis":
         if not 1 <= args.max_topics <= 20:
             raise ValueError("--max-topics must be between 1 and 20")
-        job_id = str(uuid.uuid4())
-        run_id = str(uuid.uuid4())
-        result = control.post("/submissions/submit", {
-            "job_id": job_id,
-            "run_id": run_id,
-            "command_prefix": str(uuid.uuid4()),
-            "request": {"kind": "lexical-analysis", "source_id": args.source_id},
-            "spec": analysis_spec(args),
-        })
+        result = submit_spec(control, request={
+            "kind": "lexical-analysis", "source_id": args.source_id,
+        }, spec=analysis_spec(args))
+        print(canonical_json({"job": result["job"], "run": result["run"]}))
+        return 0
+    if args.queue_command == "submit-transcription-smoke":
+        result = submit_spec(control, request=ephemeral_request(
+            "mlx-transcription-smoke",
+            "synthetic:mlx-audio-smoke",
+            args.retention_days,
+        ), spec=transcription_smoke_spec(args.fixture_text))
         print(canonical_json({"job": result["job"], "run": result["run"]}))
         return 0
 
@@ -884,27 +1301,7 @@ def run_queue_command(args: argparse.Namespace) -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     if args.queue_command == "dispatch":
-        if job["state"] == "ready":
-            pending = control.post("/submissions/request-dispatch", {
-                "job_id": job["job_id"],
-                "command_id": str(uuid.uuid4()),
-                "expected_revision": job["revision"],
-            })
-        elif job["state"] == "dispatch_pending":
-            pending = job
-        else:
-            raise RuntimeError(
-                f"Job {job['job_id']} is {job['state']}; expected ready or dispatch_pending"
-            )
-        workflow = dispatch_workflow(pending)
-        subprocess.run([
-            "gh", "workflow", "run", workflow, "--ref", "main",
-            "--repo", DEFAULT_GITHUB_REPOSITORY,
-            "-f", f"job_id={pending['job_id']}",
-            "-f", f"spec_sha256={pending['spec_sha256']}",
-            "-f", f"dispatch_generation={pending['dispatch']['generation']}",
-            "-f", f"expected_revision={pending['revision']}",
-        ], check=True)
+        pending = dispatch_submission(control, job)
         print(f"dispatched {pending['job_id']} generation {pending['dispatch']['generation']}")
         return 0
     endpoint = "/submissions/cancel" if args.queue_command == "cancel" else "/submissions/retry"

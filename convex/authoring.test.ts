@@ -153,6 +153,60 @@ test("the persisted smoke lifecycle is transactional and command-idempotent", as
   expect(snapshot.jobs).toHaveLength(1);
   expect(snapshot.events).toHaveLength(8);
   expect(snapshot.jobs[0]?.aggregate).toEqual(completed);
+
+  const hiddenOrphanResponse = await post(t, "/authoring/admin/cleanup/list", {
+    include_unmarked: false,
+    limit: 10,
+  }, registryAdminToken);
+  const hiddenOrphan = await hiddenOrphanResponse.json() as any;
+  expect(hiddenOrphan.orphan_jobs).toEqual([]);
+  const listedOrphanResponse = await post(t, "/authoring/admin/cleanup/list", {
+    include_unmarked: true,
+    limit: 10,
+  }, registryAdminToken);
+  const listedOrphan = await listedOrphanResponse.json() as any;
+  expect(listedOrphan.orphan_jobs).toEqual([
+    expect.objectContaining({ job_id: "job-1", run_id: "run-1", state: "succeeded" }),
+  ]);
+
+  const wrongOrphanConfirmation = await post(t, "/authoring/admin/cleanup/purge-orphan-job", {
+    job_id: "job-1",
+    confirmation: "wrong-job",
+    command_id: "cleanup-orphan-wrong",
+    actor: "test-registry-admin",
+  }, registryAdminToken);
+  expect(wrongOrphanConfirmation.status).toBe(409);
+  const orphanCleanupResponse = await post(t, "/authoring/admin/cleanup/purge-orphan-job", {
+    job_id: "job-1",
+    confirmation: "job-1",
+    command_id: "cleanup-orphan",
+    actor: "test-registry-admin",
+  }, registryAdminToken);
+  expect(orphanCleanupResponse.status).toBe(200);
+  const orphanCleanup = await orphanCleanupResponse.json() as any;
+  expect(orphanCleanup).toMatchObject({
+    job_id: "job-1",
+    missing_run_id: "run-1",
+    deleted_job_events: 8,
+    retained_artifacts: [artifact],
+  });
+  const orphanCleanupReplay = await post(t, "/authoring/admin/cleanup/purge-orphan-job", {
+    job_id: "job-1",
+    confirmation: "job-1",
+    command_id: "cleanup-orphan",
+    actor: "test-registry-admin",
+  }, registryAdminToken);
+  expect(orphanCleanupReplay.status).toBe(200);
+  await expect(orphanCleanupReplay.json()).resolves.toEqual(orphanCleanup);
+  const cleaned = await t.run(async (ctx) => ({
+    jobs: await ctx.db.query("authoring_jobs").collect(),
+    jobEvents: await ctx.db.query("authoring_job_events").collect(),
+    cleanupEvents: await ctx.db.query("authoring_cleanup_events").collect(),
+  }));
+  expect(cleaned.jobs).toEqual([]);
+  expect(cleaned.jobEvents).toEqual([]);
+  expect(cleaned.cleanupEvents).toHaveLength(1);
+
 });
 
 test("generic control mutations persist a retryable failure, retry, and cancellation", async () => {
@@ -368,6 +422,11 @@ test("registered lease and retry policy are enforced by the control plane", asyn
 
 test("operator and worker credentials drive a persisted non-transcript analysis run", async () => {
   const t = convexTest(schema, modules);
+  const request = {
+    kind: "lexical-analysis-smoke",
+    purpose: "smoke",
+    retention: { class: "ephemeral", expires_at: 0 },
+  };
   const spec = {
     operation: "generate",
     artifact_kind: "analysis",
@@ -386,7 +445,7 @@ test("operator and worker credentials drive a persisted non-transcript analysis 
     job_id: "analysis-job",
     run_id: "analysis-run",
     command_prefix: "submit",
-    request: { kind: "lexical-analysis" },
+    request,
     spec,
   }, workerToken);
   expect(rejected.status).toBe(401);
@@ -395,7 +454,7 @@ test("operator and worker credentials drive a persisted non-transcript analysis 
     job_id: "analysis-job",
     run_id: "analysis-run",
     command_prefix: "submit",
-    request: { kind: "lexical-analysis" },
+    request,
     spec,
   }, operatorToken);
   expect(missingRegistry.status).toBe(409);
@@ -408,7 +467,7 @@ test("operator and worker credentials drive a persisted non-transcript analysis 
     job_id: "analysis-job",
     run_id: "analysis-run",
     command_prefix: "submit",
-    request: { kind: "lexical-analysis" },
+    request,
     spec,
   }, operatorToken);
   expect(submittedResponse.status).toBe(200);
@@ -515,4 +574,92 @@ test("operator and worker credentials drive a persisted non-transcript analysis 
   }));
   expect(snapshot.jobEvents).toHaveLength(8);
   expect(snapshot.runEvents).toHaveLength(5);
+
+  const listedResponse = await post(t, "/authoring/admin/cleanup/list", {
+    include_unmarked: false,
+    limit: 10,
+  }, registryAdminToken);
+  expect(listedResponse.status).toBe(200);
+  const listed = await listedResponse.json() as any;
+  expect(listed.runs).toEqual([
+    expect.objectContaining({
+      run_id: "analysis-run",
+      state: "complete",
+      request_kind: "lexical-analysis-smoke",
+      cleanup_eligible: true,
+      retention: { class: "ephemeral", expires_at: 0 },
+    }),
+  ]);
+
+  const wrongConfirmation = await post(t, "/authoring/admin/cleanup/purge-run", {
+    run_id: "analysis-run",
+    confirmation: "wrong-run",
+    command_id: "cleanup-analysis-wrong",
+    actor: "test-registry-admin",
+    allow_unmarked: false,
+  }, registryAdminToken);
+  expect(wrongConfirmation.status).toBe(409);
+
+  const cleanedResponse = await post(t, "/authoring/admin/cleanup/purge-run", {
+    run_id: "analysis-run",
+    confirmation: "analysis-run",
+    command_id: "cleanup-analysis",
+    actor: "test-registry-admin",
+    allow_unmarked: false,
+  }, registryAdminToken);
+  expect(cleanedResponse.status).toBe(200);
+  await expect(cleanedResponse.json()).resolves.toMatchObject({
+    run_id: "analysis-run",
+    deleted_jobs: 1,
+    deleted_job_events: 8,
+    deleted_run_events: 5,
+    retained_artifacts: [artifact],
+  });
+
+  const legacySubmittedResponse = await post(t, "/authoring/operator/submissions/submit", {
+    job_id: "legacy-job",
+    run_id: "legacy-run",
+    command_prefix: "legacy-submit",
+    request: { kind: "legacy-debug" },
+    spec,
+  }, operatorToken);
+  const legacySubmitted = await legacySubmittedResponse.json() as any;
+  const legacyCancelledResponse = await post(t, "/authoring/operator/submissions/cancel", {
+    job_id: "legacy-job",
+    command_id: "legacy-cancel",
+    expected_revision: legacySubmitted.job.revision,
+  }, operatorToken);
+  expect(legacyCancelledResponse.status).toBe(200);
+
+  const protectedCleanup = await post(t, "/authoring/admin/cleanup/purge-run", {
+    run_id: "legacy-run",
+    confirmation: "legacy-run",
+    command_id: "cleanup-unmarked-denied",
+    actor: "test-registry-admin",
+    allow_unmarked: false,
+  }, registryAdminToken);
+  expect(protectedCleanup.status).toBe(409);
+  await expect(protectedCleanup.json()).resolves.toMatchObject({
+    error: expect.stringContaining("no ephemeral retention policy"),
+  });
+
+  const explicitCleanup = await post(t, "/authoring/admin/cleanup/purge-run", {
+    run_id: "legacy-run",
+    confirmation: "legacy-run",
+    command_id: "cleanup-unmarked",
+    actor: "test-registry-admin",
+    allow_unmarked: true,
+  }, registryAdminToken);
+  expect(explicitCleanup.status).toBe(200);
+  const cleanupResult = await explicitCleanup.json() as any;
+  expect(cleanupResult).toMatchObject({ run_id: "legacy-run", deleted_jobs: 1 });
+  const cleanupReplay = await post(t, "/authoring/admin/cleanup/purge-run", {
+    run_id: "legacy-run",
+    confirmation: "legacy-run",
+    command_id: "cleanup-unmarked",
+    actor: "test-registry-admin",
+    allow_unmarked: true,
+  }, registryAdminToken);
+  expect(cleanupReplay.status).toBe(200);
+  await expect(cleanupReplay.json()).resolves.toEqual(cleanupResult);
 });

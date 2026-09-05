@@ -1,7 +1,7 @@
 {
   "kind": "watchcraft.authoring-capability-registry",
   "schema_version": 1,
-  "registry_version": "2026-09-04.1",
+  "registry_version": "2026-09-04.2",
   "handlers": [
     {
       "id": "watchcraft.analysis.lexical",
@@ -28,6 +28,32 @@
           "lease_expired"
         ]
       }
+    },
+    {
+      "id": "watchcraft.transcript.mlx-whisper-smoke",
+      "version": "1",
+      "operation": "generate",
+      "inputs": [],
+      "dependencies": [],
+      "output": {
+        "artifact_kind": "transcript",
+        "schema": {
+          "id": "watchcraft.transcript",
+          "version": 1
+        }
+      },
+      "execution_profile": {
+        "id": "macos-mlx",
+        "version": "1"
+      },
+      "lease_class": "accelerated",
+      "retry_policy": {
+        "max_attempts": 2,
+        "retryable_classifications": [
+          "artifact_store_failed",
+          "lease_expired"
+        ]
+      }
     }
   ],
   "execution_profiles": [
@@ -46,6 +72,28 @@
       "cache_class": "pip",
       "timeout_minutes": 15,
       "lease_duration_ms": 300000,
+      "heartbeat_interval_ms": 60000,
+      "data_access": "public",
+      "secret_capabilities": [
+        "convex.worker",
+        "r2.read-write"
+      ]
+    },
+    {
+      "id": "macos-mlx",
+      "version": "1",
+      "dispatcher": {
+        "kind": "github-actions",
+        "workflow": "authoring-mlx-worker.yml"
+      },
+      "platform": {
+        "os": "macos",
+        "architecture": "arm64"
+      },
+      "dependency_class": "python-mlx-authoring-worker",
+      "cache_class": "huggingface",
+      "timeout_minutes": 30,
+      "lease_duration_ms": 2700000,
       "heartbeat_interval_ms": 60000,
       "data_access": "public",
       "secret_capabilities": [
