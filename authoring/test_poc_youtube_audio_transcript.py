@@ -12,6 +12,7 @@ from poc_youtube_audio_transcript import (
     transcript_comparison,
 )
 from youtube_audio import (
+    YOUTUBE_MWEB_POT_ACCESS_PROFILE,
     YOUTUBE_ORIGINAL_AUDIO_FORMAT,
     YouTubeAcquisitionError,
     canonical_youtube_url,
@@ -69,6 +70,45 @@ class YouTubeAudioTranscriptPocTests(unittest.TestCase):
         self.assertEqual(command[command.index("--max-filesize") + 1], "10000000")
         self.assertEqual(command[command.index("--output") + 1], str(destination))
 
+    def test_mweb_pot_profile_binds_player_client_and_local_provider(self) -> None:
+        provider = Path("/tmp/watchcraft-pot-provider/server")
+        command = yt_dlp_audio_download_command(
+            "https://www.youtube.com/watch?v=WPtpUu3uIUI",
+            ["python", "-m", "yt_dlp"],
+            Path("/tmp/watchcraft-test-audio"),
+            10_000_000,
+            access_profile=YOUTUBE_MWEB_POT_ACCESS_PROFILE,
+            pot_provider_directory=provider,
+        )
+
+        extractor_arguments = [
+            command[index + 1]
+            for index, value in enumerate(command)
+            if value == "--extractor-args"
+        ]
+        self.assertEqual(
+            extractor_arguments,
+            [
+                "youtube:player_client=mweb",
+                f"youtubepot-bgutilscript:server_home={provider}",
+            ],
+        )
+
+    def test_mweb_pot_profile_fails_closed_without_a_built_provider(self) -> None:
+        with patch.dict("youtube_audio.os.environ", {}, clear=True):
+            with self.assertRaises(YouTubeAcquisitionError) as raised:
+                download_youtube_audio(
+                    "WPtpUu3uIUI",
+                    Path("/tmp/watchcraft-test-audio"),
+                    maximum_bytes=10_000_000,
+                    maximum_duration_seconds=300,
+                    timeout_seconds=180,
+                    access_profile=YOUTUBE_MWEB_POT_ACCESS_PROFILE,
+                )
+
+        self.assertEqual(raised.exception.classification, "worker_dependency_missing")
+        self.assertFalse(raised.exception.retryable)
+
     def test_download_records_observed_media_identity_without_a_temporary_url(self) -> None:
         payload = b"youtube audio bytes"
         metadata = {
@@ -99,7 +139,57 @@ class YouTubeAudioTranscriptPocTests(unittest.TestCase):
         self.assertEqual(result["canonical_url"], "https://www.youtube.com/watch?v=WPtpUu3uIUI")
         self.assertEqual(result["byte_length"], len(payload))
         self.assertEqual(result["duration_seconds"], 120.0)
+        self.assertEqual(result["access_profile"], "default-guest")
         self.assertNotIn("url", result)
+
+    def test_download_records_the_verified_pot_provider(self) -> None:
+        payload = b"youtube audio bytes"
+        metadata = {
+            "video_id": "WPtpUu3uIUI",
+            "duration": 120.0,
+            "format_id": "251-20",
+            "language": "en-US",
+            "extension": "webm",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            provider = root / "provider"
+            (provider / "build").mkdir(parents=True)
+            (provider / "build" / "generate_once.js").write_text("", encoding="utf-8")
+            destination = root / "audio"
+
+            def run_download(*args, **kwargs):
+                destination.write_bytes(payload)
+                return Mock(returncode=0, stdout=json.dumps(metadata), stderr="")
+
+            with patch.dict(
+                "youtube_audio.os.environ",
+                {"WATCHCRAFT_YOUTUBE_POT_PROVIDER_DIR": str(provider)},
+                clear=True,
+            ), patch(
+                "youtube_audio.importlib.metadata.version",
+                return_value="1.3.2",
+            ), patch(
+                "youtube_audio.command_version",
+                return_value="2026.8.19",
+            ), patch(
+                "youtube_audio.subprocess.run",
+                side_effect=run_download,
+            ):
+                result = download_youtube_audio(
+                    "WPtpUu3uIUI",
+                    destination,
+                    maximum_bytes=10_000_000,
+                    maximum_duration_seconds=300,
+                    timeout_seconds=180,
+                    access_profile=YOUTUBE_MWEB_POT_ACCESS_PROFILE,
+                )
+
+        self.assertEqual(result["access_profile"], "mweb-pot")
+        self.assertEqual(
+            result["po_token_provider"],
+            {"id": "bgutil-ytdlp-pot-provider", "version": "1.3.2"},
+        )
 
     def test_download_timeout_is_classified_and_removes_partial_audio(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

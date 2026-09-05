@@ -1,7 +1,7 @@
 {
   "kind": "watchcraft.authoring-capability-registry",
   "schema_version": 1,
-  "registry_version": "2026-09-05.1",
+  "registry_version": "2026-09-05.2",
   "handlers": [
     {
       "id": "watchcraft.analysis.lexical",
@@ -83,7 +83,7 @@
     },
     {
       "id": "watchcraft.transcript.mlx-whisper-youtube",
-      "version": "1",
+      "version": "2",
       "operation": "generate",
       "inputs": [],
       "dependencies": [],

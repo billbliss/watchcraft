@@ -40,6 +40,7 @@ jobs:
       WATCHCRAFT_EXPECTED_REVISION: ${{ inputs.expected_revision }}
       WATCHCRAFT_EXECUTION_PROFILE_ID: macos-mlx
       WATCHCRAFT_EXECUTION_PROFILE_VERSION: "1"
+      WATCHCRAFT_YOUTUBE_POT_PROVIDER_DIR: ${{ github.workspace }}/.watchcraft-runtime/bgutil-ytdlp-pot-provider/server
       WATCHCRAFT_CONVEX_URL: ${{ vars.WATCHCRAFT_CONVEX_URL }}
       WATCHCRAFT_R2_BUCKET: ${{ vars.WATCHCRAFT_R2_BUCKET }}
       WATCHCRAFT_R2_ENDPOINT: ${{ vars.WATCHCRAFT_R2_ENDPOINT }}
@@ -49,6 +50,14 @@ jobs:
     steps:
       - name: Check out Watchcraft
         uses: actions/checkout@v7
+
+      - name: Check out pinned YouTube PO-token provider
+        uses: actions/checkout@v7
+        with:
+          repository: Brainicism/bgutil-ytdlp-pot-provider
+          ref: 7511309af023b09788dc8f2efc96cc3671291e6c
+          path: .watchcraft-runtime/bgutil-ytdlp-pot-provider
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -71,11 +80,20 @@ jobs:
       - name: Install worker dependencies
         run: python -m pip install --requirement authoring/mlx-worker-requirements.txt
 
+      - name: Build pinned YouTube PO-token provider
+        working-directory: .watchcraft-runtime/bgutil-ytdlp-pot-provider/server
+        run: |
+          npm ci
+          ./node_modules/.bin/tsc
+          node build/generate_once.js --version
+
       - name: Verify media tools
         run: |
           command -v say
           node --version
           python -m yt_dlp --version
+          python -m pip show bgutil-ytdlp-pot-provider
+          test -f "$WATCHCRAFT_YOUTUBE_POT_PROVIDER_DIR/build/generate_once.js"
           command -v ffmpeg || brew install ffmpeg
 
       - name: Execute authoring job

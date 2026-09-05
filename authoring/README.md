@@ -309,7 +309,11 @@ The first provider-backed handler processes exactly one public YouTube video. Sh
 share, embed, and watch URLs are normalized to the stable video ID and canonical watch
 URL before the job specification is approved. The worker uses the pinned `yt-dlp`
 module from its Python environment, Node.js 22 for YouTube's JavaScript challenges,
-and FFmpeg already present on the macOS runner. It prefers the provider-designated
+and FFmpeg already present on the macOS runner. Its explicit `mweb-pot` access profile
+uses a pinned `bgutil-ytdlp-pot-provider` plugin and a locally built attestation
+script; it does not use browser or account cookies. PO attestation can improve the
+legitimacy of requests from a GitHub-hosted IP but cannot guarantee that YouTube will
+allow them. The handler prefers the provider-designated
 original audio track, which avoids silently selecting one of YouTube's automatic
 dubs, and enforces reviewed transfer, duration, and timeout ceilings:
 
@@ -327,7 +331,9 @@ Provider access denial, disappearance, rate limiting, timeout, and general extra
 failure are classified separately. As with the HTTP fixture, the compressed source
 audio exists only in the runner's temporary directory and only transcript JSON enters
 R2. This command still does not discover playlists, create a collection, or assign the
-video to any authored grouping.
+video to any authored grouping. A remaining `source_access_denied` result demonstrates
+that the runner's network identity is unsuitable even with PO attestation; it is not a
+reason to add reusable browser credentials silently.
 
 `queue result` resolves the artifact reference from the authoritative completed job,
 downloads the object from private R2, and verifies its declared byte length and SHA-256

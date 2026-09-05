@@ -33,7 +33,7 @@ def registry_snapshot(
             )
         )
         return {
-            "registry_version": "2026-09-05.1",
+            "registry_version": "2026-09-05.2",
             "registry_sha256": "c" * 64,
             "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[handler],
             "execution_profile": queued_authoring.LOCAL_EXECUTION_PROFILES[
@@ -41,7 +41,7 @@ def registry_snapshot(
             ],
         }
     return {
-        "registry_version": "2026-09-05.1",
+        "registry_version": "2026-09-05.2",
         "registry_sha256": "c" * 64,
         "handler": {
             "id": "watchcraft.analysis.lexical",
@@ -377,12 +377,14 @@ class QueuedAuthoringTests(unittest.TestCase):
         audio_path = download.call_args.args[1]
         self.assertFalse(audio_path.exists())
         self.assertEqual(download.call_args.args[0], "WPtpUu3uIUI")
+        self.assertEqual(download.call_args.kwargs["access_profile"], "mweb-pot")
         self.assertEqual(transcribe.call_args.args[0], audio_path)
         self.assertEqual(spec["source"], {"media_asset_id": "youtube:WPtpUu3uIUI"})
         self.assertEqual(
             spec["configuration"]["canonical_url"],
             "https://www.youtube.com/watch?v=WPtpUu3uIUI",
         )
+        self.assertEqual(spec["configuration"]["access_profile"], "mweb-pot")
         self.assertEqual(result["provenance"]["acquisition"], acquisition)
         self.assertFalse(result["provenance"]["audio_retained"])
 
@@ -512,7 +514,7 @@ class QueuedAuthoringTests(unittest.TestCase):
                 "registry": {},
             },
             {
-                "registry_version": "2026-09-05.1",
+                "registry_version": "2026-09-05.2",
                 "revision": 3,
             },
         ]
@@ -531,7 +533,7 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertRegex(payload["registry_sha256"], r"^[a-f0-9]{64}$")
 
         override_client = Mock()
-        override_client.post.return_value = {"registry_version": "2026-09-05.1"}
+        override_client.post.return_value = {"registry_version": "2026-09-05.2"}
         with patch("queued_authoring.registry_admin_client", return_value=override_client):
             with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 self.assertEqual(queued_authoring.run_queue_command(explicit), 0)

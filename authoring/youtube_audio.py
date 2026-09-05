@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
+import os
 import re
 import subprocess
 import sys
@@ -18,6 +20,11 @@ from video_catalog import clean_segments, segment_text
 SAMPLE_RATE = 16_000
 MIN_USEFUL_SPEECH_SECONDS = 3.0
 YOUTUBE_ORIGINAL_AUDIO_FORMAT = "bestaudio[format_note*=original]/bestaudio/best"
+YOUTUBE_DEFAULT_ACCESS_PROFILE = "default-guest"
+YOUTUBE_MWEB_POT_ACCESS_PROFILE = "mweb-pot"
+YOUTUBE_POT_PROVIDER_DISTRIBUTION = "bgutil-ytdlp-pot-provider"
+YOUTUBE_POT_PROVIDER_VERSION = "1.3.2"
+YOUTUBE_POT_PROVIDER_DIRECTORY_ENV = "WATCHCRAFT_YOUTUBE_POT_PROVIDER_DIR"
 
 
 class YouTubeAcquisitionError(RuntimeError):
@@ -91,7 +98,68 @@ def command_version(command: list[str]) -> str:
     return result.stdout.strip()
 
 
-def yt_dlp_audio_command(url: str, command: list[str]) -> list[str]:
+def youtube_access_arguments(
+    access_profile: str,
+    pot_provider_directory: Path | None = None,
+) -> list[str]:
+    """Return yt-dlp arguments for one explicit YouTube access strategy."""
+    if access_profile == YOUTUBE_DEFAULT_ACCESS_PROFILE:
+        return []
+    if access_profile != YOUTUBE_MWEB_POT_ACCESS_PROFILE:
+        raise ValueError(f"Unsupported YouTube access profile: {access_profile}")
+    if pot_provider_directory is None:
+        raise ValueError("The mweb-pot access profile requires a provider directory")
+    return [
+        "--extractor-args",
+        "youtube:player_client=mweb",
+        "--extractor-args",
+        f"youtubepot-bgutilscript:server_home={pot_provider_directory}",
+    ]
+
+
+def configured_youtube_pot_provider() -> tuple[Path, str]:
+    """Resolve and verify the pinned local PO-token provider installation."""
+    raw_directory = os.environ.get(YOUTUBE_POT_PROVIDER_DIRECTORY_ENV, "").strip()
+    if not raw_directory:
+        raise YouTubeAcquisitionError(
+            f"{YOUTUBE_POT_PROVIDER_DIRECTORY_ENV} is required for mweb-pot acquisition",
+            "worker_dependency_missing",
+            False,
+        )
+    directory = Path(raw_directory)
+    if not directory.is_absolute() or not (
+        directory / "build" / "generate_once.js"
+    ).is_file():
+        raise YouTubeAcquisitionError(
+            f"The configured YouTube PO-token provider is not built at {directory}",
+            "worker_dependency_missing",
+            False,
+        )
+    try:
+        installed_version = importlib.metadata.version(YOUTUBE_POT_PROVIDER_DISTRIBUTION)
+    except importlib.metadata.PackageNotFoundError as error:
+        raise YouTubeAcquisitionError(
+            f"{YOUTUBE_POT_PROVIDER_DISTRIBUTION} is not installed",
+            "worker_dependency_missing",
+            False,
+        ) from error
+    if installed_version != YOUTUBE_POT_PROVIDER_VERSION:
+        raise YouTubeAcquisitionError(
+            f"{YOUTUBE_POT_PROVIDER_DISTRIBUTION} {installed_version} is installed; "
+            f"expected {YOUTUBE_POT_PROVIDER_VERSION}",
+            "worker_dependency_missing",
+            False,
+        )
+    return directory, installed_version
+
+
+def yt_dlp_audio_command(
+    url: str,
+    command: list[str],
+    *,
+    access_profile: str = YOUTUBE_DEFAULT_ACCESS_PROFILE,
+    pot_provider_directory: Path | None = None,
+) -> list[str]:
     """Build a yt-dlp stream command with Node available for YouTube challenges."""
     return [
         *command,
@@ -101,6 +169,7 @@ def yt_dlp_audio_command(url: str, command: list[str]) -> list[str]:
         "--no-playlist",
         "--js-runtimes",
         "node",
+        *youtube_access_arguments(access_profile, pot_provider_directory),
         "--format",
         YOUTUBE_ORIGINAL_AUDIO_FORMAT,
         "--output",
@@ -114,6 +183,9 @@ def yt_dlp_audio_download_command(
     command: list[str],
     destination: Path,
     maximum_bytes: int,
+    *,
+    access_profile: str = YOUTUBE_DEFAULT_ACCESS_PROFILE,
+    pot_provider_directory: Path | None = None,
 ) -> list[str]:
     """Build a deterministic, single-item original-audio download command."""
     metadata_template = (
@@ -129,6 +201,7 @@ def yt_dlp_audio_download_command(
         "--no-playlist",
         "--js-runtimes",
         "node",
+        *youtube_access_arguments(access_profile, pot_provider_directory),
         "--format",
         YOUTUBE_ORIGINAL_AUDIO_FORMAT,
         "--max-filesize",
@@ -168,12 +241,19 @@ def download_youtube_audio(
     maximum_bytes: int,
     maximum_duration_seconds: int,
     timeout_seconds: int,
+    access_profile: str = YOUTUBE_DEFAULT_ACCESS_PROFILE,
 ) -> dict[str, Any]:
     """Acquire one public original audio stream and return its observed identity."""
     video_id = youtube_video_id(value)
     url = canonical_youtube_url(video_id)
     if maximum_bytes < 1 or maximum_duration_seconds < 1 or timeout_seconds < 1:
         raise ValueError("YouTube acquisition limits must be positive")
+    pot_provider_directory = None
+    pot_provider_version = None
+    if access_profile == YOUTUBE_MWEB_POT_ACCESS_PROFILE:
+        pot_provider_directory, pot_provider_version = configured_youtube_pot_provider()
+    elif access_profile != YOUTUBE_DEFAULT_ACCESS_PROFILE:
+        raise ValueError(f"Unsupported YouTube access profile: {access_profile}")
     command = yt_dlp_command()
     try:
         version = command_version(command)
@@ -186,6 +266,8 @@ def download_youtube_audio(
         command,
         destination,
         maximum_bytes,
+        access_profile=access_profile,
+        pot_provider_directory=pot_provider_directory,
     )
     try:
         completed = subprocess.run(
@@ -267,7 +349,7 @@ def download_youtube_audio(
     with destination.open("rb") as source:
         while chunk := source.read(64 * 1024):
             digest.update(chunk)
-    return {
+    result = {
         "provider": "youtube",
         "video_id": video_id,
         "canonical_url": url,
@@ -279,7 +361,14 @@ def download_youtube_audio(
         "algorithm": "sha256",
         "digest": digest.hexdigest(),
         "byte_length": byte_length,
+        "access_profile": access_profile,
     }
+    if pot_provider_version is not None:
+        result["po_token_provider"] = {
+            "id": YOUTUBE_POT_PROVIDER_DISTRIBUTION,
+            "version": pot_provider_version,
+        }
+    return result
 
 
 def stream_youtube_audio(url: str, command: list[str]) -> Any:
