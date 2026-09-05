@@ -19,6 +19,10 @@ on:
         description: Revision containing the pending dispatch
         required: true
         type: string
+      model_cache_key:
+        description: Bounded cache identity selected for the registered MLX handler
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -61,7 +65,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ~/.cache/huggingface
-          key: authoring-mlx-whisper-tiny-v1
+          key: authoring-mlx-${{ inputs.model_cache_key }}-v1
 
       - name: Install worker dependencies
         run: python -m pip install --requirement authoring/mlx-worker-requirements.txt

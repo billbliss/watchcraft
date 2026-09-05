@@ -1,7 +1,7 @@
 {
   "kind": "watchcraft.authoring-capability-registry",
   "schema_version": 1,
-  "registry_version": "2026-09-05.3",
+  "registry_version": "2026-09-05.4",
   "handlers": [
     {
       "id": "watchcraft.analysis.lexical",
@@ -82,7 +82,42 @@
       }
     },
     {
-      "id": "watchcraft.transcript.mlx-whisper",
+      "id": "watchcraft.transcript.mlx-whisper-staged-smoke",
+      "version": "1",
+      "operation": "generate",
+      "inputs": [
+        {
+          "artifact_kind": "source-audio",
+          "schema": {
+            "id": "watchcraft.source-audio",
+            "version": 1
+          }
+        }
+      ],
+      "dependencies": [],
+      "output": {
+        "artifact_kind": "transcript",
+        "schema": {
+          "id": "watchcraft.transcript",
+          "version": 1
+        }
+      },
+      "execution_profile": {
+        "id": "macos-mlx",
+        "version": "1"
+      },
+      "lease_class": "accelerated",
+      "retry_policy": {
+        "max_attempts": 2,
+        "retryable_classifications": [
+          "artifact_store_failed",
+          "lease_expired",
+          "source_input_unavailable"
+        ]
+      }
+    },
+    {
+      "id": "watchcraft.transcript.mlx-whisper-large-v3-turbo-q4",
       "version": "1",
       "operation": "generate",
       "inputs": [

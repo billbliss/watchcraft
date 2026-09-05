@@ -230,7 +230,7 @@ alternate JSON path may be supplied as their positional argument. Before activat
 the CLI uses the registry-admin credential to read the current activation-pointer
 revision and supplies it to the compare-and-set mutation. This preserves stale-write
 protection without requiring the operator to copy a revision manually. The immutable
-registry document version (for example `2026-09-05.3`) and the activation-pointer
+registry document version (for example `2026-09-05.4`) and the activation-pointer
 revision (for example `2`) are separate values. Advanced scripts may explicitly pass
 `--expected-active-revision`; the older `--expected-revision` spelling remains an
 alias. Publishing the same version with different content is rejected.
@@ -338,6 +338,27 @@ Its Keychain service is `Watchcraft R2 staging uploader`, with accounts
 otherwise uses Keychain. This bootstrap credential belongs only on the operator's
 machine. A future browser or multi-user acquisition client must receive a short-lived,
 job-scoped presigned upload instead.
+
+For an actual single-video authoring run, use `transcribe-youtube` instead of the
+smoke command:
+
+```bash
+./authoring/watchcraft-author queue transcribe-youtube \
+  --operator-token-source keychain \
+  --r2-staging-credentials-source keychain \
+  --r2-credentials-source keychain \
+  "https://www.youtube.com/watch?v=VIDEO_ID"
+```
+
+This follows the same local acquisition, exact-byte staging, approval, GitHub dispatch,
+result verification, and staged-input deletion path. It creates a durable authoring run
+rather than an ephemeral diagnostic record and is bound by its registered handler to
+`mlx-community/whisper-large-v3-turbo-q4`, the production model already used by local
+Watchcraft authoring. The CLI intentionally provides no arbitrary model override: a
+model change is reviewed and versioned as a new handler capability. The initial command
+accepts English videos up to two hours and 100 MB of compressed source audio. Use
+`queue result --output PATH JOB_ID` later to retrieve the exact authoritative transcript
+artifact again.
 
 `queue result` resolves the artifact reference from the authoritative completed job,
 downloads the object from private R2, and verifies its declared byte length and SHA-256

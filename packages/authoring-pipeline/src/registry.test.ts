@@ -56,11 +56,11 @@ const stagedSourceAudio = {
   retention: { class: "ephemeral" as const, expires_at: 2_000_000_000_000 },
 };
 
-const stagedTranscriptionSpec = {
+const stagedTranscriptionSmokeSpec = {
   operation: "generate" as const,
   artifact_kind: "transcript",
   output_schema: { id: "watchcraft.transcript", version: 1 },
-  handler: { id: "watchcraft.transcript.mlx-whisper", version: "1" },
+  handler: { id: "watchcraft.transcript.mlx-whisper-staged-smoke", version: "1" },
   source: { media_asset_id: "youtube:WPtpUu3uIUI" },
   inputs: [stagedSourceAudio],
   dependencies: [],
@@ -72,11 +72,27 @@ const stagedTranscriptionSpec = {
         algorithm: "sha256",
         digest: sourceAudioDigest,
         byte_length: 1024,
+        duration_seconds: 59,
       },
     },
     maximum_bytes: 10_000_000,
+    maximum_duration_seconds: 300,
     language: "en",
     model: "mlx-community/whisper-tiny-mlx",
+  },
+};
+
+const productionTranscriptionSpec = {
+  ...stagedTranscriptionSmokeSpec,
+  handler: {
+    id: "watchcraft.transcript.mlx-whisper-large-v3-turbo-q4",
+    version: "1",
+  },
+  configuration: {
+    ...stagedTranscriptionSmokeSpec.configuration,
+    maximum_bytes: 100_000_000,
+    maximum_duration_seconds: 7_200,
+    model: "mlx-community/whisper-large-v3-turbo-q4",
   },
 };
 
@@ -84,7 +100,7 @@ test("the checked-in registry is valid, stable, and fully resolves an approved j
   const registry = parseCapabilityRegistry(DEFAULT_CAPABILITY_REGISTRY);
   const spec = resolveJobSpecAgainstRegistry(lexicalSpec, registry);
 
-  assert.equal(spec.registry_snapshot?.registry_version, "2026-09-05.3");
+  assert.equal(spec.registry_snapshot?.registry_version, "2026-09-05.4");
   assert.equal(spec.registry_snapshot?.registry_sha256, capabilityRegistrySha256(registry));
   assert.equal(spec.registry_snapshot?.execution_profile.id, "python-portable");
   assert.equal(spec.registry_snapshot?.execution_profile.dispatcher.workflow, "authoring-worker.yml");
@@ -113,15 +129,25 @@ test("the MLX transcription smoke resolves to its dedicated Apple silicon workfl
   );
   assert.equal(httpSpec.registry_snapshot?.execution_profile.id, "macos-mlx");
 
-  const stagedSpec = resolveJobSpecAgainstRegistry(
-    stagedTranscriptionSpec,
+  const stagedSmokeSpec = resolveJobSpecAgainstRegistry(
+    stagedTranscriptionSmokeSpec,
     DEFAULT_CAPABILITY_REGISTRY,
   );
   assert.equal(
-    stagedSpec.registry_snapshot?.handler.id,
-    "watchcraft.transcript.mlx-whisper",
+    stagedSmokeSpec.registry_snapshot?.handler.id,
+    "watchcraft.transcript.mlx-whisper-staged-smoke",
   );
-  assert.equal(stagedSpec.registry_snapshot?.execution_profile.id, "macos-mlx");
+  assert.equal(stagedSmokeSpec.registry_snapshot?.execution_profile.id, "macos-mlx");
+
+  const productionSpec = resolveJobSpecAgainstRegistry(
+    productionTranscriptionSpec,
+    DEFAULT_CAPABILITY_REGISTRY,
+  );
+  assert.equal(
+    productionSpec.registry_snapshot?.handler.id,
+    "watchcraft.transcript.mlx-whisper-large-v3-turbo-q4",
+  );
+  assert.equal(productionSpec.registry_snapshot?.execution_profile.id, "macos-mlx");
 });
 
 test("artifact references distinguish immutable results from expiring staged inputs", () => {

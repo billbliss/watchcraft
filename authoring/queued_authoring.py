@@ -53,8 +53,12 @@ HTTP_TRANSCRIPTION_SMOKE_HANDLER = (
     "watchcraft.transcript.mlx-whisper-http-smoke",
     "1",
 )
-STAGED_TRANSCRIPTION_HANDLER = (
-    "watchcraft.transcript.mlx-whisper",
+STAGED_TRANSCRIPTION_SMOKE_HANDLER = (
+    "watchcraft.transcript.mlx-whisper-staged-smoke",
+    "1",
+)
+PRODUCTION_TRANSCRIPTION_HANDLER = (
+    "watchcraft.transcript.mlx-whisper-large-v3-turbo-q4",
     "1",
 )
 PYTHON_EXECUTION_PROFILE = ("python-portable", "1")
@@ -62,6 +66,7 @@ PYTHON_EXECUTION_WORKFLOW = "authoring-worker.yml"
 MLX_EXECUTION_PROFILE = ("macos-mlx", "1")
 MLX_EXECUTION_WORKFLOW = "authoring-mlx-worker.yml"
 TRANSCRIPTION_SMOKE_MODEL = "mlx-community/whisper-tiny-mlx"
+PRODUCTION_TRANSCRIPTION_MODEL = "mlx-community/whisper-large-v3-turbo-q4"
 TRANSCRIPTION_SMOKE_TEXT = (
     "Watchcraft verifies real audio transcription on an Apple silicon worker."
 )
@@ -76,9 +81,12 @@ HTTP_TRANSCRIPTION_SMOKE_BYTES = 1_152_693
 HTTP_TRANSCRIPTION_SMOKE_MAX_BYTES = 2_000_000
 HTTP_TRANSCRIPTION_SMOKE_TIMEOUT_SECONDS = 60
 YOUTUBE_TRANSCRIPTION_SMOKE_URL = "https://www.youtube.com/watch?v=D_jOvlB_D7A"
-YOUTUBE_TRANSCRIPTION_MAX_BYTES = 10_000_000
-YOUTUBE_TRANSCRIPTION_MAX_DURATION_SECONDS = 300
-YOUTUBE_TRANSCRIPTION_TIMEOUT_SECONDS = 180
+YOUTUBE_TRANSCRIPTION_SMOKE_MAX_BYTES = 10_000_000
+YOUTUBE_TRANSCRIPTION_SMOKE_MAX_DURATION_SECONDS = 300
+YOUTUBE_TRANSCRIPTION_SMOKE_TIMEOUT_SECONDS = 180
+YOUTUBE_TRANSCRIPTION_MAX_BYTES = 100_000_000
+YOUTUBE_TRANSCRIPTION_MAX_DURATION_SECONDS = 7_200
+YOUTUBE_TRANSCRIPTION_TIMEOUT_SECONDS = 900
 SOURCE_AUDIO_RETENTION_MILLISECONDS = 86_400_000
 SOURCE_AUDIO_SCHEMA = {"id": "watchcraft.source-audio", "version": 1}
 WORD_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9'-]{2,}")
@@ -595,28 +603,60 @@ class StagedSourceError(RuntimeError):
         self.retryable = retryable
 
 
+STAGED_TRANSCRIPTION_SETTINGS = {
+    STAGED_TRANSCRIPTION_SMOKE_HANDLER: {
+        "model": TRANSCRIPTION_SMOKE_MODEL,
+        "maximum_bytes": YOUTUBE_TRANSCRIPTION_SMOKE_MAX_BYTES,
+        "maximum_duration_seconds": YOUTUBE_TRANSCRIPTION_SMOKE_MAX_DURATION_SECONDS,
+    },
+    PRODUCTION_TRANSCRIPTION_HANDLER: {
+        "model": PRODUCTION_TRANSCRIPTION_MODEL,
+        "maximum_bytes": YOUTUBE_TRANSCRIPTION_MAX_BYTES,
+        "maximum_duration_seconds": YOUTUBE_TRANSCRIPTION_MAX_DURATION_SECONDS,
+    },
+}
+MLX_MODEL_CACHE_KEYS = {
+    TRANSCRIPTION_SMOKE_HANDLER: "whisper-tiny-mlx",
+    HTTP_TRANSCRIPTION_SMOKE_HANDLER: "whisper-tiny-mlx",
+    STAGED_TRANSCRIPTION_SMOKE_HANDLER: "whisper-tiny-mlx",
+    PRODUCTION_TRANSCRIPTION_HANDLER: "whisper-large-v3-turbo-q4",
+}
+
+
 def mlx_staged_transcription(job: dict[str, Any]) -> dict[str, Any]:
     spec = job["spec"]
+    handler_identity = (
+        spec.get("handler", {}).get("id"),
+        spec.get("handler", {}).get("version"),
+    )
+    settings = STAGED_TRANSCRIPTION_SETTINGS.get(handler_identity)
+    if settings is None:
+        raise ValueError("the staged transcription handler identity is unsupported")
     configuration = spec["configuration"]
     if not isinstance(configuration, dict) or set(configuration) != {
         "acquisition",
         "language",
         "maximum_bytes",
+        "maximum_duration_seconds",
         "model",
     }:
         raise ValueError("the staged transcription configuration is invalid")
     if configuration["language"] != "en":
         raise ValueError("the initial staged transcription handler supports only English")
-    if configuration["model"] != TRANSCRIPTION_SMOKE_MODEL:
+    if configuration["model"] != settings["model"]:
         raise ValueError(
-            f"the initial staged transcription handler requires {TRANSCRIPTION_SMOKE_MODEL}"
+            f"the staged transcription handler requires {settings['model']}"
         )
     maximum_bytes = configuration["maximum_bytes"]
+    maximum_duration_seconds = configuration["maximum_duration_seconds"]
     if (
         type(maximum_bytes) is not int
-        or not 1 <= maximum_bytes <= YOUTUBE_TRANSCRIPTION_MAX_BYTES
+        or not 1 <= maximum_bytes <= settings["maximum_bytes"]
+        or type(maximum_duration_seconds) is not int
+        or maximum_duration_seconds < 1
+        or maximum_duration_seconds > settings["maximum_duration_seconds"]
     ):
-        raise ValueError("the staged transcription byte limit is invalid")
+        raise ValueError("the staged transcription media limits are invalid")
     if not isinstance(spec.get("inputs"), list) or len(spec["inputs"]) != 1:
         raise ValueError("the staged transcription handler requires one source-audio input")
     reference = validated_artifact_reference(spec["inputs"][0], allow_staged=True)
@@ -649,6 +689,10 @@ def mlx_staged_transcription(job: dict[str, Any]) -> dict[str, Any]:
         or acquisition_media.get("algorithm") != reference["algorithm"]
         or acquisition_media.get("digest") != reference["digest"]
         or acquisition_media.get("byte_length") != reference["byte_length"]
+        or isinstance(acquisition_media.get("duration_seconds"), bool)
+        or not isinstance(acquisition_media.get("duration_seconds"), (int, float))
+        or acquisition_media["duration_seconds"] <= 0
+        or acquisition_media["duration_seconds"] > maximum_duration_seconds
         or not isinstance(method, dict)
         or not isinstance(method.get("id"), str)
         or not isinstance(method.get("version"), str)
@@ -679,8 +723,8 @@ def mlx_staged_transcription(job: dict[str, Any]) -> dict[str, Any]:
         "model": configuration["model"],
         **transcript,
         "provenance": {
-            "handler_id": STAGED_TRANSCRIPTION_HANDLER[0],
-            "handler_version": STAGED_TRANSCRIPTION_HANDLER[1],
+            "handler_id": handler_identity[0],
+            "handler_version": handler_identity[1],
             "job_id": job["job_id"],
             "spec_sha256": job["spec_sha256"],
             "acquisition": acquisition,
@@ -694,7 +738,8 @@ HANDLERS: dict[tuple[str, str], Callable[[dict[str, Any]], dict[str, Any]]] = {
     ANALYSIS_HANDLER: lexical_analysis,
     TRANSCRIPTION_SMOKE_HANDLER: mlx_transcription_smoke,
     HTTP_TRANSCRIPTION_SMOKE_HANDLER: mlx_http_transcription_smoke,
-    STAGED_TRANSCRIPTION_HANDLER: mlx_staged_transcription,
+    STAGED_TRANSCRIPTION_SMOKE_HANDLER: mlx_staged_transcription,
+    PRODUCTION_TRANSCRIPTION_HANDLER: mlx_staged_transcription,
 }
 LOCAL_HANDLER_CONTRACTS: dict[tuple[str, str], dict[str, Any]] = {
     ANALYSIS_HANDLER: {
@@ -761,9 +806,38 @@ LOCAL_HANDLER_CONTRACTS: dict[tuple[str, str], dict[str, Any]] = {
             ],
         },
     },
-    STAGED_TRANSCRIPTION_HANDLER: {
-        "id": STAGED_TRANSCRIPTION_HANDLER[0],
-        "version": STAGED_TRANSCRIPTION_HANDLER[1],
+    STAGED_TRANSCRIPTION_SMOKE_HANDLER: {
+        "id": STAGED_TRANSCRIPTION_SMOKE_HANDLER[0],
+        "version": STAGED_TRANSCRIPTION_SMOKE_HANDLER[1],
+        "operation": "generate",
+        "inputs": [
+            {
+                "artifact_kind": "source-audio",
+                "schema": SOURCE_AUDIO_SCHEMA,
+            },
+        ],
+        "dependencies": [],
+        "output": {
+            "artifact_kind": "transcript",
+            "schema": {"id": "watchcraft.transcript", "version": 1},
+        },
+        "execution_profile": {
+            "id": MLX_EXECUTION_PROFILE[0],
+            "version": MLX_EXECUTION_PROFILE[1],
+        },
+        "lease_class": "accelerated",
+        "retry_policy": {
+            "max_attempts": 2,
+            "retryable_classifications": [
+                "artifact_store_failed",
+                "lease_expired",
+                "source_input_unavailable",
+            ],
+        },
+    },
+    PRODUCTION_TRANSCRIPTION_HANDLER: {
+        "id": PRODUCTION_TRANSCRIPTION_HANDLER[0],
+        "version": PRODUCTION_TRANSCRIPTION_HANDLER[1],
         "operation": "generate",
         "inputs": [
             {
@@ -1363,6 +1437,7 @@ def staged_transcription_spec(
     source: dict[str, Any],
     source_audio: dict[str, Any],
     acquisition: dict[str, Any],
+    handler: tuple[str, str] = PRODUCTION_TRANSCRIPTION_HANDLER,
 ) -> dict[str, Any]:
     reference = validated_artifact_reference(source_audio, allow_staged=True)
     if (
@@ -1383,22 +1458,34 @@ def staged_transcription_spec(
         or acquisition_media.get("byte_length") != reference["byte_length"]
     ):
         raise ValueError("Acquisition provenance must bind the staged source audio")
+    settings = STAGED_TRANSCRIPTION_SETTINGS.get(handler)
+    if settings is None:
+        raise ValueError("Staged transcription requires a registered handler identity")
+    duration = acquisition_media.get("duration_seconds")
+    if (
+        isinstance(duration, bool)
+        or not isinstance(duration, (int, float))
+        or not 0 < duration <= settings["maximum_duration_seconds"]
+        or reference["byte_length"] > settings["maximum_bytes"]
+    ):
+        raise ValueError("Staged source audio exceeds the handler media limits")
     return {
         "operation": "generate",
         "artifact_kind": "transcript",
         "output_schema": {"id": "watchcraft.transcript", "version": 1},
         "handler": {
-            "id": STAGED_TRANSCRIPTION_HANDLER[0],
-            "version": STAGED_TRANSCRIPTION_HANDLER[1],
+            "id": handler[0],
+            "version": handler[1],
         },
         "source": source,
         "inputs": [reference],
         "dependencies": [],
         "configuration": {
             "acquisition": acquisition,
-            "maximum_bytes": YOUTUBE_TRANSCRIPTION_MAX_BYTES,
+            "maximum_bytes": settings["maximum_bytes"],
+            "maximum_duration_seconds": settings["maximum_duration_seconds"],
             "language": "en",
-            "model": TRANSCRIPTION_SMOKE_MODEL,
+            "model": settings["model"],
         },
     }
 
@@ -1446,14 +1533,22 @@ def dispatch_submission(control: AuthoringHttpClient, job: dict[str, Any]) -> di
             f"Job {job['job_id']} is {job['state']}; expected ready or dispatch_pending"
         )
     workflow = dispatch_workflow(pending)
-    subprocess.run([
+    command = [
         "gh", "workflow", "run", workflow, "--ref", "main",
         "--repo", DEFAULT_GITHUB_REPOSITORY,
         "-f", f"job_id={pending['job_id']}",
         "-f", f"spec_sha256={pending['spec_sha256']}",
         "-f", f"dispatch_generation={pending['dispatch']['generation']}",
         "-f", f"expected_revision={pending['revision']}",
-    ], check=True)
+    ]
+    if workflow == MLX_EXECUTION_WORKFLOW:
+        handler = pending.get("spec", {}).get("handler", {})
+        handler_identity = (handler.get("id"), handler.get("version"))
+        cache_key = MLX_MODEL_CACHE_KEYS.get(handler_identity)
+        if cache_key is None:
+            raise RuntimeError("MLX job has no bounded model-cache identity")
+        command.extend(["-f", f"model_cache_key={cache_key}"])
+    subprocess.run(command, check=True)
     return pending
 
 
@@ -1504,12 +1599,12 @@ def wait_for_terminal_job(
         if state in {"retryable_failed", "terminal_failed", "cancelled"}:
             failure = job.get("failure") or {}
             raise RuntimeError(
-                f"Smoke job {job_id} ended as {state}: "
+                f"Job {job_id} ended as {state}: "
                 f"{failure.get('classification', 'unknown')} {failure.get('message', '')}".strip()
             )
         now = time.monotonic()
         if now >= deadline:
-            raise RuntimeError(f"Timed out after {timeout_seconds}s waiting for smoke job {job_id}")
+            raise RuntimeError(f"Timed out after {timeout_seconds}s waiting for job {job_id}")
         if not state_changed and now >= next_progress_at:
             elapsed_seconds = int(now - started_at)
             print(
@@ -1599,9 +1694,24 @@ def run_smoke_command(args: argparse.Namespace, kind: str) -> int:
     return 0
 
 
-def run_local_youtube_transcription_smoke(args: argparse.Namespace) -> int:
+def run_local_youtube_transcription(
+    args: argparse.Namespace,
+    *,
+    smoke: bool,
+) -> int:
     control = operator_client(args.operator_token_source)
     staging = r2_staging_writer(args.r2_staging_credentials_source)
+    handler = (
+        STAGED_TRANSCRIPTION_SMOKE_HANDLER
+        if smoke
+        else PRODUCTION_TRANSCRIPTION_HANDLER
+    )
+    settings = STAGED_TRANSCRIPTION_SETTINGS[handler]
+    acquisition_timeout = (
+        YOUTUBE_TRANSCRIPTION_SMOKE_TIMEOUT_SECONDS
+        if smoke
+        else YOUTUBE_TRANSCRIPTION_TIMEOUT_SECONDS
+    )
     video_id = youtube_video_id(args.youtube_url)
     canonical_url = canonical_youtube_url(video_id)
     reference = None
@@ -1613,9 +1723,9 @@ def run_local_youtube_transcription_smoke(args: argparse.Namespace) -> int:
         acquisition_result = download_youtube_audio(
             video_id,
             audio_path,
-            maximum_bytes=YOUTUBE_TRANSCRIPTION_MAX_BYTES,
-            maximum_duration_seconds=YOUTUBE_TRANSCRIPTION_MAX_DURATION_SECONDS,
-            timeout_seconds=YOUTUBE_TRANSCRIPTION_TIMEOUT_SECONDS,
+            maximum_bytes=settings["maximum_bytes"],
+            maximum_duration_seconds=settings["maximum_duration_seconds"],
+            timeout_seconds=acquisition_timeout,
         )
         acquisition = youtube_acquisition_provenance(acquisition_result)
         reference = staging.put_staged_file(
@@ -1640,15 +1750,25 @@ def run_local_youtube_transcription_smoke(args: argparse.Namespace) -> int:
         source={"media_asset_id": f"youtube:{video_id}"},
         source_audio=reference,
         acquisition=acquisition,
+        handler=handler,
     )
     try:
-        submitted = submit_spec(
-            control,
-            request=ephemeral_request(
+        request = (
+            ephemeral_request(
                 "mlx-transcription-youtube-local-smoke",
                 spec["source"]["media_asset_id"],
                 args.retention_days,
-            ),
+            )
+            if smoke
+            else {
+                "kind": "youtube-transcription",
+                "source_id": spec["source"]["media_asset_id"],
+                "model": settings["model"],
+            }
+        )
+        submitted = submit_spec(
+            control,
+            request=request,
             spec=spec,
         )
         job = submitted["job"]
@@ -1657,7 +1777,11 @@ def run_local_youtube_transcription_smoke(args: argparse.Namespace) -> int:
             "job_id": job["job_id"],
             "command_id": str(uuid.uuid4()),
             "expected_revision": job["revision"],
-            "actor": "watchcraft-author-cli:smoke",
+            "actor": (
+                "watchcraft-author-cli:smoke"
+                if smoke
+                else "watchcraft-author-cli"
+            ),
             "spec_sha256": job["spec_sha256"],
         })
         pending = dispatch_submission(control, approved["job"])
@@ -1681,7 +1805,7 @@ def run_local_youtube_transcription_smoke(args: argparse.Namespace) -> int:
             result.get("kind") != "watchcraft.transcript"
             or not result.get("text")
             or not result.get("segments")
-            or provenance.get("handler_id") != STAGED_TRANSCRIPTION_HANDLER[0]
+            or provenance.get("handler_id") != handler[0]
             or source_audio.get("digest") != reference["digest"]
             or source_audio.get("byte_length") != reference["byte_length"]
         ):
@@ -1810,6 +1934,35 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         type=Path,
         metavar="PATH",
         help="Write the exact verified bytes to a new file instead of displaying JSON",
+    )
+    production_transcription = commands.add_parser(
+        "transcribe-youtube",
+        parents=[credentials],
+        help="Acquire and transcribe one YouTube video with the production MLX model",
+        description=(
+            "Acquire one public YouTube audio stream anonymously on this Mac, bind "
+            "and stage its exact bytes in private R2, then approve, dispatch, wait "
+            "for, retrieve, and verify production MLX transcription. The registered "
+            f"model is {PRODUCTION_TRANSCRIPTION_MODEL}; initial limits are two hours "
+            "and 100 MB of compressed audio."
+        ),
+    )
+    production_transcription.add_argument(
+        "youtube_url",
+        help="One public YouTube URL or video ID",
+    )
+    production_transcription.add_argument("--timeout-seconds", type=int, default=3600)
+    production_transcription.add_argument(
+        "--r2-credentials-source",
+        choices=("auto", "keychain", "environment"),
+        default="auto",
+        help="Read-only result credential source (default: auto)",
+    )
+    production_transcription.add_argument(
+        "--r2-staging-credentials-source",
+        choices=("auto", "keychain", "environment"),
+        default="auto",
+        help="Temporary source-media uploader credential source (default: auto)",
     )
     for name, help_text, timeout in (
         ("smoke-analysis", "Run the complete lexical-analysis queue smoke", 600),
@@ -2040,7 +2193,9 @@ def run_queue_command(args: argparse.Namespace) -> int:
             }[args.queue_command],
         )
     if args.queue_command == "smoke-transcription-youtube":
-        return run_local_youtube_transcription_smoke(args)
+        return run_local_youtube_transcription(args, smoke=True)
+    if args.queue_command == "transcribe-youtube":
+        return run_local_youtube_transcription(args, smoke=False)
 
     control = operator_client(args.operator_token_source)
     if args.queue_command == "registry-status":

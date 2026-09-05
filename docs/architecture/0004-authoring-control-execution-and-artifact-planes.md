@@ -299,11 +299,20 @@ identity, selected format/language/container, duration, and the exact media dige
 length. Approval therefore covers both the intended source and the bytes that the
 worker will process.
 
-The provider-neutral `mlx-whisper` handler receives one `source-audio` input. The
-GitHub-hosted macOS worker never contacts YouTube: it rejects expired, oversized,
-mis-typed, or provenance-inconsistent inputs; downloads the private R2 object; verifies
-its length and digest; transcribes it from ephemeral local storage; and publishes only
-the transcript as an authoritative content-addressed object. A successful one-command
+Provider-neutral MLX handlers receive one `source-audio` input. Handler identity binds
+the exact model policy instead of accepting an arbitrary operator-selected model. The
+staged regression handler is fixed to `mlx-community/whisper-tiny-mlx`; the initial
+production handler is fixed to `mlx-community/whisper-large-v3-turbo-q4`, matching the
+established local authoring default. Their workflow caches are separated by bounded
+model identity.
+
+The GitHub-hosted macOS worker never contacts YouTube: it rejects expired, oversized,
+mis-typed, model-inconsistent, or provenance-inconsistent inputs; downloads the private
+R2 object; verifies its length and digest; transcribes it from ephemeral local storage;
+and publishes only the transcript as an authoritative content-addressed object. The
+five-minute staged smoke remains an ephemeral diagnostic run. The production
+single-video command permits up to two hours and 100 MB of compressed source audio and
+creates a durable run with no diagnostic-retention marker. A successful one-command
 operator run deletes the staged audio after retrieving and verifying the transcript.
 An R2 lifecycle rule for the `staging/` prefix remains the backstop for interrupted
 clients and abandoned jobs; an expired input fails closed rather than being silently

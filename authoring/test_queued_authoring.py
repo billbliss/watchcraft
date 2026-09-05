@@ -20,19 +20,24 @@ def registry_snapshot(
     transcription=False,
     http_transcription=False,
     staged_transcription=False,
+    staged_smoke=False,
 ):
-    if transcription or http_transcription or staged_transcription:
+    if transcription or http_transcription or staged_transcription or staged_smoke:
         handler = (
-            queued_authoring.STAGED_TRANSCRIPTION_HANDLER
-            if staged_transcription
+            queued_authoring.STAGED_TRANSCRIPTION_SMOKE_HANDLER
+            if staged_smoke
             else (
-                queued_authoring.HTTP_TRANSCRIPTION_SMOKE_HANDLER
-                if http_transcription
-                else queued_authoring.TRANSCRIPTION_SMOKE_HANDLER
+                queued_authoring.PRODUCTION_TRANSCRIPTION_HANDLER
+                if staged_transcription
+                else (
+                    queued_authoring.HTTP_TRANSCRIPTION_SMOKE_HANDLER
+                    if http_transcription
+                    else queued_authoring.TRANSCRIPTION_SMOKE_HANDLER
+                )
             )
         )
         return {
-            "registry_version": "2026-09-05.3",
+            "registry_version": "2026-09-05.4",
             "registry_sha256": "c" * 64,
             "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[handler],
             "execution_profile": queued_authoring.LOCAL_EXECUTION_PROFILES[
@@ -40,7 +45,7 @@ def registry_snapshot(
             ],
         }
     return {
-        "registry_version": "2026-09-05.3",
+        "registry_version": "2026-09-05.4",
         "registry_sha256": "c" * 64,
         "handler": {
             "id": "watchcraft.analysis.lexical",
@@ -164,6 +169,12 @@ class QueuedAuthoringTests(unittest.TestCase):
             queued_authoring.YOUTUBE_TRANSCRIPTION_SMOKE_URL,
         )
         self.assertEqual(youtube_smoke.r2_staging_credentials_source, "auto")
+        production = build_parser().parse_args([
+            "queue", "transcribe-youtube", "WPtpUu3uIUI",
+        ])
+        self.assertEqual(production.youtube_url, "WPtpUu3uIUI")
+        self.assertEqual(production.timeout_seconds, 3600)
+        self.assertEqual(production.r2_staging_credentials_source, "auto")
 
         cleanup = build_parser().parse_args([
             "queue", "cleanup-run", "run-1", "--confirm", "run-1",
@@ -427,6 +438,10 @@ class QueuedAuthoringTests(unittest.TestCase):
                     result = queued_authoring.mlx_staged_transcription(job)
         audio_path = transcribe.call_args.args[0]
         self.assertFalse(audio_path.exists())
+        self.assertEqual(
+            transcribe.call_args.kwargs["model"],
+            queued_authoring.PRODUCTION_TRANSCRIPTION_MODEL,
+        )
         store.get_bytes.assert_called_once_with(reference)
         self.assertEqual(spec["source"], {"media_asset_id": "youtube:WPtpUu3uIUI"})
         self.assertEqual(
@@ -436,6 +451,19 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertEqual(result["provenance"]["acquisition"], acquisition)
         self.assertEqual(result["provenance"]["source_audio"], reference)
         self.assertFalse(result["provenance"]["worker_audio_retained"])
+
+        wrong_model_job = {
+            **job,
+            "spec": {
+                **spec,
+                "configuration": {
+                    **spec["configuration"],
+                    "model": queued_authoring.TRANSCRIPTION_SMOKE_MODEL,
+                },
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "requires.*large-v3-turbo-q4"):
+            queued_authoring.mlx_staged_transcription(wrong_model_job)
 
     def test_staged_mlx_handler_rejects_expired_input_without_reading_r2(self):
         reference = staged_audio_reference(expires_at=1_788_000_000_000)
@@ -578,8 +606,30 @@ class QueuedAuthoringTests(unittest.TestCase):
         client = Mock()
         with patch("queued_authoring.subprocess.run") as run:
             queued_authoring.dispatch_submission(client, job)
-        self.assertEqual(run.call_args.args[0][3], "authoring-mlx-worker.yml")
+        command = run.call_args.args[0]
+        self.assertEqual(command[3], "authoring-mlx-worker.yml")
+        self.assertIn("model_cache_key=whisper-tiny-mlx", command)
         client.post.assert_not_called()
+
+        reference = staged_audio_reference()
+        production_job = {
+            **job,
+            "job_id": "job-production-mlx",
+            "spec": {
+                **queued_authoring.staged_transcription_spec(
+                    source={"media_asset_id": "youtube:WPtpUu3uIUI"},
+                    source_audio=reference,
+                    acquisition=staged_acquisition(reference),
+                ),
+                "registry_snapshot": registry_snapshot(staged_transcription=True),
+            },
+        }
+        with patch("queued_authoring.subprocess.run") as production_run:
+            queued_authoring.dispatch_submission(client, production_job)
+        self.assertIn(
+            "model_cache_key=whisper-large-v3-turbo-q4",
+            production_run.call_args.args[0],
+        )
 
     def test_dispatch_rejects_an_unsafe_workflow_name(self):
         job = {"spec": {"registry_snapshot": registry_snapshot()}}
@@ -846,142 +896,163 @@ class QueuedAuthoringTests(unittest.TestCase):
             queued_authoring.HTTP_TRANSCRIPTION_SMOKE_HANDLER[0],
         )
 
-    def test_one_command_youtube_smoke_acquires_locally_and_stages_exact_input(self):
-        reference = staged_audio_reference()
-        staging = Mock()
-        staging.put_staged_file.return_value = reference
-        captured = {}
+    def test_youtube_smoke_and_production_commands_bind_distinct_handlers(self):
+        cases = (
+            (
+                "smoke-transcription-youtube",
+                queued_authoring.STAGED_TRANSCRIPTION_SMOKE_HANDLER,
+                queued_authoring.TRANSCRIPTION_SMOKE_MODEL,
+                True,
+            ),
+            (
+                "transcribe-youtube",
+                queued_authoring.PRODUCTION_TRANSCRIPTION_HANDLER,
+                queued_authoring.PRODUCTION_TRANSCRIPTION_MODEL,
+                False,
+            ),
+        )
+        for command, expected_handler, expected_model, smoke in cases:
+            with self.subTest(command=command):
+                reference = staged_audio_reference()
+                staging = Mock()
+                staging.put_staged_file.return_value = reference
+                captured = {}
 
-        def submit(_control, *, request, spec):
-            resolved_spec = {
-                **spec,
-                "registry_snapshot": registry_snapshot(staged_transcription=True),
-            }
-            captured["request"] = request
-            captured["spec"] = resolved_spec
-            return {
-                "job": {
-                    "job_id": "job-youtube-smoke",
-                    "run_id": "run-youtube-smoke",
-                    "revision": 2,
-                    "state": "awaiting_approval",
-                    "spec_sha256": "a" * 64,
-                    "spec": resolved_spec,
-                },
-                "run": {"run_id": "run-youtube-smoke"},
-            }
+                def submit(_control, *, request, spec):
+                    resolved_spec = {
+                        **spec,
+                        "registry_snapshot": registry_snapshot(
+                            staged_smoke=smoke,
+                            staged_transcription=not smoke,
+                        ),
+                    }
+                    job = {
+                        "job_id": f"job-{command}",
+                        "run_id": f"run-{command}",
+                        "revision": 2,
+                        "state": "awaiting_approval",
+                        "spec_sha256": "a" * 64,
+                        "spec": resolved_spec,
+                    }
+                    captured.update(request=request, spec=resolved_spec, job=job)
+                    return {"job": job, "run": {"run_id": job["run_id"]}}
 
-        control = Mock()
+                control = Mock()
 
-        def control_post(path, payload):
-            submitted_job = submit_result["job"]
-            if path == "/submissions/approve":
-                return {"job": {**submitted_job, "revision": 3, "state": "ready"}}
-            raise AssertionError(path)
+                def control_post(path, payload):
+                    if path != "/submissions/approve":
+                        raise AssertionError(path)
+                    self.assertEqual(
+                        payload["actor"],
+                        "watchcraft-author-cli:smoke"
+                        if smoke
+                        else "watchcraft-author-cli",
+                    )
+                    ready = {**captured["job"], "revision": 3, "state": "ready"}
+                    captured["ready"] = ready
+                    return {"job": ready}
 
-        args = build_parser().parse_args([
-            "queue", "smoke-transcription-youtube",
-            "--operator-token-source", "keychain",
-            "--r2-credentials-source", "keychain",
-            "--r2-staging-credentials-source", "keychain",
-            "https://www.youtube.com/shorts/WPtpUu3uIUI",
-        ])
-        acquisition_result = {
-            "provider": "youtube",
-            "video_id": "WPtpUu3uIUI",
-            "canonical_url": "https://www.youtube.com/watch?v=WPtpUu3uIUI",
-            "yt_dlp_version": "2026.08.19",
-            "format_id": "251",
-            "audio_language": "en",
-            "container": "webm",
-            "duration_seconds": 120.0,
-            "algorithm": "sha256",
-            "digest": reference["digest"],
-            "byte_length": reference["byte_length"],
-        }
-        with patch("queued_authoring.operator_client", return_value=control):
-            with patch("queued_authoring.r2_staging_writer", return_value=staging):
-                with patch(
-                    "queued_authoring.download_youtube_audio",
-                    return_value=acquisition_result,
-                ) as download:
-                    with patch("queued_authoring.submit_spec", side_effect=submit):
-                        submit_result = submit(
-                            control,
-                            request={"placeholder": True},
-                            spec=queued_authoring.staged_transcription_spec(
-                                source={"media_asset_id": "youtube:WPtpUu3uIUI"},
-                                source_audio=reference,
-                                acquisition=staged_acquisition(reference),
-                            ),
-                        )
-                        captured.clear()
-                        control.post.side_effect = control_post
-                        ready = {
-                            **submit_result["job"],
-                            "revision": 3,
-                            "state": "ready",
-                        }
-                        pending = {
-                            **ready,
-                            "revision": 4,
-                            "state": "dispatch_pending",
-                            "dispatch": {"generation": 1},
-                        }
-                        completed = {
-                            "job": {
-                                **pending,
-                                "revision": 8,
-                                "state": "succeeded",
-                                "result": {"digest": "c" * 64},
-                            },
-                            "run": {"run_id": "run-youtube-smoke", "state": "complete"},
-                        }
-                        verified_result = {
-                            "kind": "watchcraft.transcript",
-                            "text": "Welcome to the hotel.",
-                            "segments": [{"text": "Welcome to the hotel."}],
-                            "provenance": {
-                                "handler_id": queued_authoring.STAGED_TRANSCRIPTION_HANDLER[0],
-                                "source_audio": reference,
-                            },
-                        }
+                def dispatch(_control, ready):
+                    pending = {
+                        **ready,
+                        "revision": 4,
+                        "state": "dispatch_pending",
+                        "dispatch": {"generation": 1},
+                    }
+                    captured["pending"] = pending
+                    return pending
+
+                def wait(_control, job_id, timeout_seconds):
+                    self.assertEqual(job_id, captured["job"]["job_id"])
+                    self.assertGreater(timeout_seconds, 0)
+                    return {
+                        "job": {
+                            **captured["pending"],
+                            "revision": 8,
+                            "state": "succeeded",
+                            "result": {"digest": "c" * 64},
+                        },
+                        "run": {
+                            "run_id": captured["job"]["run_id"],
+                            "state": "complete",
+                        },
+                    }
+
+                verified_result = {
+                    "kind": "watchcraft.transcript",
+                    "text": "Welcome to the hotel.",
+                    "segments": [{"text": "Welcome to the hotel."}],
+                    "provenance": {
+                        "handler_id": expected_handler[0],
+                        "source_audio": reference,
+                    },
+                }
+                args = build_parser().parse_args([
+                    "queue", command,
+                    "--operator-token-source", "keychain",
+                    "--r2-credentials-source", "keychain",
+                    "--r2-staging-credentials-source", "keychain",
+                    "https://www.youtube.com/shorts/WPtpUu3uIUI",
+                ])
+                acquisition_result = {
+                    "provider": "youtube",
+                    "video_id": "WPtpUu3uIUI",
+                    "canonical_url": "https://www.youtube.com/watch?v=WPtpUu3uIUI",
+                    "yt_dlp_version": "2026.08.19",
+                    "format_id": "251",
+                    "audio_language": "en",
+                    "container": "webm",
+                    "duration_seconds": 120.0,
+                    "algorithm": "sha256",
+                    "digest": reference["digest"],
+                    "byte_length": reference["byte_length"],
+                }
+                control.post.side_effect = control_post
+                with patch("queued_authoring.operator_client", return_value=control):
+                    with patch("queued_authoring.r2_staging_writer", return_value=staging):
                         with patch(
-                            "queued_authoring.dispatch_submission",
-                            return_value=pending,
-                        ):
-                            with patch(
-                                "queued_authoring.wait_for_terminal_job",
-                                return_value=completed,
-                            ):
+                            "queued_authoring.download_youtube_audio",
+                            return_value=acquisition_result,
+                        ) as download:
+                            with patch("queued_authoring.submit_spec", side_effect=submit):
                                 with patch(
-                                    "queued_authoring.verified_json_result",
-                                    return_value=verified_result,
+                                    "queued_authoring.dispatch_submission",
+                                    side_effect=dispatch,
                                 ):
-                                    with redirect_stdout(io.StringIO()):
-                                        self.assertEqual(
-                                            queued_authoring.run_queue_command(args),
-                                            0,
-                                        )
-        download.assert_called_once()
-        staging.put_staged_file.assert_called_once()
-        staging.delete.assert_called_once_with(reference)
-        submitted_request = captured["request"]
-        submitted_spec = captured["spec"]
-        self.assertEqual(submitted_request["purpose"], "smoke")
-        self.assertEqual(
-            submitted_spec["source"],
-            {"media_asset_id": "youtube:WPtpUu3uIUI"},
-        )
-        self.assertEqual(
-            submitted_spec["configuration"]["acquisition"]["source"]["canonical_url"],
-            "https://www.youtube.com/watch?v=WPtpUu3uIUI",
-        )
-        self.assertEqual(
-            submitted_spec["handler"]["id"],
-            queued_authoring.STAGED_TRANSCRIPTION_HANDLER[0],
-        )
-        self.assertEqual(submitted_spec["inputs"], [reference])
+                                    with patch(
+                                        "queued_authoring.wait_for_terminal_job",
+                                        side_effect=wait,
+                                    ):
+                                        with patch(
+                                            "queued_authoring.verified_json_result",
+                                            return_value=verified_result,
+                                        ):
+                                            with redirect_stdout(io.StringIO()):
+                                                self.assertEqual(
+                                                    queued_authoring.run_queue_command(args),
+                                                    0,
+                                                )
+                download.assert_called_once()
+                self.assertEqual(
+                    download.call_args.kwargs["maximum_bytes"],
+                    queued_authoring.YOUTUBE_TRANSCRIPTION_SMOKE_MAX_BYTES
+                    if smoke
+                    else queued_authoring.YOUTUBE_TRANSCRIPTION_MAX_BYTES,
+                )
+                staging.put_staged_file.assert_called_once()
+                staging.delete.assert_called_once_with(reference)
+                self.assertEqual(
+                    captured["spec"]["source"],
+                    {"media_asset_id": "youtube:WPtpUu3uIUI"},
+                )
+                self.assertEqual(captured["spec"]["inputs"], [reference])
+                self.assertEqual(captured["spec"]["handler"]["id"], expected_handler[0])
+                self.assertEqual(captured["spec"]["configuration"]["model"], expected_model)
+                if smoke:
+                    self.assertEqual(captured["request"]["purpose"], "smoke")
+                else:
+                    self.assertNotIn("purpose", captured["request"])
+                    self.assertNotIn("retention", captured["request"])
 
     def test_waiting_for_a_remote_job_reports_periodic_progress(self):
         client = Mock()
@@ -1251,7 +1322,7 @@ class QueuedAuthoringTests(unittest.TestCase):
             with patch("queued_authoring.worker_client", return_value=control):
                 with patch.dict(
                     queued_authoring.HANDLERS,
-                    {queued_authoring.STAGED_TRANSCRIPTION_HANDLER: fail_input},
+                    {queued_authoring.PRODUCTION_TRANSCRIPTION_HANDLER: fail_input},
                 ):
                     with self.assertRaisesRegex(
                         queued_authoring.StagedSourceError,
