@@ -4,6 +4,7 @@ import {
   capabilityRegistrySha256,
   canonicalJson,
   parseCapabilityRegistry,
+  type AuthoringDependency,
   type ArtifactReference,
   type AuthoringCapabilityRegistry,
   type AuthoringJobSpec,
@@ -18,7 +19,10 @@ function identity(id: string, version: string): string {
   return `${id}@${version}`;
 }
 
-function artifactMatches(reference: ArtifactReference, contract: RegistryArtifactContract): boolean {
+function artifactMatches(
+  reference: ArtifactReference | AuthoringDependency,
+  contract: RegistryArtifactContract,
+): boolean {
   return reference.artifact_kind === contract.artifact_kind
     && reference.schema.id === contract.schema.id
     && reference.schema.version === contract.schema.version;
@@ -26,7 +30,7 @@ function artifactMatches(reference: ArtifactReference, contract: RegistryArtifac
 
 function assertArtifactContracts(
   label: string,
-  references: ArtifactReference[],
+  references: AuthoringDependency[],
   contracts: RegistryArtifactContract[],
 ): void {
   if (references.length !== contracts.length) {

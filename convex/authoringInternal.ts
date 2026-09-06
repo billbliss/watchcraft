@@ -9,6 +9,8 @@ import {
 
 import {
   canonicalJson,
+  jobSpecSha256,
+  sha256Hex,
   type AuthoringJob,
   type AuthoringRun,
   type JsonValue,
@@ -166,6 +168,75 @@ async function applyRunForJob(
   } as RunCommand, now);
 }
 
+async function startRunForJob(
+  ctx: MutationCtx,
+  job: AuthoringJob,
+  commandId: string,
+  now: number,
+): Promise<AuthoringRun | null> {
+  const stored = await runDocument(ctx, job.run_id);
+  if (!stored) return null;
+  const run = parseAuthoringRun(stored.aggregate);
+  if (run.state === "running") return run;
+  return applyStoredRunCommand(ctx, run.run_id, {
+    type: "start",
+    command_id: commandId,
+    expected_revision: run.revision,
+  }, now);
+}
+
+async function reconcileSuccessfulRun(
+  ctx: MutationCtx,
+  job: AuthoringJob,
+  commandId: string,
+  now: number,
+): Promise<AuthoringRun | null> {
+  const stored = await runDocument(ctx, job.run_id);
+  if (!stored) return null;
+  const run = parseAuthoringRun(stored.aggregate);
+  if (run.state === "complete") return run;
+  if (run.state !== "running") {
+    throw new Error(`Run ${run.run_id} is ${run.state} while a job succeeded.`);
+  }
+  const jobs = await Promise.all(run.job_ids.map((jobId) => jobDocument(ctx, jobId)));
+  const allSucceeded = jobs.every(
+    (storedJob) => storedJob && parseAuthoringJob(storedJob.aggregate).state === "succeeded",
+  );
+  if (!allSucceeded) return run;
+  return applyStoredRunCommand(ctx, run.run_id, {
+    type: "succeed",
+    command_id: commandId,
+    expected_revision: run.revision,
+  }, now);
+}
+
+async function assertResolvedJobDependencies(
+  ctx: MutationCtx,
+  job: AuthoringJob,
+): Promise<void> {
+  for (const dependency of job.spec.dependencies) {
+    if (!("kind" in dependency) || dependency.kind !== "job-output") continue;
+    const storedDependency = await jobDocument(ctx, dependency.job_id);
+    if (!storedDependency) {
+      throw new Error(`Dependency job ${dependency.job_id} does not exist.`);
+    }
+    const upstream = parseAuthoringJob(storedDependency.aggregate);
+    if (upstream.run_id !== job.run_id) {
+      throw new Error(`Dependency job ${dependency.job_id} belongs to another run.`);
+    }
+    if (upstream.state !== "succeeded" || !upstream.result) {
+      throw new Error(`Dependency job ${dependency.job_id} is ${upstream.state}; expected succeeded.`);
+    }
+    if (
+      upstream.result.artifact_kind !== dependency.artifact_kind
+      || upstream.result.schema.id !== dependency.schema.id
+      || upstream.result.schema.version !== dependency.schema.version
+    ) {
+      throw new Error(`Dependency job ${dependency.job_id} produced an incompatible artifact.`);
+    }
+  }
+}
+
 export const getSubmission = internalQuery({
   args: { job_id: v.string() },
   returns: v.any(),
@@ -254,6 +325,184 @@ export const submitJob = internalMutation({
       job_ids: [job.job_id],
     }, now);
     return { job, run: plannedRun };
+  },
+});
+
+export const submitPipeline = internalMutation({
+  args: {
+    run_id: v.string(),
+    command_prefix: v.string(),
+    request: v.any(),
+    jobs: v.array(v.object({ job_id: v.string(), spec: v.any() })),
+    environment: v.optional(v.string()),
+  },
+  returns: v.any(),
+  handler: async (ctx, args) => {
+    if (args.jobs.length < 2) throw new Error("A pipeline requires at least two jobs.");
+    const jobIds = args.jobs.map(({ job_id }) => job_id);
+    if (new Set(jobIds).size !== jobIds.length) throw new Error("Pipeline job IDs must be unique.");
+    const proposedJobs = args.jobs.map(({ job_id, spec }) => ({
+      job_id,
+      spec: parseAuthoringJobSpec(spec),
+    }));
+    const existingRun = await runDocument(ctx, args.run_id);
+    if (existingRun) {
+      const duplicate = await runCommandEvent(
+        ctx,
+        args.run_id,
+        `${args.command_prefix}:create-run`,
+      );
+      if (!duplicate) throw new Error(`Authoring run ${args.run_id} already exists.`);
+      const run = parseAuthoringRun(existingRun.aggregate);
+      if (
+        canonicalJson(run.request) !== canonicalJson(args.request as JsonValue)
+        || canonicalJson(run.job_ids) !== canonicalJson(jobIds)
+      ) {
+        throw new Error(`Pipeline replay for ${args.run_id} does not match its original plan.`);
+      }
+      const jobs: AuthoringJob[] = [];
+      for (const proposed of proposedJobs) {
+        const storedJob = await jobDocument(ctx, proposed.job_id);
+        if (!storedJob) throw new Error(`Pipeline job ${proposed.job_id} is missing.`);
+        const job = parseAuthoringJob(storedJob.aggregate);
+        const { registry_snapshot: _storedSnapshot, ...storedSpec } = job.spec;
+        const { registry_snapshot: _submittedSnapshot, ...submittedSpec } = proposed.spec;
+        if (
+          canonicalJson(storedSpec as unknown as JsonValue)
+          !== canonicalJson(submittedSpec as unknown as JsonValue)
+        ) {
+          throw new Error(`Pipeline replay for ${args.run_id} changes job ${proposed.job_id}.`);
+        }
+        jobs.push(job);
+      }
+      return { jobs, run };
+    }
+
+    const environment = args.environment ?? "production";
+    const registryState = await activeRegistry(ctx, environment);
+    if (!registryState) {
+      throw new Error(`No active authoring capability registry for ${environment}.`);
+    }
+    const resolvedJobs = proposedJobs.map(({ job_id, spec }) => ({
+      job_id,
+      spec: resolveJobSpecAgainstRegistry(spec, registryState.registry),
+    }));
+    const preceding = new Set<string>();
+    for (const candidate of resolvedJobs) {
+      for (const dependency of candidate.spec.dependencies) {
+        if (("kind" in dependency) && dependency.kind === "job-output") {
+          if (!preceding.has(dependency.job_id)) {
+            throw new Error(
+              `Pipeline dependency ${dependency.job_id} must reference an earlier job in the run.`,
+            );
+          }
+          const upstream = resolvedJobs.find(({ job_id }) => job_id === dependency.job_id)!;
+          if (
+            upstream.spec.artifact_kind !== dependency.artifact_kind
+            || upstream.spec.output_schema.id !== dependency.schema.id
+            || upstream.spec.output_schema.version !== dependency.schema.version
+          ) {
+            throw new Error(`Pipeline dependency ${dependency.job_id} has an incompatible output.`);
+          }
+        }
+      }
+      preceding.add(candidate.job_id);
+    }
+
+    const now = Date.now();
+    const run = createAuthoringRun(
+      args.run_id,
+      args.request as { [key: string]: JsonValue },
+      `${args.command_prefix}:create-run`,
+      now,
+    );
+    await ctx.db.insert("authoring_runs", { run_id: run.run_id, aggregate: run });
+    await recordRunEvent(ctx, null, run, run.last_command_id, now);
+
+    const jobs: AuthoringJob[] = [];
+    for (const candidate of resolvedJobs) {
+      const created = createAuthoringJob(
+        candidate.job_id,
+        args.run_id,
+        candidate.spec,
+        `${args.command_prefix}:${candidate.job_id}:create`,
+        now,
+      );
+      await ctx.db.insert("authoring_jobs", { job_id: created.job_id, aggregate: created });
+      await recordEvent(ctx, null, created, created.last_command_id, now);
+      jobs.push(await applyStoredCommand(ctx, created.job_id, {
+        type: "request_approval",
+        command_id: `${args.command_prefix}:${candidate.job_id}:request-approval`,
+        expected_revision: created.revision,
+      }, now));
+    }
+    const approvalSha256 = sha256Hex(canonicalJson({
+      jobs: jobs.map((job) => ({ job_id: job.job_id, spec_sha256: jobSpecSha256(job.spec) })),
+    }));
+    const plannedRun = await applyStoredRunCommand(ctx, run.run_id, {
+      type: "plan",
+      command_id: `${args.command_prefix}:plan-run`,
+      expected_revision: run.revision,
+      source_snapshot: null,
+      plan: null,
+      approval_sha256: approvalSha256,
+      job_ids: jobs.map((job) => job.job_id),
+    }, now);
+    return { jobs, run: plannedRun };
+  },
+});
+
+export const approvePipeline = internalMutation({
+  args: {
+    run_id: v.string(),
+    command_id: v.string(),
+    expected_revision: v.number(),
+    actor: v.string(),
+    approval_sha256: v.string(),
+  },
+  returns: v.any(),
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const stored = await runDocument(ctx, args.run_id);
+    if (!stored) throw new Error(`Unknown authoring run ${args.run_id}.`);
+    const run = parseAuthoringRun(stored.aggregate);
+    const duplicate = await runCommandEvent(ctx, args.run_id, `${args.command_id}:run`);
+    if (duplicate) {
+      const jobs: AuthoringJob[] = [];
+      for (const jobId of run.job_ids) {
+        const event = await commandEvent(ctx, jobId, `${args.command_id}:${jobId}`);
+        if (!event) throw new Error(`Pipeline approval replay is missing job ${jobId}.`);
+        jobs.push(parseAuthoringJob(event.result));
+      }
+      return { jobs, run: parseAuthoringRun(duplicate.result) };
+    }
+    if (run.revision !== args.expected_revision) {
+      throw new Error(`Stale run revision ${args.expected_revision}; current revision is ${run.revision}.`);
+    }
+    if (run.approval_sha256 !== args.approval_sha256) {
+      throw new Error("Approval does not match the immutable pipeline plan.");
+    }
+    const jobs: AuthoringJob[] = [];
+    for (const jobId of run.job_ids) {
+      const storedJob = await jobDocument(ctx, jobId);
+      if (!storedJob) throw new Error(`Pipeline job ${jobId} is missing.`);
+      const job = parseAuthoringJob(storedJob.aggregate);
+      jobs.push(await applyStoredCommand(ctx, jobId, {
+        type: "approve",
+        command_id: `${args.command_id}:${jobId}`,
+        expected_revision: job.revision,
+        actor: args.actor,
+        spec_sha256: job.spec_sha256,
+      }, now));
+    }
+    const approvedRun = await applyStoredRunCommand(ctx, run.run_id, {
+      type: "approve",
+      command_id: `${args.command_id}:run`,
+      expected_revision: run.revision,
+      actor: args.actor,
+      approval_sha256: args.approval_sha256,
+    }, now);
+    return { jobs, run: approvedRun };
   },
 });
 
@@ -348,10 +597,15 @@ export const requestDispatch = internalMutation({
     expected_revision: v.number(),
   },
   returns: v.any(),
-  handler: (ctx, args) => applyStoredCommand(ctx, args.job_id, {
-    type: "request_dispatch",
-    ...args,
-  }, Date.now()),
+  handler: async (ctx, args) => {
+    const stored = await jobDocument(ctx, args.job_id);
+    if (!stored) throw new Error(`Unknown authoring job ${args.job_id}.`);
+    await assertResolvedJobDependencies(ctx, parseAuthoringJob(stored.aggregate));
+    return applyStoredCommand(ctx, args.job_id, {
+      type: "request_dispatch",
+      ...args,
+    }, Date.now());
+  },
 });
 
 export const recordDispatch = internalMutation({
@@ -370,10 +624,7 @@ export const recordDispatch = internalMutation({
       type: "record_dispatch",
       ...args,
     }, now);
-    await applyRunForJob(ctx, job, {
-      type: "start",
-      command_id: `${args.command_id}:run`,
-    }, now);
+    await startRunForJob(ctx, job, `${args.command_id}:run`, now);
     return job;
   },
 });
@@ -580,10 +831,7 @@ export const succeedJob = internalMutation({
       attempt_id: args.attempt_id,
       artifact: args.artifact,
     }, now);
-    await applyRunForJob(ctx, job, {
-      type: "succeed",
-      command_id: `${args.command_id}:run`,
-    }, now);
+    await reconcileSuccessfulRun(ctx, job, `${args.command_id}:run`, now);
     return job;
   },
 });

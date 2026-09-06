@@ -63,6 +63,7 @@ const registryAdminVerifier = "AUTHORING_REGISTRY_ADMIN_TOKEN_SHA256";
 
 http.route({ path: "/authoring/smoke/prepare", method: "POST", handler: mutationRoute(internal.authoringInternal.prepareSmokeJob, workerVerifier) });
 http.route({ path: "/authoring/jobs/dispatch/record", method: "POST", handler: mutationRoute(internal.authoringInternal.recordDispatch, workerVerifier) });
+http.route({ path: "/authoring/jobs/get", method: "POST", handler: queryRoute(internal.authoringInternal.getSubmission, workerVerifier) });
 http.route({ path: "/authoring/jobs/claim", method: "POST", handler: mutationRoute(internal.authoringInternal.claimJob, workerVerifier) });
 http.route({ path: "/authoring/jobs/start", method: "POST", handler: mutationRoute(internal.authoringInternal.startJob, workerVerifier) });
 http.route({ path: "/authoring/jobs/heartbeat", method: "POST", handler: mutationRoute(internal.authoringInternal.heartbeatJob, workerVerifier) });
@@ -71,6 +72,8 @@ http.route({ path: "/authoring/jobs/fail", method: "POST", handler: mutationRout
 
 http.route({ path: "/authoring/operator/submissions/get", method: "POST", handler: queryRoute(internal.authoringInternal.getSubmission, operatorVerifier) });
 http.route({ path: "/authoring/operator/submissions/submit", method: "POST", handler: mutationRoute(internal.authoringInternal.submitJob, operatorVerifier) });
+http.route({ path: "/authoring/operator/pipelines/submit", method: "POST", handler: mutationRoute(internal.authoringInternal.submitPipeline, operatorVerifier) });
+http.route({ path: "/authoring/operator/pipelines/approve", method: "POST", handler: mutationRoute(internal.authoringInternal.approvePipeline, operatorVerifier) });
 http.route({ path: "/authoring/operator/submissions/approve", method: "POST", handler: mutationRoute(internal.authoringInternal.approveSubmission, operatorVerifier) });
 http.route({ path: "/authoring/operator/submissions/request-dispatch", method: "POST", handler: mutationRoute(internal.authoringInternal.requestDispatch, operatorVerifier) });
 http.route({ path: "/authoring/operator/submissions/cancel", method: "POST", handler: mutationRoute(internal.authoringInternal.cancelJob, operatorVerifier) });

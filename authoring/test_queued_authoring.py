@@ -230,6 +230,13 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertEqual(production.youtube_url, "WPtpUu3uIUI")
         self.assertEqual(production.timeout_seconds, 3600)
         self.assertEqual(production.r2_staging_credentials_source, "auto")
+        pipeline = build_parser().parse_args([
+            "queue", "process-youtube", "WPtpUu3uIUI",
+        ])
+        self.assertEqual(pipeline.youtube_url, "WPtpUu3uIUI")
+        self.assertEqual(pipeline.transcription_timeout_seconds, 3600)
+        self.assertEqual(pipeline.analysis_timeout_seconds, 3600)
+        self.assertEqual(pipeline.r2_staging_credentials_source, "auto")
 
         cleanup = build_parser().parse_args([
             "queue", "cleanup-run", "run-1", "--confirm", "run-1",
@@ -407,7 +414,7 @@ class QueuedAuthoringTests(unittest.TestCase):
                 ) as analyze:
                     with patch(
                         "queued_authoring.time.monotonic",
-                        side_effect=(0.0, 1.0, 1.2, 1.3, 3.8, 4.0),
+                        side_effect=(0.0, 0.1, 0.2, 1.0, 1.2, 1.3, 3.8, 4.0),
                     ):
                         result = queued_authoring.educational_video_analysis(job)
         store.get_bytes.assert_called_once_with(reference)
@@ -419,10 +426,78 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertEqual(result["sections"], generated["sections"])
         self.assertEqual(result["provenance"]["transcript"], reference)
         self.assertEqual(result["provenance"]["timing"], {
+            "dependency_resolution_ms": 100,
             "input_fetch_ms": 200,
             "analysis_ms": 2500,
             "handler_ms": 4000,
         })
+
+    def test_queued_educational_analysis_resolves_a_job_output_dependency(self):
+        reference = transcript_reference()
+        metadata = youtube_metadata()
+        dependency = {
+            "kind": "job-output",
+            "job_id": "transcription-job-1",
+            "artifact_kind": "transcript",
+            "schema": {"id": "watchcraft.transcript", "version": 1},
+        }
+        spec = queued_authoring.educational_video_analysis_spec(
+            source={"media_asset_id": metadata["source_id"]},
+            transcript=dependency,
+            source_metadata=metadata,
+            video="WPtpUu3uIUI.youtube",
+        )
+        job = {
+            "job_id": "analysis-job-1",
+            "run_id": "pipeline-run-1",
+            "spec_sha256": "a" * 64,
+            "spec": spec,
+        }
+        transcript = {
+            "kind": "watchcraft.transcript",
+            "schema_version": 1,
+            "source": {"media_asset_id": metadata["source_id"]},
+            "text": "Use a pinch grip.",
+            "segments": [{"start": 0.0, "end": 1.0, "text": "Use a pinch grip."}],
+        }
+        generated = {
+            "schema_version": 2,
+            "video": "WPtpUu3uIUI.youtube",
+            "title": "Safe knife grip",
+            "summary": "A concise lesson.",
+            "topics": ["Pinch grip"],
+            "sections": [{"title": "Grip"}],
+            "featured_techniques": [],
+        }
+        control = Mock()
+        control.post.return_value = {
+            "job": {
+                "job_id": dependency["job_id"],
+                "run_id": job["run_id"],
+                "state": "succeeded",
+                "result": reference,
+            }
+        }
+        store = Mock()
+        store.get_bytes.return_value = json.dumps(transcript).encode()
+        with patch("queued_authoring.worker_client", return_value=control):
+            with patch.object(
+                queued_authoring.R2ArtifactStore,
+                "from_environment",
+                return_value=store,
+            ):
+                with patch("analyze_catalog.create_openai_client"):
+                    with patch("analyze_catalog.generate_analysis", return_value=generated):
+                        result = queued_authoring.educational_video_analysis(job)
+        control.post.assert_called_once_with(
+            "/jobs/get", {"job_id": dependency["job_id"]}
+        )
+        store.get_bytes.assert_called_once_with(reference)
+        self.assertEqual(
+            result["provenance"]["transcription_job_id"],
+            dependency["job_id"],
+        )
+        self.assertEqual(result["provenance"]["transcript"], reference)
 
     def test_mlx_smoke_transcribes_a_temporary_generated_audio_fixture(self):
         transcription_smoke_spec = queued_authoring.transcription_smoke_spec(
@@ -1232,6 +1307,172 @@ class QueuedAuthoringTests(unittest.TestCase):
                 else:
                     self.assertNotIn("purpose", captured["request"])
                     self.assertNotIn("retention", captured["request"])
+
+    def test_process_youtube_runs_dependent_transcription_and_analysis_jobs(self):
+        reference = staged_audio_reference()
+        transcript_artifact = transcript_reference()
+        analysis_digest = "e" * 64
+        analysis_artifact = {
+            **transcript_artifact,
+            "digest": analysis_digest,
+            "artifact_kind": "analysis",
+            "schema": queued_authoring.VIDEO_ANALYSIS_SCHEMA,
+            "key": f"objects/sha256/{analysis_digest[:2]}/{analysis_digest[2:]}",
+        }
+        staging = Mock()
+        staging.put_staged_file.return_value = reference
+        control = Mock()
+        captured = {}
+
+        def submit(_control, *, request, jobs):
+            captured.update(request=request, jobs=jobs)
+            submitted_jobs = [{
+                "job_id": candidate["job_id"],
+                "run_id": "pipeline-run-1",
+                "revision": 2,
+                "state": "awaiting_approval",
+                "spec_sha256": ("a" if index else "b") * 64,
+                "spec": candidate["spec"],
+            } for index, candidate in enumerate(jobs)]
+            captured["submitted_jobs"] = submitted_jobs
+            return {
+                "jobs": submitted_jobs,
+                "run": {
+                    "run_id": "pipeline-run-1",
+                    "revision": 2,
+                    "state": "planned",
+                    "approval_sha256": "c" * 64,
+                },
+            }
+
+        def control_post(path, payload):
+            self.assertEqual(path, "/pipelines/approve")
+            return {
+                "jobs": [
+                    {**job, "revision": 3, "state": "ready"}
+                    for job in captured["submitted_jobs"]
+                ],
+                "run": {"run_id": payload["run_id"], "state": "approved"},
+            }
+
+        def dispatch(_control, job):
+            return {
+                **job,
+                "revision": 4,
+                "state": "dispatch_pending",
+                "dispatch": {"generation": 1},
+            }
+
+        def wait(_control, job_id, _timeout_seconds):
+            transcription = job_id == captured["jobs"][0]["job_id"]
+            return {
+                "job": {
+                    "job_id": job_id,
+                    "run_id": "pipeline-run-1",
+                    "state": "succeeded",
+                    "result": transcript_artifact if transcription else analysis_artifact,
+                    "created_at": 1_000,
+                    "updated_at": 5_000 if transcription else 9_000,
+                    "dispatch": {"requested_at": 2_000 if transcription else 6_000},
+                    "attempts": [{
+                        "state": "succeeded",
+                        "started_at": 2_500 if transcription else 6_500,
+                        "updated_at": 4_500 if transcription else 8_500,
+                    }],
+                },
+                "run": {
+                    "run_id": "pipeline-run-1",
+                    "state": "running" if transcription else "complete",
+                    "created_at": 1_000,
+                    "updated_at": 9_000,
+                },
+            }
+
+        def verified(job, _credential_source):
+            if job["job_id"] == captured["jobs"][0]["job_id"]:
+                return {
+                    "kind": "watchcraft.transcript",
+                    "source": {"media_asset_id": "youtube:WPtpUu3uIUI"},
+                    "text": "Use a pinch grip.",
+                    "segments": [{"text": "Use a pinch grip."}],
+                    "model": queued_authoring.PRODUCTION_TRANSCRIPTION_MODEL,
+                    "language": "en",
+                    "provenance": {
+                        "handler_id": queued_authoring.PRODUCTION_TRANSCRIPTION_HANDLER[0],
+                        "timing": {"transcription_ms": 2_000},
+                    },
+                }
+            return {
+                "schema_version": 2,
+                "video": "WPtpUu3uIUI.youtube",
+                "title": "Knife skills",
+                "summary": "A knife-skills lesson.",
+                "topics": ["Pinch grip"],
+                "sections": [{"title": "Grip"}],
+                "featured_techniques": [],
+                "analysis_model": queued_authoring.EDUCATIONAL_VIDEO_ANALYSIS_MODEL,
+                "provenance": {
+                    "handler_id": queued_authoring.EDUCATIONAL_VIDEO_ANALYSIS_HANDLER[0],
+                    "transcription_job_id": captured["jobs"][0]["job_id"],
+                    "transcript": transcript_artifact,
+                    "timing": {"analysis_ms": 1_000},
+                },
+            }
+
+        acquisition_result = {
+            "provider": "youtube",
+            "video_id": "WPtpUu3uIUI",
+            "canonical_url": "https://www.youtube.com/watch?v=WPtpUu3uIUI",
+            "yt_dlp_version": "2026.08.19",
+            "format_id": "251",
+            "audio_language": "en",
+            "container": "webm",
+            "duration_seconds": 120.0,
+            "algorithm": "sha256",
+            "digest": reference["digest"],
+            "byte_length": reference["byte_length"],
+        }
+        args = build_parser().parse_args([
+            "queue", "process-youtube",
+            "--operator-token-source", "keychain",
+            "--r2-credentials-source", "keychain",
+            "--r2-staging-credentials-source", "keychain",
+            "WPtpUu3uIUI",
+        ])
+        control.post.side_effect = control_post
+        output = io.StringIO()
+        with patch("queued_authoring.operator_client", return_value=control), patch(
+            "queued_authoring.r2_staging_writer", return_value=staging
+        ), patch(
+            "queued_authoring.download_youtube_audio", return_value=acquisition_result
+        ), patch(
+            "queued_authoring.youtube_source_metadata", return_value=youtube_metadata()
+        ), patch(
+            "queued_authoring.submit_pipeline", side_effect=submit
+        ), patch(
+            "queued_authoring.dispatch_submission", side_effect=dispatch
+        ), patch(
+            "queued_authoring.wait_for_terminal_job", side_effect=wait
+        ), patch(
+            "queued_authoring.verified_json_result", side_effect=verified
+        ):
+            with redirect_stdout(output):
+                self.assertEqual(queued_authoring.run_queue_command(args), 0)
+        self.assertEqual(captured["request"]["stages"], [
+            "transcription",
+            "educational-video-analysis",
+        ])
+        dependency = captured["jobs"][1]["spec"]["dependencies"][0]
+        self.assertEqual(dependency["kind"], "job-output")
+        self.assertEqual(dependency["job_id"], captured["jobs"][0]["job_id"])
+        staging.delete.assert_called_once_with(reference)
+        self.assertIn("completed run pipeline-run-1", output.getvalue())
+        self.assertIn('"run_created_to_completed_ms": 8000', output.getvalue())
+        self.assertIn('"submission_to_dispatch_ms": 1000', output.getvalue())
+        self.assertIn('"dispatch_to_worker_ms": 500', output.getvalue())
+        self.assertIn('"worker_attempt_ms": 2000', output.getvalue())
+        self.assertIn("Full transcript:", output.getvalue())
+        self.assertIn("Full analysis:", output.getvalue())
 
     def test_analyze_transcript_runs_existing_analysis_as_a_dependent_job(self):
         transcript = transcript_reference()

@@ -168,6 +168,21 @@ test("educational analysis binds an authoritative transcript to the OpenAI profi
   );
 });
 
+test("educational analysis may bind a typed output from an earlier pipeline job", () => {
+  const dependency = {
+    kind: "job-output" as const,
+    job_id: "transcription-job-1",
+    artifact_kind: "transcript",
+    schema: { id: "watchcraft.transcript", version: 1 },
+  };
+  const spec = resolveJobSpecAgainstRegistry(
+    { ...educationalAnalysisSpec, dependencies: [dependency] },
+    DEFAULT_CAPABILITY_REGISTRY,
+  );
+  assert.deepEqual(spec.dependencies, [dependency]);
+  assert.equal(spec.registry_snapshot?.handler.dependencies[0]?.artifact_kind, "transcript");
+});
+
 test("the MLX transcription smoke resolves to its dedicated Apple silicon workflow", () => {
   const spec = resolveJobSpecAgainstRegistry(transcriptionSmokeSpec, DEFAULT_CAPABILITY_REGISTRY);
   assert.equal(spec.registry_snapshot?.execution_profile.id, "macos-mlx");

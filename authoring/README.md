@@ -400,6 +400,30 @@ This command analyzes one video; it does not normalize collection-wide topics, c
 a category, create a grouping, or publish a collection. Those remain later pipeline
 phases.
 
+Run the complete production path for one YouTube video as one durable authoring run:
+
+```bash
+./authoring/watchcraft-author queue process-youtube \
+  --operator-token-source keychain \
+  --r2-staging-credentials-source keychain \
+  --r2-credentials-source keychain \
+  "https://www.youtube.com/watch?v=VIDEO_ID"
+```
+
+The command creates separate transcription and analysis jobs and approves them as one
+immutable plan. Analysis declares the transcription job's typed output as its
+dependency; the control plane refuses to dispatch it before the transcript succeeds.
+The jobs retain their existing macOS MLX and Linux OpenAI execution profiles, and each
+publishes its own authoritative artifact. The run completes only after both jobs
+succeed.
+
+The final compact result includes each job's artifact, worker and ledger timings plus
+the local acquisition phases and total command duration. `run_created_to_completed_ms`
+measures durable control-plane latency across both workers. The two printed `queue
+result` commands retrieve the full transcript and analysis independently. This command
+requires the updated Convex functions to be deployed; it does not require a new
+capability-registry version because it composes existing registered handlers.
+
 `queue result` resolves the artifact reference from the authoritative completed job,
 downloads the object from private R2, and verifies its declared byte length and SHA-256
 digest. JSON is displayed in readable form by default; `--output PATH` writes the exact

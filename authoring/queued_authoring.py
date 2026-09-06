@@ -701,7 +701,38 @@ def educational_video_analysis(job: dict[str, Any]) -> dict[str, Any]:
         raise AnalysisDependencyError(
             "Educational-video analysis requires exactly one transcript dependency"
         )
-    reference = validated_artifact_reference(spec["dependencies"][0])
+    dependency = spec["dependencies"][0]
+    dependency_resolution_started_at = time.monotonic()
+    dependency_job_id = None
+    if isinstance(dependency, dict) and dependency.get("kind") == "job-output":
+        dependency_job_id = dependency.get("job_id")
+        if not isinstance(dependency_job_id, str) or not dependency_job_id:
+            raise AnalysisDependencyError("Transcript job-output dependency is invalid")
+        try:
+            upstream = worker_client().post("/jobs/get", {"job_id": dependency_job_id})
+            upstream_job = upstream.get("job")
+            if (
+                not isinstance(upstream_job, dict)
+                or upstream_job.get("run_id") != job.get("run_id")
+                or upstream_job.get("state") != "succeeded"
+                or upstream_job.get("result") is None
+            ):
+                raise AnalysisDependencyError(
+                    f"Transcript dependency job {dependency_job_id} is not a successful job in this run"
+                )
+            reference = validated_artifact_reference(upstream_job["result"])
+        except AnalysisDependencyError:
+            raise
+        except Exception as error:
+            failure = AnalysisDependencyError(
+                f"Could not resolve transcript dependency job {dependency_job_id}"
+            )
+            failure.classification = "analysis_dependency_unavailable"
+            failure.retryable = True
+            raise failure from error
+    else:
+        reference = validated_artifact_reference(dependency)
+    dependency_resolution_ms = elapsed_milliseconds(dependency_resolution_started_at)
     if (
         reference.get("artifact_kind") != "transcript"
         or reference.get("schema")
@@ -770,7 +801,13 @@ def educational_video_analysis(job: dict[str, Any]) -> dict[str, Any]:
         "job_id": job["job_id"],
         "spec_sha256": job["spec_sha256"],
         "transcript": reference,
+        **(
+            {"transcription_job_id": dependency_job_id}
+            if dependency_job_id is not None
+            else {}
+        ),
         "timing": {
+            "dependency_resolution_ms": dependency_resolution_ms,
             "input_fetch_ms": input_fetch_ms,
             "analysis_ms": analysis_ms,
             "handler_ms": elapsed_milliseconds(handler_started_at),
@@ -1569,12 +1606,30 @@ def educational_video_analysis_spec(
     source_metadata: dict[str, Any],
     video: str,
 ) -> dict[str, Any]:
-    reference = validated_artifact_reference(transcript)
+    if isinstance(transcript, dict) and transcript.get("kind") == "job-output":
+        reference = {
+            "kind": "job-output",
+            "job_id": transcript.get("job_id"),
+            "artifact_kind": transcript.get("artifact_kind"),
+            "schema": transcript.get("schema"),
+        }
+    else:
+        reference = validated_artifact_reference(transcript)
     if (
         reference.get("artifact_kind") != "transcript"
         or reference.get("schema")
         != {"id": "watchcraft.transcript", "version": 1}
-        or reference.get("media_type") != "application/json"
+        or (
+            reference.get("kind") != "job-output"
+            and reference.get("media_type") != "application/json"
+        )
+        or (
+            reference.get("kind") == "job-output"
+            and (
+                not isinstance(reference.get("job_id"), str)
+                or not reference["job_id"]
+            )
+        )
     ):
         raise ValueError("Analysis requires an authoritative transcript@1 JSON artifact")
     if (
@@ -1723,6 +1778,21 @@ def completed_job_timing(job: dict[str, Any]) -> dict[str, int]:
     if submitted_to_completed_ms is not None:
         timing["submitted_to_completed_ms"] = submitted_to_completed_ms
 
+    dispatch = job.get("dispatch")
+    dispatch_requested_at = (
+        dispatch.get("requested_at") if isinstance(dispatch, dict) else None
+    )
+    submission_to_dispatch_ms = timestamp_delta_ms(
+        dispatch_requested_at, job.get("created_at")
+    )
+    if submission_to_dispatch_ms is not None:
+        timing["submission_to_dispatch_ms"] = submission_to_dispatch_ms
+    dispatch_to_completed_ms = timestamp_delta_ms(
+        job.get("updated_at"), dispatch_requested_at
+    )
+    if dispatch_to_completed_ms is not None:
+        timing["dispatch_to_completed_ms"] = dispatch_to_completed_ms
+
     attempts = job.get("attempts")
     succeeded = (
         [attempt for attempt in attempts if attempt.get("state") == "succeeded"]
@@ -1736,10 +1806,6 @@ def completed_job_timing(job: dict[str, Any]) -> dict[str, int]:
         )
         if attempt_ms is not None:
             timing["worker_attempt_ms"] = attempt_ms
-        dispatch = job.get("dispatch")
-        dispatch_requested_at = (
-            dispatch.get("requested_at") if isinstance(dispatch, dict) else None
-        )
         dispatch_to_worker_ms = timestamp_delta_ms(
             attempt.get("started_at"), dispatch_requested_at
         )
@@ -1925,6 +1991,20 @@ def submit_spec(
         "command_prefix": str(uuid.uuid4()),
         "request": request,
         "spec": spec,
+    })
+
+
+def submit_pipeline(
+    control: AuthoringHttpClient,
+    *,
+    request: dict[str, Any],
+    jobs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return control.post("/pipelines/submit", {
+        "run_id": str(uuid.uuid4()),
+        "command_prefix": str(uuid.uuid4()),
+        "request": request,
+        "jobs": jobs,
     })
 
 
@@ -2403,6 +2483,244 @@ def run_local_youtube_transcription(
     return 0
 
 
+def run_youtube_video_pipeline(args: argparse.Namespace) -> int:
+    command_started_at = time.monotonic()
+    control = operator_client(args.operator_token_source)
+    staging = r2_staging_writer(args.r2_staging_credentials_source)
+    settings = STAGED_TRANSCRIPTION_SETTINGS[PRODUCTION_TRANSCRIPTION_HANDLER]
+    video_id = youtube_video_id(args.youtube_url)
+    canonical_url = canonical_youtube_url(video_id)
+
+    metadata_started_at = time.monotonic()
+    source_metadata = youtube_source_metadata(video_id)
+    metadata_fetch_ms = elapsed_milliseconds(metadata_started_at)
+    source = {"media_asset_id": f"youtube:{video_id}"}
+    if source_metadata.get("source_id") != source["media_asset_id"]:
+        raise RuntimeError("Resolved source metadata does not match the YouTube source")
+
+    reference = None
+    submitted = None
+    with tempfile.TemporaryDirectory(prefix="watchcraft-youtube-acquisition-") as directory:
+        audio_path = Path(directory) / "source-audio"
+        print(f"acquiring {canonical_url} anonymously on this Mac", flush=True)
+        acquisition_started_at = time.monotonic()
+        acquisition_result = download_youtube_audio(
+            video_id,
+            audio_path,
+            maximum_bytes=settings["maximum_bytes"],
+            maximum_duration_seconds=settings["maximum_duration_seconds"],
+            timeout_seconds=YOUTUBE_TRANSCRIPTION_TIMEOUT_SECONDS,
+        )
+        acquisition_ms = elapsed_milliseconds(acquisition_started_at)
+        acquisition = youtube_acquisition_provenance(
+            acquisition_result,
+            elapsed_ms=acquisition_ms,
+        )
+        staging_started_at = time.monotonic()
+        reference = staging.put_staged_file(
+            audio_path,
+            {
+                "artifact_kind": "source-audio",
+                "media_type": source_audio_media_type(acquisition_result.get("container")),
+                "schema": SOURCE_AUDIO_SCHEMA,
+            },
+            acquisition_id=str(uuid.uuid4()),
+            expires_at=int(time.time() * 1000) + SOURCE_AUDIO_RETENTION_MILLISECONDS,
+        )
+        staging_upload_ms = elapsed_milliseconds(staging_started_at)
+    print(
+        f"staged {reference['byte_length']} bytes as {reference['digest']}",
+        flush=True,
+    )
+
+    transcription_job_id = str(uuid.uuid4())
+    analysis_job_id = str(uuid.uuid4())
+    transcription_spec = staged_transcription_spec(
+        source=source,
+        source_audio=reference,
+        acquisition=acquisition,
+        handler=PRODUCTION_TRANSCRIPTION_HANDLER,
+    )
+    analysis_spec = educational_video_analysis_spec(
+        source=source,
+        transcript={
+            "kind": "job-output",
+            "job_id": transcription_job_id,
+            "artifact_kind": "transcript",
+            "schema": {"id": "watchcraft.transcript", "version": 1},
+        },
+        source_metadata=source_metadata,
+        video=f"{video_id}.youtube",
+    )
+    try:
+        submitted = submit_pipeline(
+            control,
+            request={
+                "kind": "youtube-video",
+                "source_id": source["media_asset_id"],
+                "stages": ["transcription", "educational-video-analysis"],
+            },
+            jobs=[
+                {"job_id": transcription_job_id, "spec": transcription_spec},
+                {"job_id": analysis_job_id, "spec": analysis_spec},
+            ],
+        )
+        run = submitted["run"]
+        print(
+            f"submitted run {run['run_id']} with transcription {transcription_job_id} "
+            f"and analysis {analysis_job_id}",
+            flush=True,
+        )
+        approved = control.post("/pipelines/approve", {
+            "run_id": run["run_id"],
+            "command_id": str(uuid.uuid4()),
+            "expected_revision": run["revision"],
+            "actor": "watchcraft-author-cli",
+            "approval_sha256": run["approval_sha256"],
+        })
+        ready_by_id = {job["job_id"]: job for job in approved["jobs"]}
+
+        transcription_pending = dispatch_submission(
+            control,
+            ready_by_id[transcription_job_id],
+        )
+        print(
+            f"dispatched transcription {transcription_job_id} via "
+            f"{dispatch_workflow(transcription_pending)}",
+            flush=True,
+        )
+        transcription_wait_started_at = time.monotonic()
+        transcription_completed = wait_for_terminal_job(
+            control,
+            transcription_job_id,
+            args.transcription_timeout_seconds,
+        )
+        transcription_wait_ms = elapsed_milliseconds(transcription_wait_started_at)
+        transcript_download_started_at = time.monotonic()
+        transcript = verified_json_result(
+            transcription_completed["job"],
+            args.r2_credentials_source,
+        )
+        transcript_download_ms = elapsed_milliseconds(transcript_download_started_at)
+        transcript_provenance = transcript.get("provenance", {})
+        if (
+            transcript.get("kind") != "watchcraft.transcript"
+            or not transcript.get("text")
+            or not transcript.get("segments")
+            or transcript_provenance.get("handler_id")
+            != PRODUCTION_TRANSCRIPTION_HANDLER[0]
+        ):
+            raise RuntimeError("Pipeline transcription returned an invalid result")
+
+        staging.delete(reference)
+        print(f"deleted staged source audio {reference['key']}", flush=True)
+        reference = None
+
+        analysis_pending = dispatch_submission(control, ready_by_id[analysis_job_id])
+        print(
+            f"dispatched analysis {analysis_job_id} via "
+            f"{dispatch_workflow(analysis_pending)}",
+            flush=True,
+        )
+        analysis_wait_started_at = time.monotonic()
+        analysis_completed = wait_for_terminal_job(
+            control,
+            analysis_job_id,
+            args.analysis_timeout_seconds,
+        )
+        analysis_wait_ms = elapsed_milliseconds(analysis_wait_started_at)
+        analysis_download_started_at = time.monotonic()
+        analysis = verified_json_result(
+            analysis_completed["job"],
+            args.r2_credentials_source,
+        )
+        analysis_download_ms = elapsed_milliseconds(analysis_download_started_at)
+        analysis_provenance = analysis.get("provenance", {})
+        transcript_reference = transcription_completed["job"]["result"]
+        if (
+            analysis.get("schema_version") != VIDEO_ANALYSIS_SCHEMA["version"]
+            or analysis.get("video") != f"{video_id}.youtube"
+            or not analysis.get("summary")
+            or analysis_provenance.get("handler_id")
+            != EDUCATIONAL_VIDEO_ANALYSIS_HANDLER[0]
+            or analysis_provenance.get("transcription_job_id")
+            != transcription_job_id
+            or analysis_provenance.get("transcript", {}).get("digest")
+            != transcript_reference["digest"]
+        ):
+            raise RuntimeError("Pipeline educational-video analysis returned an invalid result")
+    except Exception:
+        if submitted is None and reference is not None:
+            staging.delete(reference)
+        raise
+
+    transcription_summary = compact_transcription_result(
+        transcription_completed,
+        transcript,
+        local_timing={
+            "terminal_wait_ms": transcription_wait_ms,
+            "result_download_ms": transcript_download_ms,
+        },
+    )
+    analysis_summary = compact_analysis_result(
+        analysis_completed,
+        analysis,
+        local_timing={
+            "terminal_wait_ms": analysis_wait_ms,
+            "result_download_ms": analysis_download_ms,
+        },
+    )
+    total_ms = elapsed_milliseconds(command_started_at)
+    completed_run = analysis_completed["run"]
+    run_elapsed_ms = timestamp_delta_ms(
+        completed_run.get("updated_at"),
+        completed_run.get("created_at"),
+    )
+    summary = {
+        "run_id": completed_run["run_id"],
+        "state": completed_run["state"],
+        "source": {
+            "media_asset_id": source["media_asset_id"],
+            "url": canonical_url,
+            "title": source_metadata.get("title"),
+        },
+        "jobs": {
+            "transcription": transcription_summary,
+            "analysis": analysis_summary,
+        },
+        "timing": {
+            "local": {
+                "source_metadata_fetch_ms": metadata_fetch_ms,
+                "acquisition_ms": acquisition_ms,
+                "staging_upload_ms": staging_upload_ms,
+                "command_total_ms": total_ms,
+            },
+            "ledger": {
+                **(
+                    {"run_created_to_completed_ms": run_elapsed_ms}
+                    if run_elapsed_ms is not None
+                    else {}
+                ),
+            },
+        },
+    }
+    print(f"completed run {completed_run['run_id']} in {format_elapsed(total_ms)}", flush=True)
+    print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
+    print(
+        "Full transcript: ./authoring/watchcraft-author queue result "
+        "--operator-token-source keychain --r2-credentials-source keychain "
+        f"{transcription_job_id}",
+        flush=True,
+    )
+    print(
+        "Full analysis: ./authoring/watchcraft-author queue result "
+        "--operator-token-source keychain --r2-credentials-source keychain "
+        f"{analysis_job_id}",
+        flush=True,
+    )
+    return 0
+
+
 def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
     parent.description = (
         "Submit, approve, dispatch, and inspect durable remote authoring jobs."
@@ -2535,6 +2853,33 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         help="Read-only result credential source (default: auto)",
     )
     production_transcription.add_argument(
+        "--r2-staging-credentials-source",
+        choices=("auto", "keychain", "environment"),
+        default="auto",
+        help="Temporary source-media uploader credential source (default: auto)",
+    )
+    video_pipeline = commands.add_parser(
+        "process-youtube",
+        parents=[credentials],
+        help="Transcribe and analyze one YouTube video as a durable pipeline run",
+        description=(
+            "Acquire and stage one public YouTube audio stream, then execute production "
+            "MLX transcription and educational-video analysis as two explicitly dependent "
+            "jobs in one durable run."
+        ),
+    )
+    video_pipeline.add_argument("youtube_url", help="One public YouTube URL or video ID")
+    video_pipeline.add_argument(
+        "--transcription-timeout-seconds", type=int, default=3600
+    )
+    video_pipeline.add_argument("--analysis-timeout-seconds", type=int, default=3600)
+    video_pipeline.add_argument(
+        "--r2-credentials-source",
+        choices=("auto", "keychain", "environment"),
+        default="auto",
+        help="Read-only result credential source (default: auto)",
+    )
+    video_pipeline.add_argument(
         "--r2-staging-credentials-source",
         choices=("auto", "keychain", "environment"),
         default="auto",
@@ -2793,6 +3138,8 @@ def run_queue_command(args: argparse.Namespace) -> int:
         return run_local_youtube_transcription(args, smoke=True)
     if args.queue_command == "transcribe-youtube":
         return run_local_youtube_transcription(args, smoke=False)
+    if args.queue_command == "process-youtube":
+        return run_youtube_video_pipeline(args)
     if args.queue_command == "analyze-transcript":
         return run_queued_video_analysis(args)
 

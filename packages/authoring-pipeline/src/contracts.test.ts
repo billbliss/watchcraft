@@ -40,3 +40,22 @@ test("job specification validation rejects non-JSON material configuration", () 
     configuration: { duration_ms: Number.NaN },
   }), /finite numbers/);
 });
+
+test("job specifications preserve typed dependencies on an upstream job output", () => {
+  const spec = syntheticTranscriptJobSpec();
+  const dependency = {
+    kind: "job-output" as const,
+    job_id: "transcription-job-1",
+    artifact_kind: "transcript",
+    schema: { id: "watchcraft.transcript", version: 1 },
+  };
+  const parsed = parseAuthoringJobSpec({ ...spec, dependencies: [dependency] });
+  assert.deepEqual(parsed.dependencies, [dependency]);
+  assert.throws(
+    () => parseAuthoringJobSpec({
+      ...spec,
+      dependencies: [{ ...dependency, job_id: "" }],
+    }),
+    /Dependency job ID/,
+  );
+});

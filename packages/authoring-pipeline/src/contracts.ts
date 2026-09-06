@@ -22,6 +22,18 @@ export interface ArtifactReference {
   };
 }
 
+export interface JobOutputDependency {
+  kind: "job-output";
+  job_id: string;
+  artifact_kind: string;
+  schema: {
+    id: string;
+    version: number;
+  };
+}
+
+export type AuthoringDependency = ArtifactReference | JobOutputDependency;
+
 export type AuthoringOperation = "generate" | "import" | "validate" | "compile";
 
 export interface RegistryArtifactContract {
@@ -102,7 +114,7 @@ export interface AuthoringJobSpec {
     coordinate_id?: string;
   };
   inputs: ArtifactReference[];
-  dependencies: ArtifactReference[];
+  dependencies: AuthoringDependency[];
   configuration: { [key: string]: JsonValue };
   /** Absent only on pre-registry jobs and the synthetic control-plane smoke. */
   registry_snapshot?: RegistryResolutionSnapshot;
@@ -501,6 +513,30 @@ export function parseArtifactReference(
   };
 }
 
+export function parseJobOutputDependency(value: unknown): JobOutputDependency {
+  const candidate = objectValue(value, "Job-output dependency");
+  const schema = objectValue(candidate.schema, "Job-output dependency schema");
+  if (candidate.kind !== "job-output") {
+    throw new TypeError("Job-output dependency kind must be job-output.");
+  }
+  return {
+    kind: "job-output",
+    job_id: stringValue(candidate.job_id, "Dependency job ID"),
+    artifact_kind: stringValue(candidate.artifact_kind, "Dependency artifact kind"),
+    schema: {
+      id: stringValue(schema.id, "Dependency schema ID"),
+      version: integerValue(schema.version, "Dependency schema version", 1),
+    },
+  };
+}
+
+export function parseAuthoringDependency(value: unknown): AuthoringDependency {
+  const candidate = objectValue(value, "Authoring dependency");
+  return candidate.kind === "job-output"
+    ? parseJobOutputDependency(candidate)
+    : parseArtifactReference(candidate);
+}
+
 export function parseAuthoringJobSpec(value: unknown): AuthoringJobSpec {
   const candidate = objectValue(value, "Authoring job specification");
   const operation = stringValue(candidate.operation, "Job operation");
@@ -544,7 +580,7 @@ export function parseAuthoringJobSpec(value: unknown): AuthoringJobSpec {
       ...(coordinateId === undefined ? {} : { coordinate_id: coordinateId }),
     },
     inputs: inputs.map((input) => parseArtifactReference(input, { allowEphemeral: true })),
-    dependencies: dependencies.map((dependency) => parseArtifactReference(dependency)),
+    dependencies: dependencies.map((dependency) => parseAuthoringDependency(dependency)),
     configuration,
     ...(candidate.registry_snapshot === undefined
       ? {}

@@ -674,3 +674,219 @@ test("operator and worker credentials drive a persisted non-transcript analysis 
   expect(cleanupReplay.status).toBe(200);
   await expect(cleanupReplay.json()).resolves.toEqual(cleanupResult);
 });
+
+test("a pipeline run gates analysis on transcription and completes after both jobs", async () => {
+  const t = convexTest(schema, modules);
+  await publishAndActivateDefaultRegistry(t);
+  const sourceAudioDigest = "1".repeat(64);
+  const sourceAudio = {
+    store: "r2",
+    algorithm: "sha256",
+    digest: sourceAudioDigest,
+    byte_length: 1024,
+    media_type: "audio/webm",
+    artifact_kind: "source-audio",
+    schema: { id: "watchcraft.source-audio", version: 1 },
+    key: `staging/00000000-0000-4000-8000-000000000000/sha256/${sourceAudioDigest.slice(0, 2)}/${sourceAudioDigest.slice(2)}`,
+    retention: { class: "ephemeral", expires_at: 2_000_000_000_000 },
+  };
+  const transcriptionSpec = {
+    operation: "generate",
+    artifact_kind: "transcript",
+    output_schema: { id: "watchcraft.transcript", version: 1 },
+    handler: {
+      id: "watchcraft.transcript.mlx-whisper-large-v3-turbo-q4",
+      version: "1",
+    },
+    source: { media_asset_id: "youtube:WPtpUu3uIUI" },
+    inputs: [sourceAudio],
+    dependencies: [],
+    configuration: {
+      acquisition: {
+        source: { media_asset_id: "youtube:WPtpUu3uIUI" },
+        media: {
+          algorithm: "sha256",
+          digest: sourceAudioDigest,
+          byte_length: 1024,
+          duration_seconds: 60,
+        },
+      },
+      maximum_bytes: 100_000_000,
+      maximum_duration_seconds: 7_200,
+      language: "en",
+      model: "mlx-community/whisper-large-v3-turbo-q4",
+    },
+  };
+  const dependency = {
+    kind: "job-output",
+    job_id: "pipeline-transcription",
+    artifact_kind: "transcript",
+    schema: { id: "watchcraft.transcript", version: 1 },
+  };
+  const analysisSpec = {
+    operation: "generate",
+    artifact_kind: "analysis",
+    output_schema: { id: "watchcraft.video-analysis", version: 2 },
+    handler: { id: "watchcraft.analysis.educational-video", version: "1" },
+    source: { media_asset_id: "youtube:WPtpUu3uIUI" },
+    inputs: [],
+    dependencies: [dependency],
+    configuration: {
+      model: "gpt-5-nano",
+      prompt_version: 3,
+      retries: 5,
+      timeout_seconds: 300,
+      max_transcript_chars: 1_500_000,
+      source_metadata: {
+        type: "youtube",
+        source_id: "youtube:WPtpUu3uIUI",
+        title: "Knife skills",
+      },
+      video: "WPtpUu3uIUI.youtube",
+    },
+  };
+  const submittedResponse = await post(t, "/authoring/operator/pipelines/submit", {
+    run_id: "pipeline-run",
+    command_prefix: "pipeline-submit",
+    request: {
+      kind: "youtube-video",
+      source_id: "youtube:WPtpUu3uIUI",
+      stages: ["transcription", "educational-video-analysis"],
+    },
+    jobs: [
+      { job_id: "pipeline-transcription", spec: transcriptionSpec },
+      { job_id: "pipeline-analysis", spec: analysisSpec },
+    ],
+  }, operatorToken);
+  expect(submittedResponse.status).toBe(200);
+  const submitted = await submittedResponse.json() as any;
+  expect(submitted.run).toMatchObject({ state: "planned", job_ids: [
+    "pipeline-transcription",
+    "pipeline-analysis",
+  ] });
+  expect(submitted.jobs[1].spec.dependencies).toEqual([dependency]);
+  const replayedSubmission = await post(t, "/authoring/operator/pipelines/submit", {
+    run_id: "pipeline-run",
+    command_prefix: "pipeline-submit",
+    request: {
+      kind: "youtube-video",
+      source_id: "youtube:WPtpUu3uIUI",
+      stages: ["transcription", "educational-video-analysis"],
+    },
+    jobs: [
+      { job_id: "pipeline-transcription", spec: transcriptionSpec },
+      { job_id: "pipeline-analysis", spec: analysisSpec },
+    ],
+  }, operatorToken);
+  expect(replayedSubmission.status).toBe(200);
+  expect(await replayedSubmission.json()).toEqual(submitted);
+
+  const approvedResponse = await post(t, "/authoring/operator/pipelines/approve", {
+    run_id: submitted.run.run_id,
+    command_id: "pipeline-approve",
+    expected_revision: submitted.run.revision,
+    actor: "test-operator",
+    approval_sha256: submitted.run.approval_sha256,
+  }, operatorToken);
+  expect(approvedResponse.status).toBe(200);
+  const approved = await approvedResponse.json() as any;
+  expect(approved.run.state).toBe("approved");
+  expect(approved.jobs.map((job: any) => job.state)).toEqual(["ready", "ready"]);
+  const replayedApproval = await post(t, "/authoring/operator/pipelines/approve", {
+    run_id: submitted.run.run_id,
+    command_id: "pipeline-approve",
+    expected_revision: submitted.run.revision,
+    actor: "test-operator",
+    approval_sha256: submitted.run.approval_sha256,
+  }, operatorToken);
+  expect(replayedApproval.status).toBe(200);
+  expect(await replayedApproval.json()).toEqual(approved);
+
+  const earlyAnalysis = await post(t, "/authoring/operator/submissions/request-dispatch", {
+    job_id: "pipeline-analysis",
+    command_id: "early-analysis-dispatch",
+    expected_revision: approved.jobs[1].revision,
+  }, operatorToken);
+  expect(earlyAnalysis.status).toBe(409);
+  await expect(earlyAnalysis.json()).resolves.toMatchObject({
+    error: expect.stringContaining("pipeline-transcription is ready"),
+  });
+
+  async function executeJob(job: any, artifact: any, runId: string) {
+    const pendingResponse = await post(t, "/authoring/operator/submissions/request-dispatch", {
+      job_id: job.job_id,
+      command_id: `${job.job_id}:request-dispatch`,
+      expected_revision: job.revision,
+    }, operatorToken);
+    expect(pendingResponse.status).toBe(200);
+    const pending = await pendingResponse.json() as any;
+    const dispatchedResponse = await post(t, "/authoring/jobs/dispatch/record", {
+      job_id: job.job_id,
+      command_id: `${job.job_id}:record-dispatch`,
+      expected_revision: pending.revision,
+      generation: pending.dispatch.generation,
+      github_run_id: `run-${job.job_id}`,
+      github_run_url: `https://github.com/example/runs/${job.job_id}`,
+    });
+    const dispatched = await dispatchedResponse.json() as any;
+    const claimedResponse = await post(t, "/authoring/jobs/claim", {
+      job_id: job.job_id,
+      command_id: `${job.job_id}:claim`,
+      expected_revision: dispatched.revision,
+      attempt_id: `${job.job_id}:attempt`,
+      owner: "test-worker",
+      spec_sha256: dispatched.spec_sha256,
+      dispatch_generation: dispatched.dispatch.generation,
+      lease_duration_ms: 60_000,
+    });
+    const claimed = await claimedResponse.json() as any;
+    const startedResponse = await post(t, "/authoring/jobs/start", {
+      job_id: job.job_id,
+      command_id: `${job.job_id}:start`,
+      expected_revision: claimed.revision,
+      attempt_id: `${job.job_id}:attempt`,
+    });
+    const started = await startedResponse.json() as any;
+    const completedResponse = await post(t, "/authoring/jobs/succeed", {
+      job_id: job.job_id,
+      command_id: `${job.job_id}:succeed`,
+      expected_revision: started.revision,
+      attempt_id: `${job.job_id}:attempt`,
+      artifact,
+    });
+    expect(completedResponse.status).toBe(200);
+    const statusResponse = await post(t, "/authoring/jobs/get", {
+      job_id: job.job_id,
+    });
+    expect(statusResponse.status).toBe(200);
+    const status = await statusResponse.json() as any;
+    expect(status.run.run_id).toBe(runId);
+    return status;
+  }
+
+  const transcriptDigest = "2".repeat(64);
+  const transcription = await executeJob(approved.jobs[0], {
+    store: "r2",
+    algorithm: "sha256",
+    digest: transcriptDigest,
+    byte_length: 20_000,
+    media_type: "application/json",
+    artifact_kind: "transcript",
+    schema: { id: "watchcraft.transcript", version: 1 },
+    key: artifactKey(transcriptDigest),
+  }, submitted.run.run_id);
+  expect(transcription.run.state).toBe("running");
+
+  const analysisDigest = "3".repeat(64);
+  const analysis = await executeJob(approved.jobs[1], {
+    store: "r2",
+    algorithm: "sha256",
+    digest: analysisDigest,
+    byte_length: 10_000,
+    media_type: "application/json",
+    artifact_kind: "analysis",
+    schema: { id: "watchcraft.video-analysis", version: 2 },
+    key: artifactKey(analysisDigest),
+  }, submitted.run.run_id);
+  expect(analysis.run).toMatchObject({ state: "complete", revision: 5 });
+});

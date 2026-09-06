@@ -343,6 +343,22 @@ implicitly acquire that capability. Collection-wide topic normalization, categor
 grouping decisions, compilation, and publication are not part of the per-video analysis
 handler.
 
+The first multi-stage run composes production transcription and educational-video
+analysis without collapsing them into one worker. Its approved plan contains both job
+specifications and a typed `job-output` dependency from analysis to transcription. The
+dependency names the upstream job and expected artifact contract, so the plan remains
+immutable before the content-addressed transcript exists. Dispatch fails closed until
+the upstream job has succeeded with the declared artifact kind and schema. The analysis
+worker resolves that job through its authenticated control-plane connection and then
+verifies the resulting R2 artifact normally.
+
+All jobs in the plan share one run. Recording the first dispatch starts it; successful
+intermediate jobs leave it running; and only success of every planned job completes it.
+The plan approval digest binds the ordered job IDs and their resolved specification
+digests. Pipeline submission and approval commands are idempotent. This is the initial
+general task-graph primitive, not a collection model: category selection, grouping,
+collection compilation, and publication remain later collection-level phases.
+
 This handoff does not assume a browser extension. A future extension, self-hosted
 runner, licensed provider integration, or direct file importer may produce the same
 typed input without changing transcription. Non-operator clients must receive a
