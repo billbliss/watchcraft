@@ -96,15 +96,76 @@ const productionTranscriptionSpec = {
   },
 };
 
+const transcriptDigest = "d".repeat(64);
+const transcriptArtifact = {
+  store: "r2" as const,
+  algorithm: "sha256" as const,
+  digest: transcriptDigest,
+  byte_length: 12_345,
+  media_type: "application/json",
+  artifact_kind: "transcript",
+  schema: { id: "watchcraft.transcript", version: 1 },
+  key: `objects/sha256/${transcriptDigest.slice(0, 2)}/${transcriptDigest.slice(2)}`,
+};
+
+const educationalAnalysisSpec = {
+  operation: "generate" as const,
+  artifact_kind: "analysis",
+  output_schema: { id: "watchcraft.video-analysis", version: 2 },
+  handler: { id: "watchcraft.analysis.educational-video", version: "1" },
+  source: { media_asset_id: "youtube:WPtpUu3uIUI" },
+  inputs: [],
+  dependencies: [transcriptArtifact],
+  configuration: {
+    model: "gpt-5-nano",
+    prompt_version: 3,
+    retries: 5,
+    timeout_seconds: 300,
+    max_transcript_chars: 1_500_000,
+    source_metadata: {
+      type: "youtube",
+      source_id: "youtube:WPtpUu3uIUI",
+      title: "Three hotel-management techniques",
+    },
+    video: "WPtpUu3uIUI.youtube",
+  },
+};
+
 test("the checked-in registry is valid, stable, and fully resolves an approved job", () => {
   const registry = parseCapabilityRegistry(DEFAULT_CAPABILITY_REGISTRY);
   const spec = resolveJobSpecAgainstRegistry(lexicalSpec, registry);
 
-  assert.equal(spec.registry_snapshot?.registry_version, "2026-09-05.4");
+  assert.equal(spec.registry_snapshot?.registry_version, "2026-09-05.5");
   assert.equal(spec.registry_snapshot?.registry_sha256, capabilityRegistrySha256(registry));
   assert.equal(spec.registry_snapshot?.execution_profile.id, "python-portable");
   assert.equal(spec.registry_snapshot?.execution_profile.dispatcher.workflow, "authoring-worker.yml");
   assert.deepEqual(verifyRegistryResolutionSnapshot(spec, registry), spec.registry_snapshot);
+});
+
+test("educational analysis binds an authoritative transcript to the OpenAI profile", () => {
+  const spec = resolveJobSpecAgainstRegistry(
+    educationalAnalysisSpec,
+    DEFAULT_CAPABILITY_REGISTRY,
+  );
+  assert.equal(
+    spec.registry_snapshot?.handler.id,
+    "watchcraft.analysis.educational-video",
+  );
+  assert.deepEqual(spec.dependencies, [transcriptArtifact]);
+  assert.equal(spec.registry_snapshot?.execution_profile.id, "python-openai");
+  assert.equal(
+    spec.registry_snapshot?.execution_profile.dispatcher.workflow,
+    "authoring-openai-worker.yml",
+  );
+  assert.equal(
+    spec.registry_snapshot?.execution_profile.data_access,
+    "private-derived",
+  );
+  assert.ok(
+    spec.registry_snapshot?.execution_profile.secret_capabilities.includes(
+      "openai.responses",
+    ),
+  );
 });
 
 test("the MLX transcription smoke resolves to its dedicated Apple silicon workflow", () => {

@@ -199,21 +199,25 @@ def transcript_has_timeline_evidence(
 def source_context(root: Path, relative_video: str) -> dict[str, str]:
     state_metadata = load_authoring_source(root, relative_video)
     if state_metadata:
-        return {
-            "source_type": str(state_metadata.get("type", "")),
-            "source_id": str(state_metadata.get("source_id", "")),
-            "title": str(state_metadata.get("title", "")),
-            "publisher": str(state_metadata.get("publisher", "")),
-            "published_at": str(state_metadata.get("published_at", "")),
-            "duration_seconds": str(state_metadata.get("duration_seconds", "")),
-            "url": str(state_metadata.get("url", "")),
-        }
+        return source_metadata_context(state_metadata)
     video = (root / relative_video).resolve()
     return {
         "relative_video_path": Path(relative_video).as_posix(),
         "filename": video.name,
         "parent_folder": video.parent.name,
         "embedded_creation_time": probe_creation_time(video) if video.is_file() else "",
+    }
+
+
+def source_metadata_context(source: dict[str, Any]) -> dict[str, str]:
+    return {
+        "source_type": str(source.get("type", "")),
+        "source_id": str(source.get("source_id", "")),
+        "title": str(source.get("title", "")),
+        "publisher": str(source.get("publisher", "")),
+        "published_at": str(source.get("published_at", "")),
+        "duration_seconds": str(source.get("duration_seconds", "")),
+        "url": str(source.get("url", "")),
     }
 
 
@@ -260,10 +264,9 @@ def format_clock(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
-def analysis_with_publisher_chapters(
-    root: Path, relative_video: str, analysis: dict[str, Any]
+def analysis_with_source_chapters(
+    source: dict[str, Any] | None, analysis: dict[str, Any]
 ) -> dict[str, Any]:
-    source = load_authoring_source(root, relative_video)
     chapters = source.get("chapters", []) if source else []
     if not isinstance(chapters, list) or len(chapters) < 3:
         return analysis
@@ -329,6 +332,15 @@ def analysis_with_publisher_chapters(
     updated["sections"] = sections
     updated["timeline_source"] = "youtube-publisher-chapters"
     return updated
+
+
+def analysis_with_publisher_chapters(
+    root: Path, relative_video: str, analysis: dict[str, Any]
+) -> dict[str, Any]:
+    return analysis_with_source_chapters(
+        load_authoring_source(root, relative_video),
+        analysis,
+    )
 
 
 def clamp_confidence(value: float) -> float:
@@ -412,6 +424,47 @@ def request_analysis(
             print(f"  API attempt {attempt + 1} failed; retrying in {delay}s", flush=True)
             time.sleep(delay)
     raise RuntimeError(f"Analysis request failed after {retries + 1} attempts: {last_error}")
+
+
+def generate_analysis(
+    transcript_state: dict[str, Any],
+    *,
+    relative_video: str,
+    source_metadata: dict[str, Any] | None,
+    context: dict[str, str],
+    client: Any,
+    model: str,
+    retries: int,
+    max_transcript_chars: int,
+) -> dict[str, Any]:
+    transcript = transcript_text(transcript_state)
+    if len(transcript) > max_transcript_chars:
+        raise RuntimeError(
+            f"Transcript is {len(transcript):,} characters, exceeding the configured "
+            f"limit of {max_transcript_chars:,}; increase --max-transcript-chars"
+        )
+    generated = request_analysis(
+        client,
+        model=model,
+        context=context,
+        transcript=transcript,
+        retries=retries,
+    )
+    normalized = normalize_analysis(generated, relative_video, model)
+    published_at = context.get("published_at", "")
+    if context.get("source_type") == "youtube" and published_at:
+        try:
+            published = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+            normalized["date"] = {
+                "display": f"{published.strftime('%B')} {published.day}, {published.year}",
+                "iso": published.date().isoformat(),
+                "precision": "day",
+                "confidence": 1.0,
+                "basis": "YouTube publication date",
+            }
+        except ValueError:
+            pass
+    return analysis_with_source_chapters(source_metadata, normalized)
 
 
 def request_timeline_repair(
@@ -511,35 +564,18 @@ def analyze_state(
     output = analysis_path(root, relative_video)
     if output.exists() and not force:
         return "skipped"
-    transcript = transcript_text(state)
-    if len(transcript) > max_transcript_chars:
-        raise RuntimeError(
-            f"Transcript is {len(transcript):,} characters, exceeding the configured "
-            f"limit of {max_transcript_chars:,}; increase --max-transcript-chars"
-        )
+    source_metadata = load_authoring_source(root, relative_video)
     context = source_context(root, relative_video)
-    generated = request_analysis(
-        client,
-        model=model,
+    normalized = generate_analysis(
+        state,
+        relative_video=relative_video,
+        source_metadata=source_metadata,
         context=context,
-        transcript=transcript,
+        client=client,
+        model=model,
         retries=retries,
+        max_transcript_chars=max_transcript_chars,
     )
-    normalized = normalize_analysis(generated, relative_video, model)
-    published_at = context.get("published_at", "")
-    if context.get("source_type") == "youtube" and published_at:
-        try:
-            published = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
-            normalized["date"] = {
-                "display": f"{published.strftime('%B')} {published.day}, {published.year}",
-                "iso": published.date().isoformat(),
-                "precision": "day",
-                "confidence": 1.0,
-                "basis": "YouTube publication date",
-            }
-        except ValueError:
-            pass
-    normalized = analysis_with_publisher_chapters(root, relative_video, normalized)
     atomic_write_text(
         output, json.dumps(normalized, ensure_ascii=False, indent=2) + "\n"
     )

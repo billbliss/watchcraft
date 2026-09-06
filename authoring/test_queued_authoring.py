@@ -17,11 +17,23 @@ from watchcraft_author import build_parser, main
 
 def registry_snapshot(
     *,
+    educational_analysis=False,
     transcription=False,
     http_transcription=False,
     staged_transcription=False,
     staged_smoke=False,
 ):
+    if educational_analysis:
+        return {
+            "registry_version": "2026-09-05.5",
+            "registry_sha256": "c" * 64,
+            "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
+                queued_authoring.EDUCATIONAL_VIDEO_ANALYSIS_HANDLER
+            ],
+            "execution_profile": queued_authoring.LOCAL_EXECUTION_PROFILES[
+                queued_authoring.OPENAI_EXECUTION_PROFILE
+            ],
+        }
     if transcription or http_transcription or staged_transcription or staged_smoke:
         handler = (
             queued_authoring.STAGED_TRANSCRIPTION_SMOKE_HANDLER
@@ -37,7 +49,7 @@ def registry_snapshot(
             )
         )
         return {
-            "registry_version": "2026-09-05.4",
+            "registry_version": "2026-09-05.5",
             "registry_sha256": "c" * 64,
             "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[handler],
             "execution_profile": queued_authoring.LOCAL_EXECUTION_PROFILES[
@@ -45,7 +57,7 @@ def registry_snapshot(
             ],
         }
     return {
-        "registry_version": "2026-09-05.4",
+        "registry_version": "2026-09-05.5",
         "registry_sha256": "c" * 64,
         "handler": {
             "id": "watchcraft.analysis.lexical",
@@ -98,6 +110,36 @@ def staged_audio_reference(*, expires_at=2_000_000_000_000):
     }
 
 
+def transcript_reference():
+    digest = "d" * 64
+    return {
+        "store": "r2",
+        "algorithm": "sha256",
+        "digest": digest,
+        "byte_length": 12_345,
+        "media_type": "application/json",
+        "artifact_kind": "transcript",
+        "schema": {"id": "watchcraft.transcript", "version": 1},
+        "key": f"objects/sha256/{digest[:2]}/{digest[2:]}",
+    }
+
+
+def youtube_metadata():
+    return {
+        "source_id": "youtube:WPtpUu3uIUI",
+        "type": "youtube",
+        "video_id": "WPtpUu3uIUI",
+        "url": "https://www.youtube.com/watch?v=WPtpUu3uIUI",
+        "title": "Three hotel-management techniques",
+        "publisher": "Hospitality School",
+        "publisher_url": "https://www.youtube.com/@hospitalityschool",
+        "thumbnail_url": "https://i.ytimg.com/vi/WPtpUu3uIUI/hqdefault.jpg",
+        "duration_seconds": 120,
+        "published_at": "2026-08-19",
+        "chapters": [],
+    }
+
+
 def staged_acquisition(reference=None):
     reference = reference or staged_audio_reference()
     return {
@@ -143,6 +185,19 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertEqual(args.queue_command, "submit-analysis")
         self.assertEqual(args.max_topics, 8)
         self.assertEqual(args.operator_token_source, "auto")
+
+        queued = build_parser().parse_args([
+            "queue",
+            "analyze-transcript",
+            "transcription-job-1",
+            "--operator-token-source",
+            "keychain",
+            "--r2-credentials-source",
+            "keychain",
+        ])
+        self.assertEqual(queued.queue_command, "analyze-transcript")
+        self.assertEqual(queued.transcription_job_id, "transcription-job-1")
+        self.assertEqual(queued.timeout_seconds, 3600)
 
     def test_queue_parser_exposes_one_command_smokes_and_guarded_cleanup(self):
         smoke = build_parser().parse_args([
@@ -285,6 +340,89 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertEqual(result["kind"], "watchcraft.analysis.lexical")
         self.assertEqual(result["topics"], ["balance", "color", "exposure"])
         self.assertNotIn("segments", result)
+
+    def test_queued_educational_analysis_uses_the_existing_analysis_core(self):
+        reference = transcript_reference()
+        metadata = youtube_metadata()
+        spec = queued_authoring.educational_video_analysis_spec(
+            source={"media_asset_id": metadata["source_id"]},
+            transcript=reference,
+            source_metadata=metadata,
+            video="WPtpUu3uIUI.youtube",
+        )
+        job = {
+            "job_id": "analysis-job-1",
+            "spec_sha256": "a" * 64,
+            "spec": spec,
+        }
+        transcript = {
+            "kind": "watchcraft.transcript",
+            "schema_version": 1,
+            "source": {"media_asset_id": metadata["source_id"]},
+            "text": "Use a pinch grip and keep fingertips tucked.",
+            "segments": [{
+                "start": 0.0,
+                "end": 4.0,
+                "text": "Use a pinch grip and keep fingertips tucked.",
+            }],
+        }
+        generated = {
+            "schema_version": 2,
+            "video": "WPtpUu3uIUI.youtube",
+            "title": "Safe knife grip",
+            "date": {
+                "display": "August 19, 2026",
+                "iso": "2026-08-19",
+                "precision": "day",
+                "confidence": 1.0,
+                "basis": "YouTube publication date",
+            },
+            "locations": [],
+            "summary": "A concise knife-safety lesson.",
+            "topics": ["Pinch grip"],
+            "sections": [{
+                "start": "00:00:00",
+                "end": "00:00:04",
+                "title": "Grip and safety",
+                "concepts": ["Pinch grip"],
+                "description": "Demonstrates a safe grip.",
+            }],
+            "featured_techniques": [],
+            "analysis_model": queued_authoring.EDUCATIONAL_VIDEO_ANALYSIS_MODEL,
+            "analysis_prompt_version": 3,
+            "analysis_created_at": "2026-09-05T00:00:00+00:00",
+        }
+        store = Mock()
+        store.get_bytes.return_value = json.dumps(transcript).encode()
+        client = Mock()
+        with patch.object(
+            queued_authoring.R2ArtifactStore,
+            "from_environment",
+            return_value=store,
+        ):
+            with patch("analyze_catalog.create_openai_client", return_value=client):
+                with patch(
+                    "analyze_catalog.generate_analysis",
+                    return_value=generated,
+                ) as analyze:
+                    with patch(
+                        "queued_authoring.time.monotonic",
+                        side_effect=(0.0, 1.0, 1.2, 1.3, 3.8, 4.0),
+                    ):
+                        result = queued_authoring.educational_video_analysis(job)
+        store.get_bytes.assert_called_once_with(reference)
+        analyze.assert_called_once()
+        self.assertEqual(analyze.call_args.kwargs["client"], client)
+        self.assertEqual(analyze.call_args.kwargs["source_metadata"], metadata)
+        self.assertEqual(analyze.call_args.args[0], transcript)
+        self.assertEqual(result["title"], generated["title"])
+        self.assertEqual(result["sections"], generated["sections"])
+        self.assertEqual(result["provenance"]["transcript"], reference)
+        self.assertEqual(result["provenance"]["timing"], {
+            "input_fetch_ms": 200,
+            "analysis_ms": 2500,
+            "handler_ms": 4000,
+        })
 
     def test_mlx_smoke_transcribes_a_temporary_generated_audio_fixture(self):
         transcription_smoke_spec = queued_authoring.transcription_smoke_spec(
@@ -1095,6 +1233,143 @@ class QueuedAuthoringTests(unittest.TestCase):
                     self.assertNotIn("purpose", captured["request"])
                     self.assertNotIn("retention", captured["request"])
 
+    def test_analyze_transcript_runs_existing_analysis_as_a_dependent_job(self):
+        transcript = transcript_reference()
+        metadata = youtube_metadata()
+        transcription_job = {
+            "job_id": "transcription-job-1",
+            "state": "succeeded",
+            "result": transcript,
+            "spec": {"source": {"media_asset_id": metadata["source_id"]}},
+        }
+        captured = {}
+
+        def submit(_control, *, request, spec):
+            resolved_spec = {
+                **spec,
+                "registry_snapshot": registry_snapshot(educational_analysis=True),
+            }
+            job = {
+                "job_id": "analysis-job-1",
+                "run_id": "analysis-run-1",
+                "revision": 2,
+                "state": "awaiting_approval",
+                "spec_sha256": "a" * 64,
+                "spec": resolved_spec,
+            }
+            captured.update(request=request, spec=resolved_spec, job=job)
+            return {"job": job, "run": {"run_id": job["run_id"]}}
+
+        control = Mock()
+
+        def control_post(path, payload):
+            if path == "/submissions/get":
+                self.assertEqual(payload["job_id"], transcription_job["job_id"])
+                return {"job": transcription_job, "run": {"run_id": "source-run"}}
+            if path == "/submissions/approve":
+                return {"job": {**captured["job"], "revision": 3, "state": "ready"}}
+            raise AssertionError(path)
+
+        def dispatch(_control, ready):
+            return {
+                **ready,
+                "revision": 4,
+                "state": "dispatch_pending",
+                "dispatch": {"generation": 1, "requested_at": 2_000},
+            }
+
+        result_reference = {
+            **transcript,
+            "digest": "e" * 64,
+            "byte_length": 9_876,
+            "artifact_kind": "analysis",
+            "schema": queued_authoring.VIDEO_ANALYSIS_SCHEMA,
+            "key": "objects/sha256/ee/" + "e" * 62,
+        }
+
+        def wait(_control, job_id, timeout_seconds):
+            self.assertEqual(job_id, "analysis-job-1")
+            self.assertEqual(timeout_seconds, 3600)
+            return {
+                "job": {
+                    **captured["job"],
+                    "state": "succeeded",
+                    "result": result_reference,
+                    "created_at": 1_000,
+                    "updated_at": 5_500,
+                    "dispatch": {"generation": 1, "requested_at": 2_000},
+                    "attempts": [{
+                        "state": "succeeded",
+                        "started_at": 2_500,
+                        "updated_at": 5_250,
+                    }],
+                },
+                "run": {"run_id": "analysis-run-1", "state": "complete"},
+            }
+
+        analysis = {
+            "schema_version": 2,
+            "video": "WPtpUu3uIUI.youtube",
+            "title": "Three hotel-management techniques",
+            "summary": "Three practical techniques are demonstrated.",
+            "topics": ["Hospitality"],
+            "sections": [{"title": "Introduction"}],
+            "featured_techniques": [{"technique": "Welcome guests"}],
+            "analysis_model": queued_authoring.EDUCATIONAL_VIDEO_ANALYSIS_MODEL,
+            "provenance": {
+                "handler_id": queued_authoring.EDUCATIONAL_VIDEO_ANALYSIS_HANDLER[0],
+                "transcript": transcript,
+                "timing": {
+                    "input_fetch_ms": 100,
+                    "analysis_ms": 2_000,
+                    "handler_ms": 2_200,
+                },
+            },
+        }
+        args = build_parser().parse_args([
+            "queue",
+            "analyze-transcript",
+            "--operator-token-source",
+            "keychain",
+            "--r2-credentials-source",
+            "keychain",
+            transcription_job["job_id"],
+        ])
+        control.post.side_effect = control_post
+        output = io.StringIO()
+        with patch("queued_authoring.operator_client", return_value=control):
+            with patch("queued_authoring.youtube_source_metadata", return_value=metadata):
+                with patch("queued_authoring.submit_spec", side_effect=submit):
+                    with patch("queued_authoring.dispatch_submission", side_effect=dispatch):
+                        with patch("queued_authoring.wait_for_terminal_job", side_effect=wait):
+                            with patch(
+                                "queued_authoring.verified_json_result",
+                                return_value=analysis,
+                            ):
+                                with redirect_stdout(output):
+                                    self.assertEqual(
+                                        queued_authoring.run_queue_command(args),
+                                        0,
+                                    )
+        self.assertEqual(captured["spec"]["inputs"], [])
+        self.assertEqual(captured["spec"]["dependencies"], [transcript])
+        self.assertEqual(
+            captured["spec"]["configuration"]["source_metadata"],
+            metadata,
+        )
+        self.assertEqual(
+            captured["spec"]["handler"]["id"],
+            queued_authoring.EDUCATIONAL_VIDEO_ANALYSIS_HANDLER[0],
+        )
+        self.assertEqual(
+            captured["request"]["transcription_job_id"],
+            transcription_job["job_id"],
+        )
+        self.assertIn("authoring-openai-worker.yml", output.getvalue())
+        self.assertIn('"analysis_ms": 2000', output.getvalue())
+        self.assertIn("Full analysis:", output.getvalue())
+        self.assertNotIn('"sections": [', output.getvalue())
+
     def test_waiting_for_a_remote_job_reports_periodic_progress(self):
         client = Mock()
         client.post.side_effect = [
@@ -1164,6 +1439,31 @@ class QueuedAuthoringTests(unittest.TestCase):
         with patch.dict(os.environ, environment, clear=True):
             staged_profile = queued_authoring.validate_registry_snapshot(staged_job)
         self.assertEqual(staged_profile["id"], "macos-mlx")
+
+        transcript = transcript_reference()
+        analysis_job = {
+            "job_id": "job-educational-analysis",
+            "spec": {
+                **queued_authoring.educational_video_analysis_spec(
+                    source={"media_asset_id": "youtube:WPtpUu3uIUI"},
+                    transcript=transcript,
+                    source_metadata=youtube_metadata(),
+                    video="WPtpUu3uIUI.youtube",
+                ),
+                "registry_snapshot": registry_snapshot(educational_analysis=True),
+            },
+        }
+        analysis_environment = {
+            "WATCHCRAFT_EXECUTION_PROFILE_ID": "python-openai",
+            "WATCHCRAFT_EXECUTION_PROFILE_VERSION": "1",
+        }
+        with patch.dict(os.environ, analysis_environment, clear=True):
+            analysis_profile = queued_authoring.validate_registry_snapshot(analysis_job)
+        self.assertEqual(analysis_profile["id"], "python-openai")
+        self.assertEqual(
+            analysis_profile["dispatcher"]["workflow"],
+            "authoring-openai-worker.yml",
+        )
 
     def test_result_displays_verified_json_from_the_authoritative_reference(self):
         payload = queued_authoring.canonical_json({

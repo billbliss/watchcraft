@@ -326,6 +326,23 @@ An R2 lifecycle rule for the `staging/` prefix remains the backstop for interrup
 clients and abandoned jobs; an expired input fails closed rather than being silently
 reacquired.
 
+The initial queued analysis handler is an execution-path migration of the established
+file-backed educational-video analyzer, not a new analysis design. An analysis job
+declares one immutable `watchcraft.transcript@1` dependency and produces the existing
+video-analysis schema version 2. Its versioned handler fixes the same system prompt,
+structured-output model, model identity, retry policy, transcript bound, deterministic
+normalization, publication-date override, and publisher-chapter alignment used by the
+local path. Source metadata is material configuration covered by approval. The output
+adds queue provenance linking the transcript digest, handler and specification, plus
+input-fetch, model-analysis, and total-handler timing.
+
+Analysis is routed through a separate `python-openai` execution profile. That profile
+classifies the transcript as private derived data and declares the OpenAI Responses API
+credential capability explicitly; the general portable worker and lexical smoke do not
+implicitly acquire that capability. Collection-wide topic normalization, category or
+grouping decisions, compilation, and publication are not part of the per-video analysis
+handler.
+
 This handoff does not assume a browser extension. A future extension, self-hosted
 runner, licensed provider integration, or direct file importer may produce the same
 typed input without changing transcription. Non-operator clients must receive a

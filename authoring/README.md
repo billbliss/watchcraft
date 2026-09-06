@@ -230,7 +230,7 @@ alternate JSON path may be supplied as their positional argument. Before activat
 the CLI uses the registry-admin credential to read the current activation-pointer
 revision and supplies it to the compare-and-set mutation. This preserves stale-write
 protection without requiring the operator to copy a revision manually. The immutable
-registry document version (for example `2026-09-05.4`) and the activation-pointer
+registry document version (for example `2026-09-05.5`) and the activation-pointer
 revision (for example `2`) are separate values. Advanced scripts may explicitly pass
 `--expected-active-revision`; the older `--expected-revision` spelling remains an
 alias. Publishing the same version with different content is rejected.
@@ -368,6 +368,37 @@ transcript provenance records worker input-fetch, model-transcription, and total
 milliseconds. The audio duration, byte length, handler/model identity, and these phase
 measurements are machine-readable inputs for future runtime estimates. Use the printed
 `queue result` command when the full transcript is needed.
+
+Analyze one successful queued transcript with the existing production video analyzer:
+
+```bash
+./authoring/watchcraft-author queue analyze-transcript \
+  --operator-token-source keychain \
+  --r2-credentials-source keychain \
+  TRANSCRIPTION_JOB_ID
+```
+
+The command verifies that the referenced job completed with an authoritative
+`watchcraft.transcript@1` artifact, resolves the same YouTube source metadata used by
+the file-backed authoring path, and submits that transcript as an immutable dependency.
+The registered `watchcraft.analysis.educational-video@1` handler calls the existing
+analysis implementation: prompt version 3, `gpt-5-nano`, Pydantic structured output,
+normalization, authoritative YouTube publication-date replacement, and publisher
+chapter alignment. Its output remains the current video-analysis schema version 2,
+with additive queue provenance and phase timing. The terminal prints only counts and a
+summary preview; the printed `queue result` command retrieves the complete analysis.
+
+This handler runs in the dedicated `python-openai@1` execution profile because it reads
+a private derived transcript and calls the OpenAI Responses API. Add `OPENAI_API_KEY`
+as a secret on the GitHub `authoring-production` environment before dispatching it.
+The key is an execution secret and must not appear in the registry, job specification,
+workflow inputs, transcript, analysis, or logs. Registry version `2026-09-05.5` adds
+the handler and profile; publish and activate that immutable registry after pushing the
+worker code. No Convex function deployment is required for this registry-only change.
+
+This command analyzes one video; it does not normalize collection-wide topics, choose
+a category, create a grouping, or publish a collection. Those remain later pipeline
+phases.
 
 `queue result` resolves the artifact reference from the authoritative completed job,
 downloads the object from private R2, and verifies its declared byte length and SHA-256

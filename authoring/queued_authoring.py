@@ -48,6 +48,10 @@ DEFAULT_REGISTRY_PATH = (
     / "packages" / "authoring-pipeline" / "registry" / "default-registry.json"
 )
 ANALYSIS_HANDLER = ("watchcraft.analysis.lexical", "1")
+EDUCATIONAL_VIDEO_ANALYSIS_HANDLER = (
+    "watchcraft.analysis.educational-video",
+    "1",
+)
 TRANSCRIPTION_SMOKE_HANDLER = ("watchcraft.transcript.mlx-whisper-smoke", "1")
 HTTP_TRANSCRIPTION_SMOKE_HANDLER = (
     "watchcraft.transcript.mlx-whisper-http-smoke",
@@ -63,10 +67,18 @@ PRODUCTION_TRANSCRIPTION_HANDLER = (
 )
 PYTHON_EXECUTION_PROFILE = ("python-portable", "1")
 PYTHON_EXECUTION_WORKFLOW = "authoring-worker.yml"
+OPENAI_EXECUTION_PROFILE = ("python-openai", "1")
+OPENAI_EXECUTION_WORKFLOW = "authoring-openai-worker.yml"
 MLX_EXECUTION_PROFILE = ("macos-mlx", "1")
 MLX_EXECUTION_WORKFLOW = "authoring-mlx-worker.yml"
 TRANSCRIPTION_SMOKE_MODEL = "mlx-community/whisper-tiny-mlx"
 PRODUCTION_TRANSCRIPTION_MODEL = "mlx-community/whisper-large-v3-turbo-q4"
+EDUCATIONAL_VIDEO_ANALYSIS_MODEL = "gpt-5-nano"
+EDUCATIONAL_VIDEO_ANALYSIS_PROMPT_VERSION = 3
+EDUCATIONAL_VIDEO_ANALYSIS_MAX_TRANSCRIPT_CHARS = 1_500_000
+EDUCATIONAL_VIDEO_ANALYSIS_RETRIES = 5
+EDUCATIONAL_VIDEO_ANALYSIS_TIMEOUT_SECONDS = 300
+VIDEO_ANALYSIS_SCHEMA = {"id": "watchcraft.video-analysis", "version": 2}
 TRANSCRIPTION_SMOKE_TEXT = (
     "Watchcraft verifies real audio transcription on an Apple silicon worker."
 )
@@ -633,6 +645,140 @@ def format_elapsed(milliseconds: int) -> str:
     return f"{minutes}m {seconds:02d}s" if minutes else f"{seconds}s"
 
 
+class AnalysisDependencyError(RuntimeError):
+    """An authoritative transcript dependency cannot be analyzed."""
+
+    classification = "analysis_dependency_invalid"
+    retryable = False
+
+
+class AnalysisProviderError(RuntimeError):
+    """The registered analysis provider did not produce a result."""
+
+    classification = "analysis_provider_failed"
+    retryable = True
+
+
+def educational_video_analysis(job: dict[str, Any]) -> dict[str, Any]:
+    handler_started_at = time.monotonic()
+    spec = job["spec"]
+    configuration = spec.get("configuration")
+    expected_keys = {
+        "max_transcript_chars",
+        "model",
+        "prompt_version",
+        "retries",
+        "source_metadata",
+        "timeout_seconds",
+        "video",
+    }
+    if not isinstance(configuration, dict) or set(configuration) != expected_keys:
+        raise ValueError("the educational-video analysis configuration is invalid")
+    if (
+        configuration["model"] != EDUCATIONAL_VIDEO_ANALYSIS_MODEL
+        or configuration["prompt_version"] != EDUCATIONAL_VIDEO_ANALYSIS_PROMPT_VERSION
+        or configuration["max_transcript_chars"]
+        != EDUCATIONAL_VIDEO_ANALYSIS_MAX_TRANSCRIPT_CHARS
+        or configuration["retries"] != EDUCATIONAL_VIDEO_ANALYSIS_RETRIES
+        or configuration["timeout_seconds"]
+        != EDUCATIONAL_VIDEO_ANALYSIS_TIMEOUT_SECONDS
+    ):
+        raise ValueError("the educational-video analysis policy is unsupported")
+    source_metadata = configuration["source_metadata"]
+    video = configuration["video"]
+    source_id = spec.get("source", {}).get("media_asset_id")
+    if (
+        not isinstance(source_metadata, dict)
+        or source_metadata.get("source_id") != source_id
+        or not isinstance(source_metadata.get("type"), str)
+        or not isinstance(video, str)
+        or not video
+        or Path(video).is_absolute()
+        or ".." in Path(video).parts
+    ):
+        raise ValueError("the educational-video source metadata is invalid")
+    if spec.get("inputs") != [] or len(spec.get("dependencies", [])) != 1:
+        raise AnalysisDependencyError(
+            "Educational-video analysis requires exactly one transcript dependency"
+        )
+    reference = validated_artifact_reference(spec["dependencies"][0])
+    if (
+        reference.get("artifact_kind") != "transcript"
+        or reference.get("schema")
+        != {"id": "watchcraft.transcript", "version": 1}
+        or reference.get("media_type") != "application/json"
+    ):
+        raise AnalysisDependencyError(
+            "Educational-video analysis requires a transcript@1 JSON dependency"
+        )
+
+    input_fetch_started_at = time.monotonic()
+    try:
+        payload = R2ArtifactStore.from_environment().get_bytes(reference)
+        transcript_state = json.loads(payload.decode("utf-8"))
+    except Exception as error:
+        failure = AnalysisDependencyError(
+            "Could not retrieve and decode the transcript dependency"
+        )
+        failure.classification = "analysis_dependency_unavailable"
+        failure.retryable = True
+        raise failure from error
+    input_fetch_ms = elapsed_milliseconds(input_fetch_started_at)
+    transcript_source = (
+        transcript_state.get("source") if isinstance(transcript_state, dict) else None
+    )
+    if (
+        not isinstance(transcript_state, dict)
+        or transcript_state.get("kind") != "watchcraft.transcript"
+        or transcript_state.get("schema_version") != 1
+        or not isinstance(transcript_source, dict)
+        or transcript_source.get("media_asset_id") != source_id
+        or not transcript_state.get("text")
+        or not transcript_state.get("segments")
+    ):
+        raise AnalysisDependencyError(
+            "The transcript dependency does not match the analysis source"
+        )
+
+    try:
+        from analyze_catalog import (
+            create_openai_client,
+            generate_analysis,
+            source_metadata_context,
+        )
+
+        analysis_started_at = time.monotonic()
+        result = generate_analysis(
+            transcript_state,
+            relative_video=video,
+            source_metadata=source_metadata,
+            context=source_metadata_context(source_metadata),
+            client=create_openai_client(configuration["timeout_seconds"]),
+            model=configuration["model"],
+            retries=configuration["retries"],
+            max_transcript_chars=configuration["max_transcript_chars"],
+        )
+        analysis_ms = elapsed_milliseconds(analysis_started_at)
+    except (AnalysisDependencyError, ValueError):
+        raise
+    except Exception as error:
+        raise AnalysisProviderError(str(error)) from error
+
+    result["provenance"] = {
+        "handler_id": EDUCATIONAL_VIDEO_ANALYSIS_HANDLER[0],
+        "handler_version": EDUCATIONAL_VIDEO_ANALYSIS_HANDLER[1],
+        "job_id": job["job_id"],
+        "spec_sha256": job["spec_sha256"],
+        "transcript": reference,
+        "timing": {
+            "input_fetch_ms": input_fetch_ms,
+            "analysis_ms": analysis_ms,
+            "handler_ms": elapsed_milliseconds(handler_started_at),
+        },
+    }
+    return result
+
+
 def mlx_staged_transcription(job: dict[str, Any]) -> dict[str, Any]:
     handler_started_at = time.monotonic()
     spec = job["spec"]
@@ -756,6 +902,7 @@ def mlx_staged_transcription(job: dict[str, Any]) -> dict[str, Any]:
 
 HANDLERS: dict[tuple[str, str], Callable[[dict[str, Any]], dict[str, Any]]] = {
     ANALYSIS_HANDLER: lexical_analysis,
+    EDUCATIONAL_VIDEO_ANALYSIS_HANDLER: educational_video_analysis,
     TRANSCRIPTION_SMOKE_HANDLER: mlx_transcription_smoke,
     HTTP_TRANSCRIPTION_SMOKE_HANDLER: mlx_http_transcription_smoke,
     STAGED_TRANSCRIPTION_SMOKE_HANDLER: mlx_staged_transcription,
@@ -780,6 +927,36 @@ LOCAL_HANDLER_CONTRACTS: dict[tuple[str, str], dict[str, Any]] = {
         "retry_policy": {
             "max_attempts": 3,
             "retryable_classifications": ["artifact_store_failed", "lease_expired"],
+        },
+    },
+    EDUCATIONAL_VIDEO_ANALYSIS_HANDLER: {
+        "id": EDUCATIONAL_VIDEO_ANALYSIS_HANDLER[0],
+        "version": EDUCATIONAL_VIDEO_ANALYSIS_HANDLER[1],
+        "operation": "generate",
+        "inputs": [],
+        "dependencies": [
+            {
+                "artifact_kind": "transcript",
+                "schema": {"id": "watchcraft.transcript", "version": 1},
+            },
+        ],
+        "output": {
+            "artifact_kind": "analysis",
+            "schema": VIDEO_ANALYSIS_SCHEMA,
+        },
+        "execution_profile": {
+            "id": OPENAI_EXECUTION_PROFILE[0],
+            "version": OPENAI_EXECUTION_PROFILE[1],
+        },
+        "lease_class": "model-api",
+        "retry_policy": {
+            "max_attempts": 2,
+            "retryable_classifications": [
+                "analysis_dependency_unavailable",
+                "analysis_provider_failed",
+                "artifact_store_failed",
+                "lease_expired",
+            ],
         },
     },
     TRANSCRIPTION_SMOKE_HANDLER: {
@@ -898,6 +1075,26 @@ LOCAL_EXECUTION_PROFILES = {
         "heartbeat_interval_ms": 60_000,
         "data_access": "public",
         "secret_capabilities": ["convex.worker", "r2.read-write"],
+    },
+    OPENAI_EXECUTION_PROFILE: {
+        "id": OPENAI_EXECUTION_PROFILE[0],
+        "version": OPENAI_EXECUTION_PROFILE[1],
+        "dispatcher": {
+            "kind": "github-actions",
+            "workflow": OPENAI_EXECUTION_WORKFLOW,
+        },
+        "platform": {"os": "linux", "architecture": "x64"},
+        "dependency_class": "python-openai-authoring-worker",
+        "cache_class": "pip",
+        "timeout_minutes": 60,
+        "lease_duration_ms": 3_600_000,
+        "heartbeat_interval_ms": 60_000,
+        "data_access": "private-derived",
+        "secret_capabilities": [
+            "convex.worker",
+            "openai.responses",
+            "r2.read-write",
+        ],
     },
     MLX_EXECUTION_PROFILE: {
         "id": MLX_EXECUTION_PROFILE[0],
@@ -1365,6 +1562,55 @@ def analysis_spec(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def educational_video_analysis_spec(
+    *,
+    source: dict[str, Any],
+    transcript: dict[str, Any],
+    source_metadata: dict[str, Any],
+    video: str,
+) -> dict[str, Any]:
+    reference = validated_artifact_reference(transcript)
+    if (
+        reference.get("artifact_kind") != "transcript"
+        or reference.get("schema")
+        != {"id": "watchcraft.transcript", "version": 1}
+        or reference.get("media_type") != "application/json"
+    ):
+        raise ValueError("Analysis requires an authoritative transcript@1 JSON artifact")
+    if (
+        not isinstance(source_metadata, dict)
+        or source_metadata.get("source_id") != source.get("media_asset_id")
+    ):
+        raise ValueError("Analysis source metadata does not match the transcript source")
+    return {
+        "operation": "generate",
+        "artifact_kind": "analysis",
+        "output_schema": VIDEO_ANALYSIS_SCHEMA,
+        "handler": {
+            "id": EDUCATIONAL_VIDEO_ANALYSIS_HANDLER[0],
+            "version": EDUCATIONAL_VIDEO_ANALYSIS_HANDLER[1],
+        },
+        "source": source,
+        "inputs": [],
+        "dependencies": [reference],
+        "configuration": {
+            "model": EDUCATIONAL_VIDEO_ANALYSIS_MODEL,
+            "prompt_version": EDUCATIONAL_VIDEO_ANALYSIS_PROMPT_VERSION,
+            "retries": EDUCATIONAL_VIDEO_ANALYSIS_RETRIES,
+            "timeout_seconds": EDUCATIONAL_VIDEO_ANALYSIS_TIMEOUT_SECONDS,
+            "max_transcript_chars": EDUCATIONAL_VIDEO_ANALYSIS_MAX_TRANSCRIPT_CHARS,
+            "source_metadata": source_metadata,
+            "video": video,
+        },
+    }
+
+
+def youtube_source_metadata(video_id: str) -> dict[str, Any]:
+    from watchcraft_author import youtube_metadata
+
+    return youtube_metadata(video_id)
+
+
 def transcription_smoke_spec(fixture_text: str = TRANSCRIPTION_SMOKE_TEXT) -> dict[str, Any]:
     return {
         "operation": "generate",
@@ -1542,6 +1788,50 @@ def compact_transcription_result(
             "characters": len(text) if isinstance(text, str) else 0,
             "segments": len(segments) if isinstance(segments, list) else 0,
             "preview": preview,
+        },
+        "timing": {
+            "local": local_timing,
+            "ledger": completed_job_timing(completed["job"]),
+            "worker": worker_timing if isinstance(worker_timing, dict) else {},
+        },
+    }
+
+
+def compact_analysis_result(
+    completed: dict[str, Any],
+    result: dict[str, Any],
+    *,
+    local_timing: dict[str, int],
+) -> dict[str, Any]:
+    summary = result.get("summary")
+    normalized_summary = (
+        " ".join(summary.split()) if isinstance(summary, str) else ""
+    )
+    preview = normalized_summary[:240]
+    if len(normalized_summary) > len(preview):
+        preview += "…"
+    provenance = result.get("provenance")
+    worker_timing = (
+        provenance.get("timing") if isinstance(provenance, dict) else None
+    )
+    topics = result.get("topics")
+    sections = result.get("sections")
+    techniques = result.get("featured_techniques")
+    return {
+        "job_id": completed["job"]["job_id"],
+        "run_id": completed["run"]["run_id"],
+        "state": completed["job"]["state"],
+        "artifact": completed["job"]["result"],
+        "analysis": {
+            "video": result.get("video"),
+            "title": result.get("title"),
+            "model": result.get("analysis_model"),
+            "topics": len(topics) if isinstance(topics, list) else 0,
+            "sections": len(sections) if isinstance(sections, list) else 0,
+            "featured_techniques": (
+                len(techniques) if isinstance(techniques, list) else 0
+            ),
+            "summary_preview": preview,
         },
         "timing": {
             "local": local_timing,
@@ -1810,6 +2100,140 @@ def run_smoke_command(args: argparse.Namespace, kind: str) -> int:
         "artifact": completed["job"]["result"],
         "result": result,
     }, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def run_queued_video_analysis(args: argparse.Namespace) -> int:
+    command_started_at = time.monotonic()
+    control = operator_client(args.operator_token_source)
+    transcription = control.post(
+        "/submissions/get",
+        {"job_id": args.transcription_job_id},
+    )
+    transcription_job = transcription.get("job")
+    if (
+        not isinstance(transcription_job, dict)
+        or transcription_job.get("state") != "succeeded"
+        or transcription_job.get("result") is None
+    ):
+        state = (
+            transcription_job.get("state")
+            if isinstance(transcription_job, dict)
+            else "unknown"
+        )
+        raise RuntimeError(
+            f"Transcription job {args.transcription_job_id} is {state}; "
+            "analysis requires a successful authoritative transcript"
+        )
+    transcript_reference = validated_artifact_reference(transcription_job["result"])
+    source = transcription_job.get("spec", {}).get("source")
+    source_id = source.get("media_asset_id") if isinstance(source, dict) else None
+    match = (
+        re.fullmatch(r"youtube:([A-Za-z0-9_-]{11})", source_id)
+        if isinstance(source_id, str)
+        else None
+    )
+    if match is None:
+        raise RuntimeError(
+            "The initial queued analysis command supports YouTube transcript sources"
+        )
+    video_id = match.group(1)
+    metadata_started_at = time.monotonic()
+    source_metadata = youtube_source_metadata(video_id)
+    metadata_fetch_ms = elapsed_milliseconds(metadata_started_at)
+    if source_metadata.get("source_id") != source_id:
+        raise RuntimeError("Resolved source metadata does not match the transcript job")
+    print(
+        f"analyzing transcript {args.transcription_job_id}: "
+        f"{source_metadata.get('title') or video_id}",
+        flush=True,
+    )
+    spec = educational_video_analysis_spec(
+        source=source,
+        transcript=transcript_reference,
+        source_metadata=source_metadata,
+        video=f"{video_id}.youtube",
+    )
+    submitted = submit_spec(
+        control,
+        request={
+            "kind": "educational-video-analysis",
+            "source_id": source_id,
+            "transcription_job_id": args.transcription_job_id,
+            "model": EDUCATIONAL_VIDEO_ANALYSIS_MODEL,
+        },
+        spec=spec,
+    )
+    job = submitted["job"]
+    print(f"submitted {job['job_id']} ({job['spec']['handler']['id']})", flush=True)
+    approved = control.post("/submissions/approve", {
+        "job_id": job["job_id"],
+        "command_id": str(uuid.uuid4()),
+        "expected_revision": job["revision"],
+        "actor": "watchcraft-author-cli",
+        "spec_sha256": job["spec_sha256"],
+    })
+    pending = dispatch_submission(control, approved["job"])
+    print(
+        f"dispatched {pending['job_id']} via {dispatch_workflow(pending)} "
+        f"generation {pending['dispatch']['generation']}",
+        flush=True,
+    )
+    terminal_wait_started_at = time.monotonic()
+    completed = wait_for_terminal_job(
+        control,
+        job["job_id"],
+        args.timeout_seconds,
+    )
+    terminal_wait_ms = elapsed_milliseconds(terminal_wait_started_at)
+    result_download_started_at = time.monotonic()
+    result = verified_json_result(
+        completed["job"],
+        args.r2_credentials_source,
+    )
+    result_download_ms = elapsed_milliseconds(result_download_started_at)
+    provenance = result.get("provenance")
+    transcript_provenance = (
+        provenance.get("transcript") if isinstance(provenance, dict) else None
+    )
+    if (
+        result.get("schema_version") != VIDEO_ANALYSIS_SCHEMA["version"]
+        or result.get("video") != f"{video_id}.youtube"
+        or not result.get("title")
+        or not result.get("summary")
+        or not result.get("topics")
+        or not result.get("sections")
+        or not isinstance(provenance, dict)
+        or provenance.get("handler_id") != EDUCATIONAL_VIDEO_ANALYSIS_HANDLER[0]
+        or not isinstance(transcript_provenance, dict)
+        or transcript_provenance.get("digest") != transcript_reference["digest"]
+    ):
+        raise RuntimeError("Queued educational-video analysis returned an invalid result")
+    summary = compact_analysis_result(
+        completed,
+        result,
+        local_timing={
+            "source_metadata_fetch_ms": metadata_fetch_ms,
+            "terminal_wait_ms": terminal_wait_ms,
+            "result_download_ms": result_download_ms,
+            "command_total_ms": elapsed_milliseconds(command_started_at),
+        },
+    )
+    worker_analysis_ms = summary["timing"]["worker"].get("analysis_ms")
+    completion_line = (
+        f"completed {completed['job']['job_id']} in "
+        f"{format_elapsed(summary['timing']['local']['command_total_ms'])}"
+    )
+    if isinstance(worker_analysis_ms, int):
+        completion_line += f" (worker analysis {format_elapsed(worker_analysis_ms)})"
+    print(completion_line, flush=True)
+    print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
+    print(
+        "Full analysis: ./authoring/watchcraft-author queue result "
+        "--operator-token-source keychain --r2-credentials-source keychain "
+        f"{completed['job']['job_id']}",
+        flush=True,
+    )
     return 0
 
 
@@ -2116,6 +2540,27 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         default="auto",
         help="Temporary source-media uploader credential source (default: auto)",
     )
+    queued_analysis = commands.add_parser(
+        "analyze-transcript",
+        parents=[credentials],
+        help="Analyze one successful queued transcript with the production analyzer",
+        description=(
+            "Resolve source metadata for a successful YouTube transcription job, "
+            "then approve, dispatch, wait for, retrieve, and verify the existing "
+            f"educational-video analysis logic using {EDUCATIONAL_VIDEO_ANALYSIS_MODEL}."
+        ),
+    )
+    queued_analysis.add_argument(
+        "transcription_job_id",
+        help="Job ID of a successful authoritative transcript",
+    )
+    queued_analysis.add_argument("--timeout-seconds", type=int, default=3600)
+    queued_analysis.add_argument(
+        "--r2-credentials-source",
+        choices=("auto", "keychain", "environment"),
+        default="auto",
+        help="Read-only result credential source (default: auto)",
+    )
     for name, help_text, timeout in (
         ("smoke-analysis", "Run the complete lexical-analysis queue smoke", 600),
         ("smoke-transcription", "Run the complete macOS/MLX transcription smoke", 1800),
@@ -2348,6 +2793,8 @@ def run_queue_command(args: argparse.Namespace) -> int:
         return run_local_youtube_transcription(args, smoke=True)
     if args.queue_command == "transcribe-youtube":
         return run_local_youtube_transcription(args, smoke=False)
+    if args.queue_command == "analyze-transcript":
+        return run_queued_video_analysis(args)
 
     control = operator_client(args.operator_token_source)
     if args.queue_command == "registry-status":
