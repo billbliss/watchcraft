@@ -1,6 +1,12 @@
-import type { JsonValue } from "./contracts.ts";
+import {
+  parseArtifactReference,
+  sha256Hex,
+  type ArtifactReference,
+  type JsonValue,
+} from "./contracts.ts";
 import {
   parseCatalogProject,
+  validateProjectIteratorCandidate,
   validateProjectIteratorSnapshot,
   type CatalogProject,
   type CollectionIteratorSnapshot,
@@ -510,4 +516,61 @@ export function validateCatalogProjectSnapshot(
   );
   resolved.collection_type.validate_snapshot(snapshot);
   return { project, snapshot };
+}
+
+export function validateCatalogProjectCandidate(
+  projectValue: unknown,
+  snapshotValue: unknown,
+  referenceValue: unknown,
+  snapshotBytes: Uint8Array,
+  registry: CatalogCapabilityRegistry = DEFAULT_CATALOG_CAPABILITY_REGISTRY,
+): {
+  project: CatalogProject;
+  snapshot: CollectionIteratorSnapshot;
+  reference: ArtifactReference;
+} {
+  const resolved = validateCatalogProjectCapabilities(projectValue, registry);
+  const { project, snapshot } = validateProjectIteratorCandidate(
+    resolved.project,
+    snapshotValue,
+  );
+  resolved.collection_type.validate_snapshot(snapshot);
+  const reference = parseArtifactReference(referenceValue);
+  if (
+    reference.artifact_kind !== "collection-iterator-snapshot" ||
+    reference.schema.id !== "watchcraft.collection-iterator-snapshot" ||
+    reference.schema.version !== 1 ||
+    reference.media_type !== "application/json"
+  ) {
+    throw new TypeError("Iterator candidate has the wrong artifact contract.");
+  }
+  if (
+    reference.byte_length !== snapshotBytes.byteLength ||
+    reference.digest !== sha256Hex(snapshotBytes)
+  ) {
+    throw new TypeError(
+      "Iterator candidate reference does not match its exact bytes.",
+    );
+  }
+  return { project, snapshot, reference };
+}
+
+export function acceptCatalogProjectCandidate(
+  projectValue: unknown,
+  snapshotValue: unknown,
+  referenceValue: unknown,
+  snapshotBytes: Uint8Array,
+  registry: CatalogCapabilityRegistry = DEFAULT_CATALOG_CAPABILITY_REGISTRY,
+): CatalogProject {
+  const { project, reference } = validateCatalogProjectCandidate(
+    projectValue,
+    snapshotValue,
+    referenceValue,
+    snapshotBytes,
+    registry,
+  );
+  const accepted = structuredClone(project);
+  accepted.revision += 1;
+  accepted.iterator.accepted_snapshot = reference;
+  return parseCatalogProject(accepted);
 }

@@ -3,9 +3,12 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
+  acceptCatalogProjectCandidate,
+  artifactKey,
   DEFAULT_CATALOG_CAPABILITY_REGISTRY,
   parseCatalogProject,
   parseCollectionIteratorSnapshot,
+  sha256Hex,
   validateCatalogCapabilityRegistry,
   validateCatalogProjectCapabilities,
   validateCatalogProjectSnapshot,
@@ -151,5 +154,45 @@ test("accepted snapshot identity and exact bytes are bound to the project revisi
   assert.throws(
     () => validateCatalogProjectSnapshot(project, snapshot, changedBytes),
     /does not match its bytes/,
+  );
+});
+
+test("accepting a candidate advances the project without mutating the source revision", async () => {
+  const { project, snapshot } = await example("current-playlist");
+  const candidate = structuredClone(snapshot) as any;
+  candidate.observed_at = "2026-09-08T09:48:10Z";
+  candidate.provenance.discovery_mode = "bounded-crawl";
+  const bytes = new TextEncoder().encode(JSON.stringify(candidate));
+  const digest = sha256Hex(bytes);
+  const reference = {
+    store: "r2" as const,
+    algorithm: "sha256" as const,
+    digest,
+    byte_length: bytes.byteLength,
+    media_type: "application/json",
+    artifact_kind: "collection-iterator-snapshot",
+    schema: { id: "watchcraft.collection-iterator-snapshot", version: 1 },
+    key: artifactKey(digest),
+  };
+
+  const accepted = acceptCatalogProjectCandidate(
+    project,
+    candidate,
+    reference,
+    bytes,
+  );
+  assert.equal((project as any).revision, 1);
+  assert.equal(accepted.revision, 2);
+  assert.deepEqual(accepted.iterator.accepted_snapshot, reference);
+  assert.equal(
+    validateCatalogProjectSnapshot(accepted, candidate, bytes).project.revision,
+    2,
+  );
+
+  const wrongRevision = structuredClone(candidate);
+  wrongRevision.project.revision = 2;
+  assert.throws(
+    () => acceptCatalogProjectCandidate(project, wrongRevision, reference, bytes),
+    /different catalog project revision/,
   );
 });

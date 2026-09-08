@@ -79,6 +79,10 @@ http.route({ path: "/authoring/operator/submissions/request-dispatch", method: "
 http.route({ path: "/authoring/operator/submissions/cancel", method: "POST", handler: mutationRoute(internal.authoringInternal.cancelJob, operatorVerifier) });
 http.route({ path: "/authoring/operator/submissions/retry", method: "POST", handler: mutationRoute(internal.authoringInternal.retryJob, operatorVerifier) });
 http.route({ path: "/authoring/operator/registry/get-active", method: "POST", handler: queryRoute(internal.authoringRegistry.getActiveRegistry, operatorVerifier) });
+http.route({ path: "/authoring/operator/projects/get", method: "POST", handler: queryRoute(internal.authoringInternal.getCatalogProject, operatorVerifier) });
+http.route({ path: "/authoring/operator/projects/history", method: "POST", handler: queryRoute(internal.authoringInternal.getCatalogProjectHistory, operatorVerifier) });
+http.route({ path: "/authoring/operator/projects/import", method: "POST", handler: mutationRoute(internal.authoringInternal.importCatalogProject, operatorVerifier) });
+http.route({ path: "/authoring/operator/projects/accept-snapshot", method: "POST", handler: mutationRoute(internal.authoringInternal.acceptCatalogProjectSnapshot, operatorVerifier) });
 
 http.route({ path: "/authoring/admin/registry/get-active", method: "POST", handler: queryRoute(internal.authoringRegistry.getActiveRegistry, registryAdminVerifier) });
 http.route({ path: "/authoring/admin/registry/publish", method: "POST", handler: mutationRoute(internal.authoringRegistry.publishRegistry, registryAdminVerifier) });

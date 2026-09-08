@@ -389,7 +389,7 @@ export function validateProjectIteratorSnapshot(
   const snapshot = parseCollectionIteratorSnapshot(snapshotValue);
   if (
     snapshot.project.project_id !== project.project_id ||
-    snapshot.project.revision !== project.revision
+    snapshot.project.revision > project.revision
   ) {
     throw new TypeError(
       "Iterator snapshot belongs to a different catalog project revision.",
@@ -423,6 +423,36 @@ export function validateProjectIteratorSnapshot(
         "Accepted iterator snapshot reference does not match its bytes.",
       );
     }
+  }
+  return { project, snapshot };
+}
+
+export function validateProjectIteratorCandidate(
+  projectValue: unknown,
+  snapshotValue: unknown,
+): { project: CatalogProject; snapshot: CollectionIteratorSnapshot } {
+  const project = parseCatalogProject(projectValue);
+  const snapshot = parseCollectionIteratorSnapshot(snapshotValue);
+  if (
+    snapshot.project.project_id !== project.project_id ||
+    snapshot.project.revision !== project.revision
+  ) {
+    throw new TypeError(
+      "Iterator candidate belongs to a different catalog project revision.",
+    );
+  }
+  if (
+    snapshot.iterator.id !== project.iterator.id ||
+    snapshot.iterator.version !== project.iterator.version
+  ) {
+    throw new TypeError(
+      "Iterator candidate identity does not match the catalog project iterator.",
+    );
+  }
+  if (snapshot.provenance.access_profile !== project.iterator.access_profile) {
+    throw new TypeError(
+      "Iterator candidate access profile does not match the catalog project.",
+    );
   }
   return { project, snapshot };
 }

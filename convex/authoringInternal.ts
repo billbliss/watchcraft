@@ -30,6 +30,11 @@ import {
   syntheticTranscriptJobSpec,
 } from "../packages/authoring-pipeline/src/state-machine.ts";
 import { resolveJobSpecAgainstRegistry } from "../packages/authoring-pipeline/src/registry.ts";
+import {
+  acceptCatalogProjectCandidate,
+  validateCatalogProjectCapabilities,
+  validateCatalogProjectSnapshot,
+} from "../packages/authoring-pipeline/src/project-registry.ts";
 import { activeRegistry } from "./authoringRegistry.ts";
 
 type RunCommandWithoutRevision = RunCommand extends infer Command
@@ -64,6 +69,40 @@ async function readableRunDocument(ctx: QueryCtx, runId: string) {
     .query("authoring_runs")
     .withIndex("by_run_id", (query) => query.eq("run_id", runId))
     .unique();
+}
+
+async function catalogProjectDocument(
+  ctx: MutationCtx | QueryCtx,
+  projectId: string,
+) {
+  return ctx.db
+    .query("authoring_catalog_projects")
+    .withIndex("by_project_id", (query) => query.eq("project_id", projectId))
+    .unique();
+}
+
+async function catalogProjectCommand(
+  ctx: MutationCtx,
+  projectId: string,
+  commandId: string,
+) {
+  return ctx.db
+    .query("authoring_catalog_project_revisions")
+    .withIndex("by_project_command", (query) =>
+      query.eq("project_id", projectId).eq("command_id", commandId))
+    .unique();
+}
+
+function parsedJsonBytes(source: string, label: string): {
+  value: unknown;
+  bytes: Uint8Array;
+} {
+  const bytes = new TextEncoder().encode(source);
+  try {
+    return { value: JSON.parse(source), bytes };
+  } catch {
+    throw new TypeError(`${label} must be valid UTF-8 JSON.`);
+  }
 }
 
 async function commandEvent(ctx: MutationCtx, jobId: string, commandId: string) {
@@ -236,6 +275,216 @@ async function assertResolvedJobDependencies(
     }
   }
 }
+
+export const getCatalogProject = internalQuery({
+  args: { project_id: v.string() },
+  returns: v.any(),
+  handler: async (ctx, args) => {
+    const stored = await catalogProjectDocument(ctx, args.project_id);
+    if (!stored) throw new Error(`Unknown catalog project ${args.project_id}.`);
+    return {
+      project: validateCatalogProjectCapabilities(stored.aggregate).project,
+      updated_at: stored.updated_at,
+    };
+  },
+});
+
+export const getCatalogProjectHistory = internalQuery({
+  args: { project_id: v.string(), limit: v.number() },
+  returns: v.any(),
+  handler: async (ctx, args) => {
+    if (!Number.isSafeInteger(args.limit) || args.limit < 1 || args.limit > 100) {
+      throw new TypeError("Catalog project history limit must be between 1 and 100.");
+    }
+    const current = await catalogProjectDocument(ctx, args.project_id);
+    if (!current) throw new Error(`Unknown catalog project ${args.project_id}.`);
+    const records = await ctx.db
+      .query("authoring_catalog_project_revisions")
+      .withIndex("by_project_revision", (query) =>
+        query.eq("project_id", args.project_id))
+      .order("desc")
+      .take(args.limit);
+    return {
+      project_id: args.project_id,
+      current_revision: current.current_revision,
+      revisions: records.map((record) => ({
+        revision: record.revision,
+        transition: record.transition,
+        actor: record.actor,
+        command_id: record.command_id,
+        candidate_job_id: record.candidate_job_id ?? null,
+        recorded_at: record.recorded_at,
+        accepted_snapshot: record.aggregate.iterator?.accepted_snapshot ?? null,
+      })),
+    };
+  },
+});
+
+export const importCatalogProject = internalMutation({
+  args: {
+    command_id: v.string(),
+    actor: v.string(),
+    project: v.any(),
+    accepted_snapshot_json: v.optional(v.string()),
+  },
+  returns: v.any(),
+  handler: async (ctx, args) => {
+    const project = validateCatalogProjectCapabilities(args.project).project;
+    const replay = await catalogProjectCommand(
+      ctx,
+      project.project_id,
+      args.command_id,
+    );
+    if (replay) {
+      if (
+        replay.transition !== "import" ||
+        canonicalJson(replay.aggregate as JsonValue) !==
+          canonicalJson(project as unknown as JsonValue)
+      ) {
+        throw new Error(`Catalog project command ${args.command_id} was already used.`);
+      }
+      return replay.result;
+    }
+    const existing = await catalogProjectDocument(ctx, project.project_id);
+    if (existing) {
+      const current = validateCatalogProjectCapabilities(existing.aggregate).project;
+      if (canonicalJson(current as unknown as JsonValue) === canonicalJson(project as unknown as JsonValue)) {
+        return { created: false, project: current, updated_at: existing.updated_at };
+      }
+      throw new Error(
+        `Catalog project ${project.project_id} already exists at revision ${current.revision}.`,
+      );
+    }
+    if (project.iterator.accepted_snapshot) {
+      if (!args.accepted_snapshot_json) {
+        throw new Error("The imported project's accepted snapshot bytes are required.");
+      }
+      const snapshot = parsedJsonBytes(
+        args.accepted_snapshot_json,
+        "Accepted iterator snapshot",
+      );
+      validateCatalogProjectSnapshot(project, snapshot.value, snapshot.bytes);
+    } else if (args.accepted_snapshot_json !== undefined) {
+      throw new Error("An unbound iterator snapshot cannot be imported with this project.");
+    }
+    const now = Date.now();
+    const result = { created: true, project, updated_at: now };
+    await ctx.db.insert("authoring_catalog_projects", {
+      project_id: project.project_id,
+      current_revision: project.revision,
+      aggregate: project,
+      updated_at: now,
+    });
+    await ctx.db.insert("authoring_catalog_project_revisions", {
+      project_id: project.project_id,
+      revision: project.revision,
+      aggregate: project,
+      transition: "import",
+      actor: args.actor,
+      command_id: args.command_id,
+      recorded_at: now,
+      result,
+    });
+    return result;
+  },
+});
+
+export const acceptCatalogProjectSnapshot = internalMutation({
+  args: {
+    project_id: v.string(),
+    job_id: v.string(),
+    expected_revision: v.number(),
+    command_id: v.string(),
+    actor: v.string(),
+    snapshot_json: v.string(),
+  },
+  returns: v.any(),
+  handler: async (ctx, args) => {
+    const replay = await catalogProjectCommand(ctx, args.project_id, args.command_id);
+    if (replay) {
+      const replaySnapshot = parsedJsonBytes(
+        args.snapshot_json,
+        "Iterator candidate snapshot",
+      );
+      const replayReference = replay.result?.accepted_snapshot;
+      if (
+        replay.transition !== "accept-snapshot" ||
+        replay.candidate_job_id !== args.job_id ||
+        args.expected_revision !== replay.revision - 1 ||
+        !replayReference ||
+        replayReference.byte_length !== replaySnapshot.bytes.byteLength ||
+        replayReference.digest !== sha256Hex(replaySnapshot.bytes)
+      ) {
+        throw new Error(`Catalog project command ${args.command_id} was already used.`);
+      }
+      return replay.result;
+    }
+    const stored = await catalogProjectDocument(ctx, args.project_id);
+    if (!stored) throw new Error(`Unknown catalog project ${args.project_id}.`);
+    const project = validateCatalogProjectCapabilities(stored.aggregate).project;
+    if (project.revision !== args.expected_revision) {
+      throw new Error(
+        `Stale catalog project revision ${args.expected_revision}; current revision is ${project.revision}.`,
+      );
+    }
+    const storedJob = await jobDocument(ctx, args.job_id);
+    if (!storedJob) throw new Error(`Unknown authoring job ${args.job_id}.`);
+    const job = parseAuthoringJob(storedJob.aggregate);
+    if (job.state !== "succeeded" || !job.result) {
+      throw new Error(`Iterator job ${job.job_id} is ${job.state}; expected succeeded.`);
+    }
+    if (
+      job.spec.artifact_kind !== "collection-iterator-snapshot" ||
+      job.spec.output_schema.id !== "watchcraft.collection-iterator-snapshot" ||
+      job.spec.output_schema.version !== 1
+    ) {
+      throw new Error(`Job ${job.job_id} did not produce an iterator snapshot.`);
+    }
+    const jobProject = job.spec.configuration.project;
+    if (
+      canonicalJson(jobProject as JsonValue) !==
+      canonicalJson(project as unknown as JsonValue)
+    ) {
+      throw new Error(
+        `Iterator job ${job.job_id} was not run against current project revision ${project.revision}.`,
+      );
+    }
+    const snapshot = parsedJsonBytes(args.snapshot_json, "Iterator candidate snapshot");
+    const accepted = acceptCatalogProjectCandidate(
+      project,
+      snapshot.value,
+      job.result,
+      snapshot.bytes,
+    );
+    const now = Date.now();
+    const result = {
+      project: accepted,
+      previous_revision: project.revision,
+      accepted_snapshot: accepted.iterator.accepted_snapshot,
+      candidate_job_id: job.job_id,
+      accepted_at: now,
+      accepted_by: args.actor,
+    };
+    await ctx.db.replace(stored._id, {
+      project_id: project.project_id,
+      current_revision: accepted.revision,
+      aggregate: accepted,
+      updated_at: now,
+    });
+    await ctx.db.insert("authoring_catalog_project_revisions", {
+      project_id: project.project_id,
+      revision: accepted.revision,
+      aggregate: accepted,
+      transition: "accept-snapshot",
+      actor: args.actor,
+      command_id: args.command_id,
+      candidate_job_id: job.job_id,
+      recorded_at: now,
+      result,
+    });
+    return result;
+  },
+});
 
 export const getSubmission = internalQuery({
   args: { job_id: v.string() },

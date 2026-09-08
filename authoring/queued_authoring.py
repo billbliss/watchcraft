@@ -2731,7 +2731,9 @@ def dispatch_submission(control: AuthoringHttpClient, job: dict[str, Any]) -> di
     return pending
 
 
-def verified_json_result(job: dict[str, Any], credential_source: str) -> dict[str, Any]:
+def verified_json_result_bytes(
+    job: dict[str, Any], credential_source: str
+) -> tuple[dict[str, Any], bytes]:
     if job.get("state") != "succeeded" or job.get("result") is None:
         raise RuntimeError(
             f"Job {job['job_id']} is {job.get('state', 'unknown')}; "
@@ -2747,7 +2749,11 @@ def verified_json_result(job: dict[str, Any], credential_source: str) -> dict[st
         raise RuntimeError("The verified artifact is not valid UTF-8 JSON") from error
     if not isinstance(result, dict):
         raise RuntimeError("The verified JSON artifact must be an object")
-    return result
+    return result, payload
+
+
+def verified_json_result(job: dict[str, Any], credential_source: str) -> dict[str, Any]:
+    return verified_json_result_bytes(job, credential_source)[0]
 
 
 def wait_for_terminal_job(
@@ -2771,12 +2777,18 @@ def wait_for_terminal_job(
         job = submission["job"]
         state = job.get("state")
         state_changed = state != last_state
+        progress = formatted_job_progress(job)
+        progress_changed = progress is not None and progress != last_progress
+        terminal = state in {
+            "succeeded", "retryable_failed", "terminal_failed", "cancelled"
+        }
+        if progress_changed and terminal:
+            print(f"{job_id}: {progress}", flush=True)
+            last_progress = progress
         if state_changed:
             print(f"{job_id}: {state}", flush=True)
             last_state = state
-        progress = formatted_job_progress(job)
-        progress_changed = progress is not None and progress != last_progress
-        if progress_changed:
+        if progress_changed and not terminal:
             print(f"{job_id}: {progress}", flush=True)
             last_progress = progress
         if state == "succeeded":
@@ -2909,9 +2921,121 @@ def load_catalog_project(path: Path) -> dict[str, Any]:
     return project
 
 
-def run_iterate_project(args: argparse.Namespace) -> int:
+def load_catalog_project_argument(
+    value: str, control: AuthoringHttpClient
+) -> dict[str, Any]:
+    path = Path(value)
+    if path.is_file():
+        return load_catalog_project(path)
+    if path.suffix == ".json" or len(path.parts) > 1:
+        raise RuntimeError(f"Catalog project file does not exist: {path}")
+    result = control.post("/projects/get", {"project_id": value})
+    project = result.get("project")
+    validate_json_schema(project, CATALOG_PROJECT_SCHEMA_PATH, "Catalog project")
+    return project
+
+
+def inferred_snapshot_path(project_path: Path) -> Path:
+    suffix = ".project.json"
+    if project_path.name.endswith(suffix):
+        return project_path.with_name(
+            project_path.name[: -len(suffix)] + ".snapshot.json"
+        )
+    return project_path.with_name(project_path.stem + ".snapshot.json")
+
+
+def load_exact_json_object(path: Path, label: str) -> tuple[dict[str, Any], bytes]:
+    try:
+        payload = path.read_bytes()
+        value = json.loads(payload.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"Could not read {label} {path}: {error}") from error
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{label.capitalize()} must be a JSON object")
+    return value, payload
+
+
+def run_project_import(args: argparse.Namespace) -> int:
     control = operator_client(args.operator_token_source)
     project = load_catalog_project(args.project_file)
+    snapshot_json = None
+    accepted = project.get("iterator", {}).get("accepted_snapshot")
+    if accepted is not None:
+        snapshot_path = args.accepted_snapshot_file or inferred_snapshot_path(
+            args.project_file
+        )
+        snapshot, snapshot_bytes = load_exact_json_object(
+            snapshot_path, "accepted iterator snapshot"
+        )
+        validate_iterator_snapshot(snapshot)
+        reference = validated_artifact_reference(accepted)
+        if (
+            len(snapshot_bytes) != reference["byte_length"]
+            or sha256_hex(snapshot_bytes) != reference["digest"]
+        ):
+            raise RuntimeError(
+                "Accepted iterator snapshot file does not match the project reference"
+            )
+        snapshot_json = snapshot_bytes.decode("utf-8")
+    elif args.accepted_snapshot_file is not None:
+        raise RuntimeError(
+            "--accepted-snapshot-file requires a project with accepted_snapshot"
+        )
+    result = control.post("/projects/import", {
+        "command_id": str(uuid.uuid4()),
+        "actor": "watchcraft-author-cli",
+        "project": project,
+        **(
+            {"accepted_snapshot_json": snapshot_json}
+            if snapshot_json is not None
+            else {}
+        ),
+    })
+    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def run_project_accept_snapshot(args: argparse.Namespace) -> int:
+    control = operator_client(args.operator_token_source)
+    current = control.post("/projects/get", {"project_id": args.project_id})
+    project = current["project"]
+    expected_revision = (
+        args.expected_revision
+        if args.expected_revision is not None
+        else project["revision"]
+    )
+    if expected_revision != project["revision"]:
+        raise RuntimeError(
+            f"Expected revision {expected_revision} does not match current project "
+            f"revision {project['revision']}"
+        )
+    submission = control.post("/submissions/get", {"job_id": args.job_id})
+    snapshot, snapshot_bytes = verified_json_result_bytes(
+        submission["job"], args.r2_credentials_source
+    )
+    validate_iterator_snapshot(snapshot)
+    if snapshot.get("project") != {
+        "project_id": args.project_id,
+        "revision": expected_revision,
+    }:
+        raise RuntimeError(
+            "Iterator candidate belongs to a different catalog project revision"
+        )
+    result = control.post("/projects/accept-snapshot", {
+        "project_id": args.project_id,
+        "job_id": args.job_id,
+        "expected_revision": expected_revision,
+        "command_id": str(uuid.uuid4()),
+        "actor": "watchcraft-author-cli",
+        "snapshot_json": snapshot_bytes.decode("utf-8"),
+    })
+    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def run_iterate_project(args: argparse.Namespace) -> int:
+    control = operator_client(args.operator_token_source)
+    project = load_catalog_project_argument(args.project, control)
     spec = youtube_playlist_iterator_spec(project)
     submitted = submit_spec(
         control,
@@ -3669,6 +3793,61 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         default="auto",
         help="Temporary source-media uploader credential source (default: auto)",
     )
+    project_import = commands.add_parser(
+        "project-import",
+        parents=[credentials],
+        help="Import an initial CatalogProject revision into the control plane",
+        description=(
+            "Validate and import one CatalogProject as its immutable initial Convex "
+            "revision. If it already accepts a snapshot, its exact local snapshot "
+            "bytes are verified and imported with it."
+        ),
+    )
+    project_import.add_argument("project_file", type=Path)
+    project_import.add_argument(
+        "--accepted-snapshot-file",
+        type=Path,
+        help=(
+            "Exact snapshot file bound by accepted_snapshot; defaults to the sibling "
+            "*.snapshot.json file"
+        ),
+    )
+    project_status = commands.add_parser(
+        "project-status",
+        parents=[credentials],
+        help="Show the current authoritative CatalogProject revision",
+    )
+    project_status.add_argument("project_id")
+    project_history = commands.add_parser(
+        "project-history",
+        parents=[credentials],
+        help="Show immutable CatalogProject revision history",
+    )
+    project_history.add_argument("project_id")
+    project_history.add_argument("--limit", type=int, default=20)
+    project_accept = commands.add_parser(
+        "project-accept-snapshot",
+        parents=[credentials],
+        help="Accept a succeeded iterator candidate as a new project revision",
+        description=(
+            "Retrieve and verify a succeeded iterator job's exact R2 snapshot, bind "
+            "it to the current CatalogProject using compare-and-swap, and create one "
+            "new immutable project revision."
+        ),
+    )
+    project_accept.add_argument("project_id")
+    project_accept.add_argument("job_id")
+    project_accept.add_argument(
+        "--expected-revision",
+        type=int,
+        help="Compare-and-swap revision; defaults to the observed current revision",
+    )
+    project_accept.add_argument(
+        "--r2-credentials-source",
+        choices=("auto", "keychain", "environment"),
+        default="auto",
+        help="Read-only candidate snapshot credential source (default: auto)",
+    )
     iterate_project = commands.add_parser(
         "iterate-project",
         parents=[credentials],
@@ -3680,9 +3859,8 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         ),
     )
     iterate_project.add_argument(
-        "project_file",
-        type=Path,
-        help="CatalogProject JSON document",
+        "project",
+        help="CatalogProject JSON file or an imported project ID",
     )
     iterate_project.add_argument("--timeout-seconds", type=int, default=1800)
     iterate_project.add_argument(
@@ -3946,6 +4124,10 @@ def run_queue_command(args: argparse.Namespace) -> int:
         return run_local_youtube_transcription(args, smoke=False)
     if args.queue_command == "process-youtube":
         return run_youtube_video_pipeline(args)
+    if args.queue_command == "project-import":
+        return run_project_import(args)
+    if args.queue_command == "project-accept-snapshot":
+        return run_project_accept_snapshot(args)
     if args.queue_command == "iterate-project":
         return run_iterate_project(args)
     if args.queue_command == "analyze-transcript":
@@ -3954,6 +4136,19 @@ def run_queue_command(args: argparse.Namespace) -> int:
     control = operator_client(args.operator_token_source)
     if args.queue_command == "registry-status":
         result = control.post("/registry/get-active", {"environment": args.environment})
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if args.queue_command == "project-status":
+        result = control.post("/projects/get", {"project_id": args.project_id})
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if args.queue_command == "project-history":
+        if not 1 <= args.limit <= 100:
+            raise ValueError("--limit must be between 1 and 100")
+        result = control.post("/projects/history", {
+            "project_id": args.project_id,
+            "limit": args.limit,
+        })
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     if args.queue_command == "submit-analysis":

@@ -64,4 +64,23 @@ export default defineSchema({
   })
     .index("by_cleanup_command", ["command_id"])
     .index("by_cleanup_target", ["target_kind", "target_id"]),
+  authoring_catalog_projects: defineTable({
+    project_id: v.string(),
+    current_revision: v.number(),
+    aggregate: v.any(),
+    updated_at: v.number(),
+  }).index("by_project_id", ["project_id"]),
+  authoring_catalog_project_revisions: defineTable({
+    project_id: v.string(),
+    revision: v.number(),
+    aggregate: v.any(),
+    transition: v.string(),
+    actor: v.string(),
+    command_id: v.string(),
+    candidate_job_id: v.optional(v.string()),
+    recorded_at: v.number(),
+    result: v.any(),
+  })
+    .index("by_project_revision", ["project_id", "revision"])
+    .index("by_project_command", ["project_id", "command_id"]),
 });

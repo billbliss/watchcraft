@@ -2,6 +2,7 @@
 
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { convexTest } from "convex-test";
+import { readFile } from "node:fs/promises";
 
 import {
   artifactKey,
@@ -69,6 +70,193 @@ test("worker endpoints reject missing or incorrect credentials", async () => {
   const response = await post(t, "/authoring/smoke/prepare", {}, "wrong-token");
   expect(response.status).toBe(401);
   await expect(response.json()).resolves.toEqual({ error: "Unauthorized." });
+});
+
+test("catalog project snapshot acceptance is verified, revisioned, and queryable", async () => {
+  const t = convexTest(schema, modules);
+  const projectBytes = await readFile(new URL(
+    "../packages/authoring-pipeline/project/examples/current-playlist.project.json",
+    import.meta.url,
+  ));
+  const acceptedSnapshotBytes = await readFile(new URL(
+    "../packages/authoring-pipeline/project/examples/current-playlist.snapshot.json",
+    import.meta.url,
+  ));
+  const project = JSON.parse(projectBytes.toString("utf8"));
+  const candidate = JSON.parse(acceptedSnapshotBytes.toString("utf8"));
+  candidate.observed_at = "2026-09-08T09:48:10Z";
+  candidate.provenance.discovery_mode = "bounded-crawl";
+  const candidateJson = JSON.stringify(candidate);
+  const candidateBytes = new TextEncoder().encode(candidateJson);
+  const candidateDigest = sha256Hex(candidateBytes);
+  const artifact = {
+    store: "r2",
+    algorithm: "sha256",
+    digest: candidateDigest,
+    byte_length: candidateBytes.byteLength,
+    media_type: "application/json",
+    artifact_kind: "collection-iterator-snapshot",
+    schema: { id: "watchcraft.collection-iterator-snapshot", version: 1 },
+    key: artifactKey(candidateDigest),
+  };
+
+  const importedResponse = await post(t, "/authoring/operator/projects/import", {
+    command_id: "import-project-1",
+    actor: "test-operator",
+    project,
+    accepted_snapshot_json: acceptedSnapshotBytes.toString("utf8"),
+  }, operatorToken);
+  expect(importedResponse.status).toBe(200);
+  await expect(importedResponse.json()).resolves.toMatchObject({
+    created: true,
+    project: { project_id: "essence-of-linear-algebra", revision: 1 },
+  });
+  const importReplay = await post(t, "/authoring/operator/projects/import", {
+    command_id: "import-project-1",
+    actor: "test-operator",
+    project,
+    accepted_snapshot_json: acceptedSnapshotBytes.toString("utf8"),
+  }, operatorToken);
+  expect(importReplay.status).toBe(200);
+  await expect(importReplay.json()).resolves.toMatchObject({
+    created: true,
+    project: { project_id: "essence-of-linear-algebra", revision: 1 },
+  });
+
+  const spec = {
+    operation: "generate",
+    artifact_kind: "collection-iterator-snapshot",
+    output_schema: { id: "watchcraft.collection-iterator-snapshot", version: 1 },
+    handler: { id: "watchcraft.iterator.youtube-playlist", version: "1" },
+    source: {
+      media_asset_id: "youtube-playlist:PLZHQObOWTQDPD3MizzM2xVFitgF8hE_ab",
+    },
+    inputs: [],
+    dependencies: [],
+    configuration: { project, observed_at: candidate.observed_at },
+  };
+  let job = await t.mutation(internal.authoringInternal.createJob, {
+    job_id: "iterator-job-1",
+    run_id: "iterator-run-1",
+    command_id: "iterator-create",
+    spec,
+  }) as any;
+  job = await t.mutation(internal.authoringInternal.requestApproval, {
+    job_id: job.job_id,
+    command_id: "iterator-request-approval",
+    expected_revision: job.revision,
+  }) as any;
+  job = await t.mutation(internal.authoringInternal.approveJob, {
+    job_id: job.job_id,
+    command_id: "iterator-approve",
+    expected_revision: job.revision,
+    actor: "test-operator",
+    spec_sha256: job.spec_sha256,
+  }) as any;
+  job = await t.mutation(internal.authoringInternal.requestDispatch, {
+    job_id: job.job_id,
+    command_id: "iterator-request-dispatch",
+    expected_revision: job.revision,
+  }) as any;
+  job = await t.mutation(internal.authoringInternal.recordDispatch, {
+    job_id: job.job_id,
+    command_id: "iterator-record-dispatch",
+    expected_revision: job.revision,
+    generation: 1,
+    github_run_id: "123",
+    github_run_url: "https://github.com/billbliss/watchcraft/actions/runs/123",
+  }) as any;
+  job = await t.mutation(internal.authoringInternal.claimJob, {
+    job_id: job.job_id,
+    command_id: "iterator-claim",
+    expected_revision: job.revision,
+    attempt_id: "iterator-attempt-1",
+    owner: "github-actions:123",
+    spec_sha256: job.spec_sha256,
+    dispatch_generation: 1,
+    lease_duration_ms: 300_000,
+    github_run_id: "123",
+  }) as any;
+  job = await t.mutation(internal.authoringInternal.startJob, {
+    job_id: job.job_id,
+    command_id: "iterator-start",
+    expected_revision: job.revision,
+    attempt_id: "iterator-attempt-1",
+  }) as any;
+  job = await t.mutation(internal.authoringInternal.succeedJob, {
+    job_id: job.job_id,
+    command_id: "iterator-succeed",
+    expected_revision: job.revision,
+    attempt_id: "iterator-attempt-1",
+    artifact,
+  }) as any;
+  expect(job.state).toBe("succeeded");
+
+  const acceptanceBody = {
+    project_id: project.project_id,
+    job_id: job.job_id,
+    expected_revision: 1,
+    command_id: "accept-candidate-1",
+    actor: "test-operator",
+    snapshot_json: candidateJson,
+  };
+  const tampered = await post(t, "/authoring/operator/projects/accept-snapshot", {
+    ...acceptanceBody,
+    command_id: "accept-tampered",
+    snapshot_json: `${candidateJson} `,
+  }, operatorToken);
+  expect(tampered.status).toBe(409);
+  await expect(tampered.json()).resolves.toEqual({
+    error: "Iterator candidate reference does not match its exact bytes.",
+  });
+
+  const acceptedResponse = await post(
+    t,
+    "/authoring/operator/projects/accept-snapshot",
+    acceptanceBody,
+    operatorToken,
+  );
+  expect(acceptedResponse.status).toBe(200);
+  const accepted = await acceptedResponse.json() as any;
+  expect(accepted).toMatchObject({
+    previous_revision: 1,
+    candidate_job_id: "iterator-job-1",
+    project: {
+      project_id: "essence-of-linear-algebra",
+      revision: 2,
+      iterator: { accepted_snapshot: artifact },
+    },
+  });
+
+  const replay = await post(
+    t,
+    "/authoring/operator/projects/accept-snapshot",
+    acceptanceBody,
+    operatorToken,
+  );
+  expect(replay.status).toBe(200);
+  await expect(replay.json()).resolves.toEqual(accepted);
+
+  const status = await post(t, "/authoring/operator/projects/get", {
+    project_id: project.project_id,
+  }, operatorToken);
+  expect(status.status).toBe(200);
+  await expect(status.json()).resolves.toMatchObject({
+    project: { revision: 2, iterator: { accepted_snapshot: artifact } },
+  });
+  const history = await post(t, "/authoring/operator/projects/history", {
+    project_id: project.project_id,
+    limit: 20,
+  }, operatorToken);
+  expect(history.status).toBe(200);
+  await expect(history.json()).resolves.toMatchObject({
+    current_revision: 2,
+    revisions: [
+      { revision: 2, transition: "accept-snapshot", candidate_job_id: job.job_id },
+      { revision: 1, transition: "import", candidate_job_id: null },
+    ],
+  });
+
 });
 
 test("the persisted smoke lifecycle is transactional and command-idempotent", async () => {

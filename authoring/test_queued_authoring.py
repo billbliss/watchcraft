@@ -254,8 +254,20 @@ class QueuedAuthoringTests(unittest.TestCase):
             "--operator-token-source", "keychain",
             "--r2-credentials-source", "keychain",
         ])
-        self.assertEqual(iterator.project_file, Path("project.json"))
+        self.assertEqual(iterator.project, "project.json")
         self.assertEqual(iterator.timeout_seconds, 1800)
+        project_import = build_parser().parse_args([
+            "queue", "project-import", "project.json",
+        ])
+        self.assertEqual(project_import.project_file, Path("project.json"))
+        self.assertIsNone(project_import.accepted_snapshot_file)
+        project_accept = build_parser().parse_args([
+            "queue", "project-accept-snapshot", "project-1", "job-1",
+            "--r2-credentials-source", "keychain",
+        ])
+        self.assertEqual(project_accept.project_id, "project-1")
+        self.assertEqual(project_accept.job_id, "job-1")
+        self.assertIsNone(project_accept.expected_revision)
 
         cleanup = build_parser().parse_args([
             "queue", "cleanup-run", "run-1", "--confirm", "run-1",
@@ -269,6 +281,72 @@ class QueuedAuthoringTests(unittest.TestCase):
         ])
         self.assertEqual(orphan.job_id, "job-1")
         self.assertEqual(orphan.confirm, "job-1")
+
+    def test_project_import_verifies_and_sends_the_bound_snapshot(self):
+        examples = queued_authoring.CATALOG_PROJECT_SCHEMA_PATH.parent / "examples"
+        project_path = examples / "current-playlist.project.json"
+        snapshot_path = examples / "current-playlist.snapshot.json"
+        expected_snapshot = snapshot_path.read_text(encoding="utf-8")
+        control = Mock()
+        control.post.return_value = {
+            "created": True,
+            "project": {"project_id": "essence-of-linear-algebra", "revision": 1},
+        }
+        args = build_parser().parse_args([
+            "queue", "project-import", str(project_path),
+            "--operator-token-source", "keychain",
+        ])
+        with patch("queued_authoring.operator_client", return_value=control):
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(queued_authoring.run_queue_command(args), 0)
+        path, payload = control.post.call_args.args
+        self.assertEqual(path, "/projects/import")
+        self.assertEqual(payload["project"]["revision"], 1)
+        self.assertEqual(payload["accepted_snapshot_json"], expected_snapshot)
+
+    def test_project_accept_snapshot_uses_observed_revision_and_exact_bytes(self):
+        examples = queued_authoring.CATALOG_PROJECT_SCHEMA_PATH.parent / "examples"
+        project = json.loads(
+            (examples / "current-playlist.project.json").read_text(encoding="utf-8")
+        )
+        snapshot_bytes = (
+            examples / "current-playlist.snapshot.json"
+        ).read_bytes()
+        snapshot = json.loads(snapshot_bytes)
+        job = {
+            "job_id": "iterator-job-1",
+            "state": "succeeded",
+            "result": project["iterator"]["accepted_snapshot"],
+        }
+        control = Mock()
+
+        def post(path, payload):
+            if path == "/projects/get":
+                return {"project": project, "updated_at": 1}
+            if path == "/submissions/get":
+                return {"job": job, "run": {"run_id": "run-1"}}
+            if path == "/projects/accept-snapshot":
+                self.assertEqual(payload["expected_revision"], 1)
+                self.assertEqual(payload["snapshot_json"], snapshot_bytes.decode("utf-8"))
+                return {
+                    "project": {**project, "revision": 2},
+                    "previous_revision": 1,
+                }
+            raise AssertionError(path)
+
+        control.post.side_effect = post
+        args = build_parser().parse_args([
+            "queue", "project-accept-snapshot",
+            "essence-of-linear-algebra", "iterator-job-1",
+            "--operator-token-source", "keychain",
+            "--r2-credentials-source", "keychain",
+        ])
+        with patch("queued_authoring.operator_client", return_value=control), patch(
+            "queued_authoring.verified_json_result_bytes",
+            return_value=(snapshot, snapshot_bytes),
+        ):
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(queued_authoring.run_queue_command(args), 0)
 
     def test_result_parser_exposes_separate_control_and_artifact_credentials(self):
         args = build_parser().parse_args([
@@ -1678,7 +1756,14 @@ class QueuedAuthoringTests(unittest.TestCase):
                     "current": "Lesson two",
                 },
             }]}},
-            {"job": {"job_id": "job-1", "state": "succeeded", "attempts": []}},
+            {"job": {"job_id": "job-1", "state": "succeeded", "attempts": [{
+                "progress": {
+                    "phase": "storing",
+                    "completed": 1,
+                    "total": 1,
+                    "unit": "snapshot",
+                },
+            }]}},
         ]
         output = io.StringIO()
         with patch("queued_authoring.time.monotonic", side_effect=[0.0, 0.0, 1.0, 2.0]):
@@ -1696,6 +1781,10 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertIn(
             "job-1: enumerating: 2 of 3 placements — Lesson two",
             output.getvalue(),
+        )
+        self.assertLess(
+            output.getvalue().index("job-1: storing: 1 of 1 snapshot"),
+            output.getvalue().index("job-1: succeeded"),
         )
 
     def test_mlx_registry_snapshot_is_accepted_only_by_the_macos_profile(self):

@@ -450,6 +450,60 @@ handler requires capability registry `2026-09-08.1` to be published and activate
 after the worker code is available on `main`, which is the branch dispatched by the
 operator CLI.
 
+Import the initial project aggregate into Convex once. A project that already binds an
+accepted snapshot also requires its exact snapshot bytes; for the checked-in examples
+the CLI finds the sibling `*.snapshot.json` file automatically:
+
+```bash
+./authoring/watchcraft-author queue project-import \
+  --operator-token-source keychain \
+  packages/authoring-pipeline/project/examples/current-playlist.project.json
+```
+
+Accept a completed iterator candidate by its authoritative job ID:
+
+```bash
+./authoring/watchcraft-author queue project-accept-snapshot \
+  --operator-token-source keychain \
+  --r2-credentials-source keychain \
+  essence-of-linear-algebra \
+  ITERATOR_JOB_ID
+```
+
+The command observes the current revision by default, downloads and verifies the exact
+candidate bytes from R2, and submits them to the control plane. Convex independently
+checks the digest and byte length against the succeeded job, verifies that the job ran
+against the exact current project aggregate, validates the snapshot contract and type
+compatibility, and creates the next immutable project revision. It does not adopt
+metadata proposals automatically. Use `--expected-revision N` when a script needs an
+explicit compare-and-swap precondition.
+
+Inspect the current aggregate and its immutable transition history with:
+
+```bash
+./authoring/watchcraft-author queue project-status \
+  --operator-token-source keychain \
+  essence-of-linear-algebra
+
+./authoring/watchcraft-author queue project-history \
+  --operator-token-source keychain \
+  essence-of-linear-algebra
+```
+
+After import, a refresh can use the project ID instead of a local file so iteration is
+always bound to the authoritative current revision:
+
+```bash
+./authoring/watchcraft-author queue iterate-project \
+  --operator-token-source keychain \
+  --r2-credentials-source keychain \
+  essence-of-linear-algebra
+```
+
+Project persistence adds Convex schema and function changes, so deploy them with
+`npx convex deploy` before using these commands. It does not add a worker handler and
+therefore does not require publishing or activating a new capability registry.
+
 `queue result` resolves the artifact reference from the authoritative completed job,
 downloads the object from private R2, and verifies its declared byte length and SHA-256
 digest. JSON is displayed in readable form by default; `--output PATH` writes the exact
