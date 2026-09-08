@@ -3064,10 +3064,12 @@ def submit_pipeline(
     *,
     request: dict[str, Any],
     jobs: list[dict[str, Any]],
+    run_id: str | None = None,
+    command_prefix: str | None = None,
 ) -> dict[str, Any]:
     return control.post("/pipelines/submit", {
-        "run_id": str(uuid.uuid4()),
-        "command_prefix": str(uuid.uuid4()),
+        "run_id": run_id or str(uuid.uuid4()),
+        "command_prefix": command_prefix or str(uuid.uuid4()),
         "request": request,
         "jobs": jobs,
     })
@@ -3524,6 +3526,115 @@ def run_plan_project(args: argparse.Namespace) -> int:
     return 0
 
 
+def executable_project_plan_item(
+    plan: dict[str, Any], item_id: str | None = None
+) -> dict[str, Any]:
+    candidates = plan["items"]
+    if item_id is not None:
+        candidates = [item for item in candidates if item["item_id"] == item_id]
+        if not candidates:
+            raise ValueError(f"Processing plan has no item {item_id!r}")
+    if not candidates:
+        raise ValueError("Processing plan contains no items")
+    item = candidates[0]
+    stages = item["stages"]
+    expected = [
+        ("metadata-enrichment", "watchcraft.metadata.youtube", "operator-local"),
+        ("source-acquisition", "watchcraft.acquire.youtube-audio", "operator-local"),
+        ("transcription", PRODUCTION_TRANSCRIPTION_HANDLER[0], "registered-worker"),
+        ("analysis", EDUCATIONAL_VIDEO_ANALYSIS_HANDLER[0], "registered-worker"),
+    ]
+    if any(
+        stage["stage"] != stage_name
+        or stage["handler"] != {
+            "id": handler_id,
+            "version": "1",
+        }
+        or stage["executor"] != executor
+        or stage["disposition"] != "required"
+        for stage, (stage_name, handler_id, executor) in zip(stages, expected)
+    ):
+        raise ValueError("Processing plan item is not executable by this CLI version")
+    if (
+        item["source"]["media_type"] != "youtube"
+        or item["source"]["media_asset_id"] != item["item_id"]
+        or youtube_video_id(item["source"]["canonical_url"])
+        != item["source"]["media_id"]
+    ):
+        raise ValueError("Processing plan item has an unsupported source identity")
+    return item
+
+
+def run_process_project(args: argparse.Namespace) -> int:
+    if args.limit is not None and args.limit != 1:
+        raise ValueError("The initial project executor requires --limit 1")
+    control = operator_client(args.operator_token_source)
+    plan_submission = control.post(
+        "/submissions/get", {"job_id": args.plan_job_id}
+    )
+    plan_job = plan_submission.get("job")
+    if (
+        not isinstance(plan_job, dict)
+        or plan_job.get("state") != "succeeded"
+        or plan_job.get("spec", {}).get("handler") != {
+            "id": PROJECT_PROCESSING_PLANNER_HANDLER[0],
+            "version": PROJECT_PROCESSING_PLANNER_HANDLER[1],
+        }
+    ):
+        raise RuntimeError(
+            f"Job {args.plan_job_id} is not a successful project processing plan"
+        )
+    plan_reference = validated_artifact_reference(plan_job.get("result"))
+    if (
+        plan_reference.get("artifact_kind") != "project-processing-plan"
+        or plan_reference.get("schema") != PROJECT_PROCESSING_PLAN_SCHEMA
+    ):
+        raise RuntimeError(
+            f"Job {args.plan_job_id} is not a successful project processing plan"
+        )
+    plan = verified_json_result(plan_job, args.r2_credentials_source)
+    validate_project_processing_plan(plan)
+    current = control.post(
+        "/projects/get", {"project_id": plan["project"]["project_id"]}
+    )
+    project = current.get("project")
+    validate_json_schema(project, CATALOG_PROJECT_SCHEMA_PATH, "Catalog project")
+    if (
+        project["revision"] != plan["project"]["revision"]
+        or project["iterator"].get("accepted_snapshot") != plan["source_snapshot"]
+    ):
+        raise RuntimeError(
+            "Processing plan is stale relative to the authoritative catalog project"
+        )
+    item = executable_project_plan_item(plan, args.item_id)
+    print(
+        f"executing 1 of {len(plan['items'])} planned items: {item['title']}",
+        flush=True,
+    )
+    stages = {stage["stage"]: stage for stage in item["stages"]}
+    args.youtube_url = item["source"]["canonical_url"]
+    return run_youtube_video_pipeline(
+        args,
+        project_execution={
+            "plan_job_id": args.plan_job_id,
+            "plan_artifact_sha256": plan_reference["digest"],
+            "plan_hash": plan["plan_hash"],
+            "project_id": plan["project"]["project_id"],
+            "project_revision": plan["project"]["revision"],
+            "item_id": item["item_id"],
+            "logical_tasks": {
+                name: stages[name]["task_id"]
+                for name in (
+                    "metadata-enrichment",
+                    "source-acquisition",
+                    "transcription",
+                    "analysis",
+                )
+            },
+        },
+    )
+
+
 def run_queued_video_analysis(args: argparse.Namespace) -> int:
     command_started_at = time.monotonic()
     control = operator_client(args.operator_token_source)
@@ -3824,111 +3935,218 @@ def run_local_youtube_transcription(
     return 0
 
 
-def run_youtube_video_pipeline(args: argparse.Namespace) -> int:
+def stable_project_execution_id(
+    plan_artifact_sha256: str, item_id: str, role: str
+) -> str:
+    return str(uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"https://watchcraft.dev/authoring/{plan_artifact_sha256}/{item_id}/{role}",
+    ))
+
+
+def _resume_pipeline_job(
+    control: AuthoringHttpClient,
+    job: dict[str, Any],
+    label: str,
+) -> dict[str, Any]:
+    state = job.get("state")
+    if state == "retryable_failed":
+        job = control.post("/submissions/retry", {
+            "job_id": job["job_id"],
+            "command_id": str(uuid.uuid4()),
+            "expected_revision": job["revision"],
+        })
+        state = job["state"]
+        print(f"retrying {label} {job['job_id']}", flush=True)
+    if state in {"ready", "dispatch_pending"}:
+        pending = dispatch_submission(control, job)
+        print(
+            f"dispatched {label} {job['job_id']} via {dispatch_workflow(pending)}",
+            flush=True,
+        )
+        return pending
+    if state in {"dispatched", "claimed", "running", "succeeded"}:
+        if state != "succeeded":
+            print(f"resuming {label} {job['job_id']} ({state})", flush=True)
+        return job
+    raise RuntimeError(
+        f"Cannot resume {label} job {job.get('job_id')} from state {state}"
+    )
+
+
+def run_youtube_video_pipeline(
+    args: argparse.Namespace,
+    *,
+    project_execution: dict[str, Any] | None = None,
+) -> int:
     command_started_at = time.monotonic()
     control = operator_client(args.operator_token_source)
     staging = r2_staging_writer(args.r2_staging_credentials_source)
     settings = STAGED_TRANSCRIPTION_SETTINGS[PRODUCTION_TRANSCRIPTION_HANDLER]
     video_id = youtube_video_id(args.youtube_url)
     canonical_url = canonical_youtube_url(video_id)
-
-    metadata_started_at = time.monotonic()
-    source_metadata = youtube_source_metadata(video_id)
-    metadata_fetch_ms = elapsed_milliseconds(metadata_started_at)
     source = {"media_asset_id": f"youtube:{video_id}"}
-    if source_metadata.get("source_id") != source["media_asset_id"]:
-        raise RuntimeError("Resolved source metadata does not match the YouTube source")
+    if project_execution is None:
+        run_id = str(uuid.uuid4())
+        command_prefix = str(uuid.uuid4())
+        transcription_job_id = str(uuid.uuid4())
+        analysis_job_id = str(uuid.uuid4())
+        pipeline_request = {
+            "kind": "youtube-video",
+            "source_id": source["media_asset_id"],
+            "stages": ["transcription", "educational-video-analysis"],
+        }
+        existing = {"run": None, "jobs": []}
+    else:
+        run_id = stable_project_execution_id(
+            project_execution["plan_artifact_sha256"], project_execution["item_id"], "run"
+        )
+        command_prefix = stable_project_execution_id(
+            project_execution["plan_artifact_sha256"], project_execution["item_id"], "commands"
+        )
+        transcription_job_id = stable_project_execution_id(
+            project_execution["plan_artifact_sha256"],
+            project_execution["item_id"],
+            "transcription",
+        )
+        analysis_job_id = stable_project_execution_id(
+            project_execution["plan_artifact_sha256"], project_execution["item_id"], "analysis"
+        )
+        pipeline_request = {
+            "kind": "project-item-processing",
+            "plan_job_id": project_execution["plan_job_id"],
+            "plan_artifact_sha256": project_execution["plan_artifact_sha256"],
+            "plan_hash": project_execution["plan_hash"],
+            "project_id": project_execution["project_id"],
+            "project_revision": project_execution["project_revision"],
+            "item_id": project_execution["item_id"],
+            "logical_tasks": project_execution["logical_tasks"],
+            "source_id": source["media_asset_id"],
+            "stages": ["transcription", "educational-video-analysis"],
+        }
+        existing = control.post("/pipelines/get", {"run_id": run_id})
 
     reference = None
     submitted = None
-    with tempfile.TemporaryDirectory(prefix="watchcraft-youtube-acquisition-") as directory:
-        audio_path = Path(directory) / "source-audio"
-        print(f"acquiring {canonical_url} anonymously on this Mac", flush=True)
-        acquisition_started_at = time.monotonic()
-        acquisition_result = download_youtube_audio(
-            video_id,
-            audio_path,
-            maximum_bytes=settings["maximum_bytes"],
-            maximum_duration_seconds=settings["maximum_duration_seconds"],
-            timeout_seconds=YOUTUBE_TRANSCRIPTION_TIMEOUT_SECONDS,
-        )
-        acquisition_ms = elapsed_milliseconds(acquisition_started_at)
-        acquisition = youtube_acquisition_provenance(
-            acquisition_result,
-            elapsed_ms=acquisition_ms,
-        )
-        staging_started_at = time.monotonic()
-        reference = staging.put_staged_file(
-            audio_path,
-            {
-                "artifact_kind": "source-audio",
-                "media_type": source_audio_media_type(acquisition_result.get("container")),
-                "schema": SOURCE_AUDIO_SCHEMA,
-            },
-            acquisition_id=str(uuid.uuid4()),
-            expires_at=int(time.time() * 1000) + SOURCE_AUDIO_RETENTION_MILLISECONDS,
-        )
-        staging_upload_ms = elapsed_milliseconds(staging_started_at)
-    print(
-        f"staged {reference['byte_length']} bytes as {reference['digest']}",
-        flush=True,
-    )
-
-    transcription_job_id = str(uuid.uuid4())
-    analysis_job_id = str(uuid.uuid4())
-    transcription_spec = staged_transcription_spec(
-        source=source,
-        source_audio=reference,
-        acquisition=acquisition,
-        handler=PRODUCTION_TRANSCRIPTION_HANDLER,
-    )
-    analysis_spec = educational_video_analysis_spec(
-        source=source,
-        transcript={
-            "kind": "job-output",
-            "job_id": transcription_job_id,
-            "artifact_kind": "transcript",
-            "schema": {"id": "watchcraft.transcript", "version": 1},
-        },
-        source_metadata=source_metadata,
-        video=f"{video_id}.youtube",
-    )
+    submission_attempted = False
+    metadata_fetch_ms = 0
+    acquisition_ms = 0
+    staging_upload_ms = 0
     try:
-        submitted = submit_pipeline(
-            control,
-            request={
-                "kind": "youtube-video",
-                "source_id": source["media_asset_id"],
-                "stages": ["transcription", "educational-video-analysis"],
-            },
-            jobs=[
-                {"job_id": transcription_job_id, "spec": transcription_spec},
-                {"job_id": analysis_job_id, "spec": analysis_spec},
-            ],
-        )
+        if existing.get("run") is not None:
+            submitted = existing
+            run = submitted["run"]
+            if run.get("request") != pipeline_request:
+                raise RuntimeError("Existing project item execution does not match its plan")
+            jobs_by_id = {job["job_id"]: job for job in submitted.get("jobs", [])}
+            if set(jobs_by_id) != {transcription_job_id, analysis_job_id}:
+                raise RuntimeError("Existing project item execution has an invalid job set")
+            transcription_spec = jobs_by_id[transcription_job_id]["spec"]
+            analysis_spec = jobs_by_id[analysis_job_id]["spec"]
+            reference = validated_artifact_reference(
+                transcription_spec["inputs"][0], allow_staged=True
+            )
+            acquisition = transcription_spec["configuration"]["acquisition"]
+            source_metadata = analysis_spec["configuration"]["source_metadata"]
+            print(f"resuming planned item run {run_id}", flush=True)
+        else:
+            metadata_started_at = time.monotonic()
+            source_metadata = youtube_source_metadata(video_id)
+            metadata_fetch_ms = elapsed_milliseconds(metadata_started_at)
+            if source_metadata.get("source_id") != source["media_asset_id"]:
+                raise RuntimeError("Resolved source metadata does not match the YouTube source")
+            with tempfile.TemporaryDirectory(
+                prefix="watchcraft-youtube-acquisition-"
+            ) as directory:
+                audio_path = Path(directory) / "source-audio"
+                print(f"acquiring {canonical_url} anonymously on this Mac", flush=True)
+                acquisition_started_at = time.monotonic()
+                acquisition_result = download_youtube_audio(
+                    video_id,
+                    audio_path,
+                    maximum_bytes=settings["maximum_bytes"],
+                    maximum_duration_seconds=settings["maximum_duration_seconds"],
+                    timeout_seconds=YOUTUBE_TRANSCRIPTION_TIMEOUT_SECONDS,
+                )
+                acquisition_ms = elapsed_milliseconds(acquisition_started_at)
+                acquisition = youtube_acquisition_provenance(
+                    acquisition_result,
+                    elapsed_ms=acquisition_ms,
+                )
+                staging_started_at = time.monotonic()
+                reference = staging.put_staged_file(
+                    audio_path,
+                    {
+                        "artifact_kind": "source-audio",
+                        "media_type": source_audio_media_type(
+                            acquisition_result.get("container")
+                        ),
+                        "schema": SOURCE_AUDIO_SCHEMA,
+                    },
+                    acquisition_id=str(uuid.uuid4()),
+                    expires_at=(
+                        int(time.time() * 1000) + SOURCE_AUDIO_RETENTION_MILLISECONDS
+                    ),
+                )
+                staging_upload_ms = elapsed_milliseconds(staging_started_at)
+            print(
+                f"staged {reference['byte_length']} bytes as {reference['digest']}",
+                flush=True,
+            )
+            transcription_spec = staged_transcription_spec(
+                source=source,
+                source_audio=reference,
+                acquisition=acquisition,
+                handler=PRODUCTION_TRANSCRIPTION_HANDLER,
+            )
+            analysis_spec = educational_video_analysis_spec(
+                source=source,
+                transcript={
+                    "kind": "job-output",
+                    "job_id": transcription_job_id,
+                    "artifact_kind": "transcript",
+                    "schema": {"id": "watchcraft.transcript", "version": 1},
+                },
+                source_metadata=source_metadata,
+                video=f"{video_id}.youtube",
+            )
+            submission_attempted = True
+            submission_arguments = {}
+            if project_execution is not None:
+                submission_arguments = {
+                    "run_id": run_id,
+                    "command_prefix": command_prefix,
+                }
+            submitted = submit_pipeline(
+                control,
+                request=pipeline_request,
+                jobs=[
+                    {"job_id": transcription_job_id, "spec": transcription_spec},
+                    {"job_id": analysis_job_id, "spec": analysis_spec},
+                ],
+                **submission_arguments,
+            )
         run = submitted["run"]
-        print(
-            f"submitted run {run['run_id']} with transcription {transcription_job_id} "
-            f"and analysis {analysis_job_id}",
-            flush=True,
-        )
-        approved = control.post("/pipelines/approve", {
-            "run_id": run["run_id"],
-            "command_id": str(uuid.uuid4()),
-            "expected_revision": run["revision"],
-            "actor": "watchcraft-author-cli",
-            "approval_sha256": run["approval_sha256"],
-        })
-        ready_by_id = {job["job_id"]: job for job in approved["jobs"]}
+        if existing.get("run") is None:
+            print(
+                f"submitted run {run['run_id']} with transcription "
+                f"{transcription_job_id} and analysis {analysis_job_id}",
+                flush=True,
+            )
+        if run["state"] == "planned":
+            approved = control.post("/pipelines/approve", {
+                "run_id": run["run_id"],
+                "command_id": str(uuid.uuid4()),
+                "expected_revision": run["revision"],
+                "actor": "watchcraft-author-cli",
+                "approval_sha256": run["approval_sha256"],
+            })
+            jobs_by_id = {job["job_id"]: job for job in approved["jobs"]}
+        else:
+            jobs_by_id = {job["job_id"]: job for job in submitted["jobs"]}
 
-        transcription_pending = dispatch_submission(
-            control,
-            ready_by_id[transcription_job_id],
-        )
-        print(
-            f"dispatched transcription {transcription_job_id} via "
-            f"{dispatch_workflow(transcription_pending)}",
-            flush=True,
+        _resume_pipeline_job(
+            control, jobs_by_id[transcription_job_id], "transcription"
         )
         transcription_wait_started_at = time.monotonic()
         transcription_completed = wait_for_terminal_job(
@@ -3957,12 +4175,7 @@ def run_youtube_video_pipeline(args: argparse.Namespace) -> int:
         print(f"deleted staged source audio {reference['key']}", flush=True)
         reference = None
 
-        analysis_pending = dispatch_submission(control, ready_by_id[analysis_job_id])
-        print(
-            f"dispatched analysis {analysis_job_id} via "
-            f"{dispatch_workflow(analysis_pending)}",
-            flush=True,
-        )
+        _resume_pipeline_job(control, jobs_by_id[analysis_job_id], "analysis")
         analysis_wait_started_at = time.monotonic()
         analysis_completed = wait_for_terminal_job(
             control,
@@ -3991,7 +4204,7 @@ def run_youtube_video_pipeline(args: argparse.Namespace) -> int:
         ):
             raise RuntimeError("Pipeline educational-video analysis returned an invalid result")
     except Exception:
-        if submitted is None and reference is not None:
+        if submitted is None and not submission_attempted and reference is not None:
             staging.delete(reference)
         raise
 
@@ -4045,6 +4258,16 @@ def run_youtube_video_pipeline(args: argparse.Namespace) -> int:
             },
         },
     }
+    if project_execution is not None:
+        summary["plan_execution"] = {
+            "plan_job_id": project_execution["plan_job_id"],
+            "plan_artifact_sha256": project_execution["plan_artifact_sha256"],
+            "plan_hash": project_execution["plan_hash"],
+            "project_id": project_execution["project_id"],
+            "project_revision": project_execution["project_revision"],
+            "item_id": project_execution["item_id"],
+            "logical_tasks": project_execution["logical_tasks"],
+        }
     print(f"completed run {completed_run['run_id']} in {format_elapsed(total_ms)}", flush=True)
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
     print(
@@ -4320,6 +4543,45 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         default="auto",
         help="Read-only result credential source (default: auto)",
     )
+    process_project = commands.add_parser(
+        "process-project",
+        parents=[credentials],
+        help="Execute one item from an immutable project processing plan",
+        description=(
+            "Verify an immutable project-processing plan and its authoritative "
+            "project revision, then execute exactly one planned YouTube item through "
+            "local acquisition, MLX transcription, and educational analysis. "
+            "Deterministic queue identities make reruns resume the same pipeline."
+        ),
+    )
+    process_project.add_argument("--plan-job-id", required=True)
+    selection = process_project.add_mutually_exclusive_group(required=True)
+    selection.add_argument(
+        "--limit",
+        type=int,
+        help="Process the first N unfiltered plan items; currently must be 1",
+    )
+    selection.add_argument(
+        "--item",
+        dest="item_id",
+        help="Process the exact plan item ID",
+    )
+    process_project.add_argument(
+        "--transcription-timeout-seconds", type=int, default=3600
+    )
+    process_project.add_argument("--analysis-timeout-seconds", type=int, default=3600)
+    process_project.add_argument(
+        "--r2-credentials-source",
+        choices=("auto", "keychain", "environment"),
+        default="auto",
+        help="Read-only result credential source (default: auto)",
+    )
+    process_project.add_argument(
+        "--r2-staging-credentials-source",
+        choices=("auto", "keychain", "environment"),
+        default="auto",
+        help="Temporary source-media uploader credential source (default: auto)",
+    )
     queued_analysis = commands.add_parser(
         "analyze-transcript",
         parents=[credentials],
@@ -4583,6 +4845,8 @@ def run_queue_command(args: argparse.Namespace) -> int:
         return run_iterate_project(args)
     if args.queue_command == "plan-project":
         return run_plan_project(args)
+    if args.queue_command == "process-project":
+        return run_process_project(args)
     if args.queue_command == "analyze-transcript":
         return run_queued_video_analysis(args)
 

@@ -993,6 +993,16 @@ test("a pipeline run gates analysis on transcription and completes after both jo
     "pipeline-analysis",
   ] });
   expect(submitted.jobs[1].spec.dependencies).toEqual([dependency]);
+  const retrievedResponse = await post(t, "/authoring/operator/pipelines/get", {
+    run_id: "pipeline-run",
+  }, operatorToken);
+  expect(retrievedResponse.status).toBe(200);
+  expect(await retrievedResponse.json()).toEqual(submitted);
+  const missingResponse = await post(t, "/authoring/operator/pipelines/get", {
+    run_id: "missing-pipeline-run",
+  }, operatorToken);
+  expect(missingResponse.status).toBe(200);
+  expect(await missingResponse.json()).toEqual({ run: null, jobs: [] });
   const replayedSubmission = await post(t, "/authoring/operator/pipelines/submit", {
     run_id: "pipeline-run",
     command_prefix: "pipeline-submit",

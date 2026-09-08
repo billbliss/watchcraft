@@ -529,6 +529,33 @@ timeout bounds; the printed `queue result` command retrieves the full plan. The
 planner requires capability registry `2026-09-08.2` to be published and activated
 after its code is available on `main`. It does not require another Convex deployment.
 
+Execute exactly one item from a successful immutable plan:
+
+```bash
+./authoring/watchcraft-author queue process-project \
+  --plan-job-id PLAN_JOB_ID \
+  --limit 1 \
+  --operator-token-source keychain \
+  --r2-staging-credentials-source keychain \
+  --r2-credentials-source keychain
+```
+
+Use `--item ITEM_ID` instead of `--limit 1` to choose a specific plan item. The
+initial executor deliberately refuses larger limits. It verifies that the plan still
+matches the current authoritative project revision and accepted snapshot, then uses
+the existing local YouTube acquisition, MLX transcription, and educational-analysis
+pipeline. Multiple placements of the selected video do not produce duplicate work.
+
+The exact plan artifact digest and item identity deterministically derive the pipeline run,
+transcription-job, and analysis-job IDs. The run request records the plan job, project
+revision, item ID, and logical task IDs. Rerunning the command retrieves and resumes
+that pipeline instead of downloading or submitting it again. A staged input left by a
+failure before pipeline submission expires under the existing R2 retention policy.
+
+`process-project` adds the read-only `/pipelines/get` Convex endpoint, so deploy the
+Convex functions with `npx convex deploy` after pushing the code. It composes existing
+handlers and does not require another capability-registry publication.
+
 `queue result` resolves the artifact reference from the authoritative completed job,
 downloads the object from private R2, and verifies its declared byte length and SHA-256
 digest. JSON is displayed in readable form by default; `--output PATH` writes the exact

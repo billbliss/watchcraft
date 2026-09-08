@@ -505,6 +505,23 @@ export const getSubmission = internalQuery({
   },
 });
 
+export const getPipeline = internalQuery({
+  args: { run_id: v.string() },
+  returns: v.any(),
+  handler: async (ctx, args) => {
+    const storedRun = await readableRunDocument(ctx, args.run_id);
+    if (!storedRun) return { run: null, jobs: [] };
+    const run = parseAuthoringRun(storedRun.aggregate);
+    const jobs: AuthoringJob[] = [];
+    for (const jobId of run.job_ids) {
+      const storedJob = await readableJobDocument(ctx, jobId);
+      if (!storedJob) throw new Error(`Pipeline job ${jobId} is missing.`);
+      jobs.push(parseAuthoringJob(storedJob.aggregate));
+    }
+    return { run, jobs };
+  },
+});
+
 export const submitJob = internalMutation({
   args: {
     job_id: v.string(),

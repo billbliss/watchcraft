@@ -157,6 +157,8 @@ The planner creates one item plan per unique snapshot item, not per placement. E
 
 The plan fixes stable logical task IDs, handler and execution-profile identities, dependency edges, output roles, and conservative worker timeout bounds. It does not claim that a downstream job can be reused before its exact content-addressed input exists. Acquisition reuse is decided only after an audio digest is known; transcription reuse is decided against that audio digest and an exact job specification; analysis reuse is decided against the authoritative transcript digest and its exact job specification. Execution realizes those logical tasks into immutable `AuthoringJobSpec` records as their inputs become available and binds operator approval to that realized plan.
 
+The first executor realizes one selected plan item at a time. Its pipeline run and worker-job IDs are deterministic functions of the exact plan artifact digest, item ID, and task role. The durable run request records the source plan job, semantic plan hash, and logical task IDs, while the exact staged-audio digest remains part of the realized transcription specification. Before acquiring media, a retry looks up the deterministic run; if it exists, execution verifies its plan binding and resumes its current job states rather than creating another pipeline. This provides a bounded production seam before multi-item scheduling is enabled.
+
 Until historical timing data is calibrated, estimates are intentionally limited to known source duration coverage and the sum of registered worker timeout upper bounds. They do not predict queue latency, local acquisition time, or wall-clock time under concurrency.
 
 ## Metadata observation and approval

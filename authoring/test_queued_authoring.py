@@ -275,6 +275,17 @@ class QueuedAuthoringTests(unittest.TestCase):
         ])
         self.assertEqual(planner.project_id, "essence-of-linear-algebra")
         self.assertEqual(planner.timeout_seconds, 900)
+        project_processing = build_parser().parse_args([
+            "queue", "process-project",
+            "--plan-job-id", "plan-job-1",
+            "--limit", "1",
+            "--operator-token-source", "keychain",
+            "--r2-staging-credentials-source", "keychain",
+            "--r2-credentials-source", "keychain",
+        ])
+        self.assertEqual(project_processing.plan_job_id, "plan-job-1")
+        self.assertEqual(project_processing.limit, 1)
+        self.assertIsNone(project_processing.item_id)
         project_import = build_parser().parse_args([
             "queue", "project-import", "project.json",
         ])
@@ -453,6 +464,154 @@ class QueuedAuthoringTests(unittest.TestCase):
             queued_authoring.PROJECT_PROCESSING_PLANNER_HANDLER[0],
         )
         self.assertIn("Full plan:", output.getvalue())
+
+    def test_process_project_executes_one_plan_item_with_deterministic_context(self):
+        snapshot = {
+            "store": "r2",
+            "algorithm": "sha256",
+            "digest": "b" * 64,
+            "byte_length": 100,
+            "media_type": "application/json",
+            "artifact_kind": "collection-iterator-snapshot",
+            "schema": queued_authoring.COLLECTION_ITERATOR_SNAPSHOT_SCHEMA,
+            "key": "objects/sha256/bb/" + "b" * 62,
+        }
+        project = json.loads((
+            queued_authoring.CATALOG_PROJECT_SCHEMA_PATH.parent
+            / "examples/current-playlist.project.json"
+        ).read_text(encoding="utf-8"))
+        project["iterator"]["accepted_snapshot"] = snapshot
+        item = {
+            "item_id": "youtube:fNk_zzaMoSs",
+            "title": "Vectors",
+            "source": {
+                "media_asset_id": "youtube:fNk_zzaMoSs",
+                "media_type": "youtube",
+                "media_id": "fNk_zzaMoSs",
+                "canonical_url": "https://www.youtube.com/watch?v=fNk_zzaMoSs",
+            },
+            "stages": [
+                {
+                    "stage": "metadata-enrichment",
+                    "task_id": "metadata-task",
+                    "handler": {"id": "watchcraft.metadata.youtube", "version": "1"},
+                    "executor": "operator-local",
+                    "disposition": "required",
+                },
+                {
+                    "stage": "source-acquisition",
+                    "task_id": "acquisition-task",
+                    "handler": {"id": "watchcraft.acquire.youtube-audio", "version": "1"},
+                    "executor": "operator-local",
+                    "disposition": "required",
+                },
+                {
+                    "stage": "transcription",
+                    "task_id": "transcription-task",
+                    "handler": {
+                        "id": queued_authoring.PRODUCTION_TRANSCRIPTION_HANDLER[0],
+                        "version": "1",
+                    },
+                    "executor": "registered-worker",
+                    "disposition": "required",
+                },
+                {
+                    "stage": "analysis",
+                    "task_id": "analysis-task",
+                    "handler": {
+                        "id": queued_authoring.EDUCATIONAL_VIDEO_ANALYSIS_HANDLER[0],
+                        "version": "1",
+                    },
+                    "executor": "registered-worker",
+                    "disposition": "required",
+                },
+            ],
+        }
+        plan = {
+            "project": {
+                "project_id": project["project_id"],
+                "revision": project["revision"],
+            },
+            "source_snapshot": snapshot,
+            "plan_hash": "c" * 64,
+            "items": [item],
+        }
+        plan_job = {
+            "job_id": "plan-job-1",
+            "state": "succeeded",
+            "spec": {"handler": {
+                "id": queued_authoring.PROJECT_PROCESSING_PLANNER_HANDLER[0],
+                "version": "1",
+            }},
+            "result": {
+                "store": "r2",
+                "algorithm": "sha256",
+                "digest": "d" * 64,
+                "byte_length": 1_000,
+                "media_type": "application/json",
+                "artifact_kind": "project-processing-plan",
+                "schema": queued_authoring.PROJECT_PROCESSING_PLAN_SCHEMA,
+                "key": "objects/sha256/dd/" + "d" * 62,
+            },
+        }
+        control = Mock()
+
+        def post(path, payload):
+            if path == "/submissions/get":
+                return {"job": plan_job, "run": {"run_id": "plan-run-1"}}
+            if path == "/projects/get":
+                return {"project": project}
+            raise AssertionError(path)
+
+        control.post.side_effect = post
+        args = build_parser().parse_args([
+            "queue", "process-project",
+            "--plan-job-id", "plan-job-1",
+            "--limit", "1",
+        ])
+        captured = {}
+
+        def execute(pipeline_args, *, project_execution):
+            captured.update(
+                youtube_url=pipeline_args.youtube_url,
+                project_execution=project_execution,
+            )
+            return 0
+
+        with patch("queued_authoring.operator_client", return_value=control), patch(
+            "queued_authoring.verified_json_result", return_value=plan
+        ), patch(
+            "queued_authoring.validate_project_processing_plan"
+        ), patch(
+            "queued_authoring.run_youtube_video_pipeline", side_effect=execute
+        ):
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(queued_authoring.run_process_project(args), 0)
+        self.assertEqual(
+            captured["youtube_url"],
+            "https://www.youtube.com/watch?v=fNk_zzaMoSs",
+        )
+        self.assertEqual(captured["project_execution"], {
+            "plan_job_id": "plan-job-1",
+            "plan_artifact_sha256": "d" * 64,
+            "plan_hash": "c" * 64,
+            "project_id": project["project_id"],
+            "project_revision": project["revision"],
+            "item_id": item["item_id"],
+            "logical_tasks": {
+                "metadata-enrichment": "metadata-task",
+                "source-acquisition": "acquisition-task",
+                "transcription": "transcription-task",
+                "analysis": "analysis-task",
+            },
+        })
+        first = queued_authoring.stable_project_execution_id(
+            "d" * 64, item["item_id"], "run"
+        )
+        second = queued_authoring.stable_project_execution_id(
+            "d" * 64, item["item_id"], "run"
+        )
+        self.assertEqual(first, second)
 
     def test_result_parser_exposes_separate_control_and_artifact_credentials(self):
         args = build_parser().parse_args([
@@ -1676,6 +1835,153 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertIn('"worker_attempt_ms": 2000', output.getvalue())
         self.assertIn("Full transcript:", output.getvalue())
         self.assertIn("Full analysis:", output.getvalue())
+
+    def test_project_item_execution_resumes_the_same_completed_pipeline(self):
+        plan_hash = "c" * 64
+        item_id = "youtube:WPtpUu3uIUI"
+        execution = {
+            "plan_job_id": "plan-job-1",
+            "plan_artifact_sha256": "d" * 64,
+            "plan_hash": plan_hash,
+            "project_id": "project-1",
+            "project_revision": 2,
+            "item_id": item_id,
+            "logical_tasks": {
+                "metadata-enrichment": "metadata-task",
+                "source-acquisition": "acquisition-task",
+                "transcription": "transcription-task",
+                "analysis": "analysis-task",
+            },
+        }
+        run_id = queued_authoring.stable_project_execution_id(
+            execution["plan_artifact_sha256"], item_id, "run"
+        )
+        transcription_job_id = queued_authoring.stable_project_execution_id(
+            execution["plan_artifact_sha256"], item_id, "transcription"
+        )
+        analysis_job_id = queued_authoring.stable_project_execution_id(
+            execution["plan_artifact_sha256"], item_id, "analysis"
+        )
+        source = {"media_asset_id": item_id}
+        reference = staged_audio_reference()
+        acquisition = staged_acquisition(reference)
+        transcription_spec = queued_authoring.staged_transcription_spec(
+            source=source,
+            source_audio=reference,
+            acquisition=acquisition,
+            handler=queued_authoring.PRODUCTION_TRANSCRIPTION_HANDLER,
+        )
+        analysis_spec = queued_authoring.educational_video_analysis_spec(
+            source=source,
+            transcript={
+                "kind": "job-output",
+                "job_id": transcription_job_id,
+                "artifact_kind": "transcript",
+                "schema": {"id": "watchcraft.transcript", "version": 1},
+            },
+            source_metadata=youtube_metadata(),
+            video="WPtpUu3uIUI.youtube",
+        )
+        transcript_artifact = transcript_reference()
+        analysis_artifact = {
+            **transcript_artifact,
+            "digest": "e" * 64,
+            "artifact_kind": "analysis",
+            "schema": queued_authoring.VIDEO_ANALYSIS_SCHEMA,
+            "key": "objects/sha256/ee/" + "e" * 62,
+        }
+        request = {
+            "kind": "project-item-processing",
+            "plan_job_id": execution["plan_job_id"],
+            "plan_artifact_sha256": execution["plan_artifact_sha256"],
+            "plan_hash": plan_hash,
+            "project_id": execution["project_id"],
+            "project_revision": 2,
+            "item_id": item_id,
+            "logical_tasks": execution["logical_tasks"],
+            "source_id": item_id,
+            "stages": ["transcription", "educational-video-analysis"],
+        }
+        run = {
+            "run_id": run_id,
+            "request": request,
+            "state": "complete",
+            "created_at": 1_000,
+            "updated_at": 9_000,
+        }
+        jobs = [
+            {
+                "job_id": transcription_job_id,
+                "state": "succeeded",
+                "spec": transcription_spec,
+                "result": transcript_artifact,
+            },
+            {
+                "job_id": analysis_job_id,
+                "state": "succeeded",
+                "spec": analysis_spec,
+                "result": analysis_artifact,
+            },
+        ]
+        control = Mock()
+        control.post.return_value = {"run": run, "jobs": jobs}
+        staging = Mock()
+
+        def wait(_control, job_id, _timeout):
+            job = next(candidate for candidate in jobs if candidate["job_id"] == job_id)
+            return {"job": job, "run": run}
+
+        def verified(job, _source):
+            if job["job_id"] == transcription_job_id:
+                return {
+                    "kind": "watchcraft.transcript",
+                    "text": "Use a pinch grip.",
+                    "segments": [{"text": "Use a pinch grip."}],
+                    "provenance": {
+                        "handler_id": queued_authoring.PRODUCTION_TRANSCRIPTION_HANDLER[0],
+                    },
+                }
+            return {
+                "schema_version": 2,
+                "video": "WPtpUu3uIUI.youtube",
+                "summary": "A knife-skills lesson.",
+                "provenance": {
+                    "handler_id": queued_authoring.EDUCATIONAL_VIDEO_ANALYSIS_HANDLER[0],
+                    "transcription_job_id": transcription_job_id,
+                    "transcript": transcript_artifact,
+                },
+            }
+
+        args = build_parser().parse_args([
+            "queue", "process-youtube", "WPtpUu3uIUI",
+            "--r2-staging-credentials-source", "keychain",
+            "--r2-credentials-source", "keychain",
+        ])
+        with patch("queued_authoring.operator_client", return_value=control), patch(
+            "queued_authoring.r2_staging_writer", return_value=staging
+        ), patch(
+            "queued_authoring.download_youtube_audio"
+        ) as download, patch(
+            "queued_authoring.youtube_source_metadata"
+        ) as metadata, patch(
+            "queued_authoring.submit_pipeline"
+        ) as submit, patch(
+            "queued_authoring.wait_for_terminal_job", side_effect=wait
+        ), patch(
+            "queued_authoring.verified_json_result", side_effect=verified
+        ):
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    queued_authoring.run_youtube_video_pipeline(
+                        args, project_execution=execution
+                    ),
+                    0,
+                )
+        control.post.assert_called_once_with("/pipelines/get", {"run_id": run_id})
+        download.assert_not_called()
+        metadata.assert_not_called()
+        submit.assert_not_called()
+        staging.delete.assert_called_once_with(reference)
 
     def test_analyze_transcript_runs_existing_analysis_as_a_dependent_job(self):
         transcript = transcript_reference()

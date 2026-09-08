@@ -74,6 +74,7 @@ http.route({ path: "/authoring/operator/submissions/get", method: "POST", handle
 http.route({ path: "/authoring/operator/submissions/submit", method: "POST", handler: mutationRoute(internal.authoringInternal.submitJob, operatorVerifier) });
 http.route({ path: "/authoring/operator/pipelines/submit", method: "POST", handler: mutationRoute(internal.authoringInternal.submitPipeline, operatorVerifier) });
 http.route({ path: "/authoring/operator/pipelines/approve", method: "POST", handler: mutationRoute(internal.authoringInternal.approvePipeline, operatorVerifier) });
+http.route({ path: "/authoring/operator/pipelines/get", method: "POST", handler: queryRoute(internal.authoringInternal.getPipeline, operatorVerifier) });
 http.route({ path: "/authoring/operator/submissions/approve", method: "POST", handler: mutationRoute(internal.authoringInternal.approveSubmission, operatorVerifier) });
 http.route({ path: "/authoring/operator/submissions/request-dispatch", method: "POST", handler: mutationRoute(internal.authoringInternal.requestDispatch, operatorVerifier) });
 http.route({ path: "/authoring/operator/submissions/cancel", method: "POST", handler: mutationRoute(internal.authoringInternal.cancelJob, operatorVerifier) });
