@@ -286,6 +286,16 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertEqual(project_processing.plan_job_id, "plan-job-1")
         self.assertEqual(project_processing.limit, 1)
         self.assertIsNone(project_processing.item_id)
+        self.assertFalse(project_processing.process_all)
+        self.assertEqual(project_processing.concurrency, 2)
+        all_project_processing = build_parser().parse_args([
+            "queue", "process-project",
+            "--plan-job-id", "plan-job-1",
+            "--all",
+            "--concurrency", "3",
+        ])
+        self.assertTrue(all_project_processing.process_all)
+        self.assertEqual(all_project_processing.concurrency, 3)
         project_import = build_parser().parse_args([
             "queue", "project-import", "project.json",
         ])
@@ -571,12 +581,22 @@ class QueuedAuthoringTests(unittest.TestCase):
         ])
         captured = {}
 
-        def execute(pipeline_args, *, project_execution):
+        def execute(pipeline_args, *, project_execution, emit_result):
             captured.update(
                 youtube_url=pipeline_args.youtube_url,
                 project_execution=project_execution,
+                emit_result=emit_result,
             )
-            return 0
+            return {
+                "run_id": "item-run-1",
+                "state": "complete",
+                "jobs": {
+                    "transcription": {"job_id": "transcription-job-1"},
+                    "analysis": {"job_id": "analysis-job-1"},
+                },
+                "timing": {"local": {"command_total_ms": 1_000}},
+                "plan_execution": {"disposition": "executed"},
+            }
 
         with patch("queued_authoring.operator_client", return_value=control), patch(
             "queued_authoring.verified_json_result", return_value=plan
@@ -591,6 +611,7 @@ class QueuedAuthoringTests(unittest.TestCase):
             captured["youtube_url"],
             "https://www.youtube.com/watch?v=fNk_zzaMoSs",
         )
+        self.assertFalse(captured["emit_result"])
         self.assertEqual(captured["project_execution"], {
             "plan_job_id": "plan-job-1",
             "plan_artifact_sha256": "d" * 64,
@@ -612,6 +633,131 @@ class QueuedAuthoringTests(unittest.TestCase):
             "d" * 64, item["item_id"], "run"
         )
         self.assertEqual(first, second)
+
+    def test_process_project_executes_all_items_and_reports_resumed_work(self):
+        snapshot = {
+            "store": "r2",
+            "algorithm": "sha256",
+            "digest": "b" * 64,
+            "byte_length": 100,
+            "media_type": "application/json",
+            "artifact_kind": "collection-iterator-snapshot",
+            "schema": queued_authoring.COLLECTION_ITERATOR_SNAPSHOT_SCHEMA,
+            "key": "objects/sha256/bb/" + "b" * 62,
+        }
+        project = json.loads((
+            queued_authoring.CATALOG_PROJECT_SCHEMA_PATH.parent
+            / "examples/current-playlist.project.json"
+        ).read_text(encoding="utf-8"))
+        project["iterator"]["accepted_snapshot"] = snapshot
+
+        def item(video_id, title):
+            return {
+                "item_id": f"youtube:{video_id}",
+                "title": title,
+                "source": {
+                    "media_asset_id": f"youtube:{video_id}",
+                    "media_type": "youtube",
+                    "media_id": video_id,
+                    "canonical_url": f"https://www.youtube.com/watch?v={video_id}",
+                },
+                "stages": [
+                    {
+                        "stage": stage,
+                        "task_id": f"{video_id}:{stage}",
+                        "handler": {"id": handler, "version": "1"},
+                        "executor": executor,
+                        "disposition": "required",
+                    }
+                    for stage, handler, executor in [
+                        ("metadata-enrichment", "watchcraft.metadata.youtube", "operator-local"),
+                        ("source-acquisition", "watchcraft.acquire.youtube-audio", "operator-local"),
+                        ("transcription", queued_authoring.PRODUCTION_TRANSCRIPTION_HANDLER[0], "registered-worker"),
+                        ("analysis", queued_authoring.EDUCATIONAL_VIDEO_ANALYSIS_HANDLER[0], "registered-worker"),
+                    ]
+                ],
+            }
+
+        items = [
+            item("fNk_zzaMoSs", "Vectors"),
+            item("k7RM-ot2NWY", "Linear combinations"),
+        ]
+        plan = {
+            "project": {
+                "project_id": project["project_id"],
+                "revision": project["revision"],
+            },
+            "source_snapshot": snapshot,
+            "plan_hash": "c" * 64,
+            "items": items,
+        }
+        plan_job = {
+            "job_id": "plan-job-1",
+            "state": "succeeded",
+            "spec": {"handler": {
+                "id": queued_authoring.PROJECT_PROCESSING_PLANNER_HANDLER[0],
+                "version": "1",
+            }},
+            "result": {
+                "store": "r2",
+                "algorithm": "sha256",
+                "digest": "d" * 64,
+                "byte_length": 1_000,
+                "media_type": "application/json",
+                "artifact_kind": "project-processing-plan",
+                "schema": queued_authoring.PROJECT_PROCESSING_PLAN_SCHEMA,
+                "key": "objects/sha256/dd/" + "d" * 62,
+            },
+        }
+        control = Mock()
+
+        def post(path, payload):
+            if path == "/submissions/get":
+                return {"job": plan_job, "run": {"run_id": "plan-run-1"}}
+            if path == "/projects/get":
+                return {"project": project}
+            raise AssertionError(path)
+
+        control.post.side_effect = post
+        args = build_parser().parse_args([
+            "queue", "process-project",
+            "--plan-job-id", "plan-job-1",
+            "--all",
+            "--concurrency", "2",
+        ])
+
+        def execute(pipeline_args, *, project_execution, emit_result):
+            video_id = queued_authoring.youtube_video_id(pipeline_args.youtube_url)
+            return {
+                "run_id": f"run-{video_id}",
+                "state": "complete",
+                "jobs": {
+                    "transcription": {"job_id": f"transcription-{video_id}"},
+                    "analysis": {"job_id": f"analysis-{video_id}"},
+                },
+                "timing": {"local": {"command_total_ms": 1_000}},
+                "plan_execution": {
+                    "disposition": (
+                        "already-complete" if video_id == "fNk_zzaMoSs" else "executed"
+                    )
+                },
+            }
+
+        output = io.StringIO()
+        with patch("queued_authoring.operator_client", return_value=control), patch(
+            "queued_authoring.verified_json_result", return_value=plan
+        ), patch(
+            "queued_authoring.validate_project_processing_plan"
+        ), patch(
+            "queued_authoring.run_youtube_video_pipeline", side_effect=execute
+        ):
+            with redirect_stdout(output):
+                self.assertEqual(queued_authoring.run_process_project(args), 0)
+        result = output.getvalue()
+        self.assertIn('"selected_items": 2', result)
+        self.assertIn('"succeeded": 2', result)
+        self.assertIn('"already_complete": 1', result)
+        self.assertIn('"concurrency": 2', result)
 
     def test_result_parser_exposes_separate_control_and_artifact_credentials(self):
         args = build_parser().parse_args([

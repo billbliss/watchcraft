@@ -529,28 +529,36 @@ timeout bounds; the printed `queue result` command retrieves the full plan. The
 planner requires capability registry `2026-09-08.2` to be published and activated
 after its code is available on `main`. It does not require another Convex deployment.
 
-Execute exactly one item from a successful immutable plan:
+Execute every item from a successful immutable plan with bounded concurrency:
 
 ```bash
 ./authoring/watchcraft-author queue process-project \
   --plan-job-id PLAN_JOB_ID \
-  --limit 1 \
+  --all \
+  --concurrency 2 \
   --operator-token-source keychain \
   --r2-staging-credentials-source keychain \
   --r2-credentials-source keychain
 ```
 
-Use `--item ITEM_ID` instead of `--limit 1` to choose a specific plan item. The
-initial executor deliberately refuses larger limits. It verifies that the plan still
-matches the current authoritative project revision and accepted snapshot, then uses
-the existing local YouTube acquisition, MLX transcription, and educational-analysis
-pipeline. Multiple placements of the selected video do not produce duplicate work.
+Use `--item ITEM_ID` to choose a specific plan item or `--limit N` to process the
+first N items. `--concurrency` defaults to two and is bounded from one through eight.
+The executor verifies that the plan still matches the current authoritative project
+revision and accepted snapshot, then uses the existing local YouTube acquisition, MLX
+transcription, and educational-analysis pipeline. Multiple placements of a selected
+video do not produce duplicate work.
 
 The exact plan artifact digest and item identity deterministically derive the pipeline run,
 transcription-job, and analysis-job IDs. The run request records the plan job, project
 revision, item ID, and logical task IDs. Rerunning the command retrieves and resumes
-that pipeline instead of downloading or submitting it again. A staged input left by a
-failure before pipeline submission expires under the existing R2 retention policy.
+each pipeline instead of downloading or submitting it again. Completed items are
+verified and reported as already complete; incomplete items resume from their durable
+run and job states. The command waits for all selected items, prints per-item completion
+lines and a compact aggregate summary, and returns an error after the summary if any
+item failed. Rerun the same command to continue only the unfinished work. A staged input
+left by a failure before pipeline submission expires under the existing R2 retention
+policy. Retryable and interrupted jobs resume automatically; terminal failures still
+require the underlying problem to be addressed before another attempt can be created.
 
 `process-project` adds the read-only `/pipelines/get` Convex endpoint, so deploy the
 Convex functions with `npx convex deploy` after pushing the code. It composes existing

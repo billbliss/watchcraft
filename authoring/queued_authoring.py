@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import math
@@ -3526,17 +3527,7 @@ def run_plan_project(args: argparse.Namespace) -> int:
     return 0
 
 
-def executable_project_plan_item(
-    plan: dict[str, Any], item_id: str | None = None
-) -> dict[str, Any]:
-    candidates = plan["items"]
-    if item_id is not None:
-        candidates = [item for item in candidates if item["item_id"] == item_id]
-        if not candidates:
-            raise ValueError(f"Processing plan has no item {item_id!r}")
-    if not candidates:
-        raise ValueError("Processing plan contains no items")
-    item = candidates[0]
+def validate_executable_project_plan_item(item: dict[str, Any]) -> dict[str, Any]:
     stages = item["stages"]
     expected = [
         ("metadata-enrichment", "watchcraft.metadata.youtube", "operator-local"),
@@ -3544,7 +3535,7 @@ def executable_project_plan_item(
         ("transcription", PRODUCTION_TRANSCRIPTION_HANDLER[0], "registered-worker"),
         ("analysis", EDUCATIONAL_VIDEO_ANALYSIS_HANDLER[0], "registered-worker"),
     ]
-    if any(
+    if len(stages) != len(expected) or any(
         stage["stage"] != stage_name
         or stage["handler"] != {
             "id": handler_id,
@@ -3565,9 +3556,88 @@ def executable_project_plan_item(
     return item
 
 
+def executable_project_plan_items(
+    plan: dict[str, Any],
+    *,
+    item_id: str | None = None,
+    limit: int | None = None,
+    process_all: bool = False,
+) -> list[dict[str, Any]]:
+    candidates = plan["items"]
+    if item_id is not None:
+        candidates = [item for item in candidates if item["item_id"] == item_id]
+        if not candidates:
+            raise ValueError(f"Processing plan has no item {item_id!r}")
+    elif limit is not None:
+        if limit < 1:
+            raise ValueError("--limit must be positive")
+        candidates = candidates[:limit]
+    elif not process_all:
+        raise ValueError("Choose --all, --limit, or --item")
+    if not candidates:
+        raise ValueError("Processing plan contains no items")
+    return [validate_executable_project_plan_item(item) for item in candidates]
+
+
+def executable_project_plan_item(
+    plan: dict[str, Any], item_id: str | None = None
+) -> dict[str, Any]:
+    """Compatibility helper for callers selecting one plan item."""
+    return executable_project_plan_items(
+        plan,
+        item_id=item_id,
+        limit=None if item_id is not None else 1,
+    )[0]
+
+
+def project_item_execution_context(
+    *,
+    args: argparse.Namespace,
+    plan: dict[str, Any],
+    plan_reference: dict[str, Any],
+    item: dict[str, Any],
+) -> dict[str, Any]:
+    stages = {stage["stage"]: stage for stage in item["stages"]}
+    return {
+        "plan_job_id": args.plan_job_id,
+        "plan_artifact_sha256": plan_reference["digest"],
+        "plan_hash": plan["plan_hash"],
+        "project_id": plan["project"]["project_id"],
+        "project_revision": plan["project"]["revision"],
+        "item_id": item["item_id"],
+        "logical_tasks": {
+            name: stages[name]["task_id"]
+            for name in (
+                "metadata-enrichment",
+                "source-acquisition",
+                "transcription",
+                "analysis",
+            )
+        },
+    }
+
+
+def compact_project_item_execution(
+    item: dict[str, Any], summary: dict[str, Any]
+) -> dict[str, Any]:
+    return {
+        "item_id": item["item_id"],
+        "title": item["title"],
+        "run_id": summary["run_id"],
+        "state": summary["state"],
+        "disposition": summary["plan_execution"]["disposition"],
+        "jobs": {
+            role: summary["jobs"][role]["job_id"]
+            for role in ("transcription", "analysis")
+        },
+        "command_total_ms": summary["timing"]["local"]["command_total_ms"],
+    }
+
+
 def run_process_project(args: argparse.Namespace) -> int:
-    if args.limit is not None and args.limit != 1:
-        raise ValueError("The initial project executor requires --limit 1")
+    if args.concurrency < 1 or args.concurrency > 8:
+        raise ValueError("--concurrency must be between 1 and 8")
+    command_started_at = time.monotonic()
     control = operator_client(args.operator_token_source)
     plan_submission = control.post(
         "/submissions/get", {"job_id": args.plan_job_id}
@@ -3606,33 +3676,97 @@ def run_process_project(args: argparse.Namespace) -> int:
         raise RuntimeError(
             "Processing plan is stale relative to the authoritative catalog project"
         )
-    item = executable_project_plan_item(plan, args.item_id)
+    items = executable_project_plan_items(
+        plan,
+        item_id=args.item_id,
+        limit=args.limit,
+        process_all=args.process_all,
+    )
+    concurrency = min(args.concurrency, len(items))
     print(
-        f"executing 1 of {len(plan['items'])} planned items: {item['title']}",
+        f"executing {len(items)} of {len(plan['items'])} planned items "
+        f"with concurrency {concurrency}",
         flush=True,
     )
-    stages = {stage["stage"]: stage for stage in item["stages"]}
-    args.youtube_url = item["source"]["canonical_url"]
-    return run_youtube_video_pipeline(
-        args,
-        project_execution={
-            "plan_job_id": args.plan_job_id,
-            "plan_artifact_sha256": plan_reference["digest"],
-            "plan_hash": plan["plan_hash"],
-            "project_id": plan["project"]["project_id"],
-            "project_revision": plan["project"]["revision"],
-            "item_id": item["item_id"],
-            "logical_tasks": {
-                name: stages[name]["task_id"]
-                for name in (
-                    "metadata-enrichment",
-                    "source-acquisition",
-                    "transcription",
-                    "analysis",
+
+    def execute(item: dict[str, Any]) -> dict[str, Any]:
+        item_args = argparse.Namespace(**vars(args))
+        item_args.youtube_url = item["source"]["canonical_url"]
+        result = run_youtube_video_pipeline(
+            item_args,
+            project_execution=project_item_execution_context(
+                args=args,
+                plan=plan,
+                plan_reference=plan_reference,
+                item=item,
+            ),
+            emit_result=False,
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError(f"Processing {item['item_id']} returned no summary")
+        return result
+
+    completed: dict[str, dict[str, Any]] = {}
+    failures: dict[str, str] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = {executor.submit(execute, item): item for item in items}
+        for future in concurrent.futures.as_completed(futures):
+            item = futures[future]
+            try:
+                result = future.result()
+                completed[item["item_id"]] = compact_project_item_execution(item, result)
+                disposition = result["plan_execution"]["disposition"]
+                done = len(completed) + len(failures)
+                print(
+                    f"[{done}/{len(items)}] {disposition}: {item['title']}",
+                    flush=True,
                 )
-            },
-        },
-    )
+            except Exception as error:
+                failures[item["item_id"]] = str(error)
+                done = len(completed) + len(failures)
+                print(
+                    f"[{done}/{len(items)}] failed: {item['title']}: {error}",
+                    flush=True,
+                )
+
+    ordered_results = [
+        completed[item["item_id"]]
+        for item in items
+        if item["item_id"] in completed
+    ]
+    summary = {
+        "plan_job_id": args.plan_job_id,
+        "plan_artifact_sha256": plan_reference["digest"],
+        "plan_hash": plan["plan_hash"],
+        "project": plan["project"],
+        "state": "complete" if not failures else "incomplete",
+        "selected_items": len(items),
+        "succeeded": len(completed),
+        "already_complete": sum(
+            result["disposition"] == "already-complete"
+            for result in ordered_results
+        ),
+        "failed": len(failures),
+        "concurrency": concurrency,
+        "command_total_ms": elapsed_milliseconds(command_started_at),
+        "items": ordered_results,
+        "failures": [
+            {
+                "item_id": item["item_id"],
+                "title": item["title"],
+                "error": failures[item["item_id"]],
+            }
+            for item in items
+            if item["item_id"] in failures
+        ],
+    }
+    print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
+    if failures:
+        raise RuntimeError(
+            f"Project processing completed with {len(failures)} failed item(s); "
+            "rerun after addressing the reported failures"
+        )
+    return 0
 
 
 def run_queued_video_analysis(args: argparse.Namespace) -> int:
@@ -3978,7 +4112,8 @@ def run_youtube_video_pipeline(
     args: argparse.Namespace,
     *,
     project_execution: dict[str, Any] | None = None,
-) -> int:
+    emit_result: bool = True,
+) -> int | dict[str, Any]:
     command_started_at = time.monotonic()
     control = operator_client(args.operator_token_source)
     staging = r2_staging_writer(args.r2_staging_credentials_source)
@@ -4025,6 +4160,14 @@ def run_youtube_video_pipeline(
             "stages": ["transcription", "educational-video-analysis"],
         }
         existing = control.post("/pipelines/get", {"run_id": run_id})
+    existing_run = existing.get("run")
+    existing_disposition = (
+        "already-complete"
+        if isinstance(existing_run, dict) and existing_run.get("state") == "complete"
+        else "resumed"
+        if existing_run is not None
+        else "executed"
+    )
 
     reference = None
     submitted = None
@@ -4267,7 +4410,10 @@ def run_youtube_video_pipeline(
             "project_revision": project_execution["project_revision"],
             "item_id": project_execution["item_id"],
             "logical_tasks": project_execution["logical_tasks"],
+            "disposition": existing_disposition,
         }
+    if not emit_result:
+        return summary
     print(f"completed run {completed_run['run_id']} in {format_elapsed(total_ms)}", flush=True)
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
     print(
@@ -4546,12 +4692,12 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
     process_project = commands.add_parser(
         "process-project",
         parents=[credentials],
-        help="Execute one item from an immutable project processing plan",
+        help="Execute items from an immutable project processing plan",
         description=(
             "Verify an immutable project-processing plan and its authoritative "
-            "project revision, then execute exactly one planned YouTube item through "
-            "local acquisition, MLX transcription, and educational analysis. "
-            "Deterministic queue identities make reruns resume the same pipeline."
+            "project revision, then execute selected YouTube items through local "
+            "acquisition, MLX transcription, and educational analysis. Deterministic "
+            "queue identities make reruns resume the same pipelines."
         ),
     )
     process_project.add_argument("--plan-job-id", required=True)
@@ -4559,12 +4705,24 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
     selection.add_argument(
         "--limit",
         type=int,
-        help="Process the first N unfiltered plan items; currently must be 1",
+        help="Process the first N plan items",
     )
     selection.add_argument(
         "--item",
         dest="item_id",
         help="Process the exact plan item ID",
+    )
+    selection.add_argument(
+        "--all",
+        dest="process_all",
+        action="store_true",
+        help="Process every item in the plan",
+    )
+    process_project.add_argument(
+        "--concurrency",
+        type=int,
+        default=2,
+        help="Maximum simultaneous item pipelines, from 1 to 8 (default: 2)",
     )
     process_project.add_argument(
         "--transcription-timeout-seconds", type=int, default=3600
