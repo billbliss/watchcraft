@@ -1,7 +1,7 @@
 {
   "kind": "watchcraft.authoring-capability-registry",
   "schema_version": 1,
-  "registry_version": "2026-09-08.3",
+  "registry_version": "2026-09-08.4",
   "handlers": [
     {
       "id": "watchcraft.analysis.lexical",
@@ -100,6 +100,77 @@
         "retryable_classifications": [
           "analysis_dependency_unavailable",
           "normalization_provider_failed",
+          "artifact_store_failed",
+          "lease_expired"
+        ]
+      }
+    },
+    {
+      "id": "watchcraft.compile.video-collection",
+      "version": "1",
+      "operation": "compile",
+      "inputs": [
+        {
+          "artifact_kind": "project-processing-plan",
+          "schema": {
+            "id": "watchcraft.project-processing-plan",
+            "version": 1
+          }
+        },
+        {
+          "artifact_kind": "collection-iterator-snapshot",
+          "schema": {
+            "id": "watchcraft.collection-iterator-snapshot",
+            "version": 1
+          }
+        }
+      ],
+      "dependencies": [
+        {
+          "artifact_kind": "transcript",
+          "schema": {
+            "id": "watchcraft.transcript",
+            "version": 1
+          },
+          "cardinality": {
+            "minimum": 1,
+            "maximum": 10000
+          }
+        },
+        {
+          "artifact_kind": "analysis",
+          "schema": {
+            "id": "watchcraft.video-analysis",
+            "version": 2
+          },
+          "cardinality": {
+            "minimum": 1,
+            "maximum": 10000
+          }
+        },
+        {
+          "artifact_kind": "topic-normalization",
+          "schema": {
+            "id": "watchcraft.topic-normalization",
+            "version": 1
+          }
+        }
+      ],
+      "output": {
+        "artifact_kind": "collection-compilation",
+        "schema": {
+          "id": "watchcraft.collection-compilation",
+          "version": 1
+        }
+      },
+      "execution_profile": {
+        "id": "python-portable",
+        "version": "1"
+      },
+      "lease_class": "short",
+      "retry_policy": {
+        "max_attempts": 3,
+        "retryable_classifications": [
           "artifact_store_failed",
           "lease_expired"
         ]

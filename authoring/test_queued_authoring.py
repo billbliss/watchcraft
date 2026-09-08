@@ -25,7 +25,19 @@ def registry_snapshot(
     playlist_iterator=False,
     project_planner=False,
     topic_normalization=False,
+    collection_compilation=False,
 ):
+    if collection_compilation:
+        return {
+            "registry_version": "2026-09-08.4",
+            "registry_sha256": "c" * 64,
+            "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
+                queued_authoring.COLLECTION_COMPILATION_HANDLER
+            ],
+            "execution_profile": queued_authoring.LOCAL_EXECUTION_PROFILES[
+                queued_authoring.PYTHON_EXECUTION_PROFILE
+            ],
+        }
     if topic_normalization:
         return {
             "registry_version": "2026-09-08.3",
@@ -2528,6 +2540,352 @@ class QueuedAuthoringTests(unittest.TestCase):
         ))
         self.assertIn("Full normalization:", output.getvalue())
         self.assertNotIn('"sections": [', output.getvalue())
+
+    def test_collection_compiler_builds_a_portable_manifest_from_bound_resources(self):
+        examples = queued_authoring.CATALOG_PROJECT_SCHEMA_PATH.parent / "examples"
+        project = json.loads(
+            (examples / "current-playlist.project.json").read_text(encoding="utf-8")
+        )
+        snapshot = json.loads(
+            (examples / "current-playlist.snapshot.json").read_text(encoding="utf-8")
+        )
+
+        def reference(value, artifact_kind, schema):
+            payload = queued_authoring.canonical_json(value).encode("utf-8")
+            digest = queued_authoring.sha256_hex(payload)
+            return ({
+                "store": "r2",
+                "algorithm": "sha256",
+                "digest": digest,
+                "byte_length": len(payload),
+                "media_type": "application/json",
+                "artifact_kind": artifact_kind,
+                "schema": schema,
+                "key": f"objects/sha256/{digest[:2]}/{digest[2:]}",
+            }, payload)
+
+        snapshot_reference, snapshot_payload = reference(
+            snapshot,
+            "collection-iterator-snapshot",
+            queued_authoring.COLLECTION_ITERATOR_SNAPSHOT_SCHEMA,
+        )
+        project["iterator"]["accepted_snapshot"] = snapshot_reference
+        project["revision"] = snapshot["project"]["revision"] + 1
+        planner_context = Mock()
+        planner_store = Mock()
+        planner_store.get_bytes.return_value = snapshot_payload
+        planner_context.artifact_store.return_value = planner_store
+        plan = queued_authoring.project_processing_planner({
+            "job_id": "plan-job-1",
+            "spec_sha256": "a" * 64,
+            "spec": queued_authoring.project_processing_plan_spec(
+                project, planned_at="2026-09-08T20:00:00Z"
+            ),
+        }, planner_context)
+        plan_reference, plan_payload = reference(
+            plan,
+            "project-processing-plan",
+            queued_authoring.PROJECT_PROCESSING_PLAN_SCHEMA,
+        )
+        transcripts = []
+        analyses = []
+        transcript_references = []
+        analysis_references = []
+        bindings = []
+        payloads = {
+            plan_reference["key"]: plan_payload,
+            snapshot_reference["key"]: snapshot_payload,
+        }
+        for item in plan["items"]:
+            video = f"{item['source']['media_id']}.youtube"
+            transcript = {
+                "kind": "watchcraft.transcript",
+                "schema_version": 1,
+                "source": {"media_asset_id": item["item_id"]},
+                "text": "Vectors transform through matrices.",
+                "segments": [],
+            }
+            transcript_reference, transcript_payload = reference(
+                transcript,
+                "transcript",
+                {"id": "watchcraft.transcript", "version": 1},
+            )
+            analysis = {
+                "schema_version": 2,
+                "video": video,
+                "title": item["title"],
+                "summary": "A visual linear algebra lesson.",
+                "topics": ["vectors"],
+                "sections": [],
+                "locations": [],
+                "analysis_model": "gpt-5-nano",
+                "provenance": {
+                    "handler_id": queued_authoring.EDUCATIONAL_VIDEO_ANALYSIS_HANDLER[0],
+                    "transcript": transcript_reference,
+                },
+            }
+            analysis_reference, analysis_payload = reference(
+                analysis, "analysis", queued_authoring.VIDEO_ANALYSIS_SCHEMA
+            )
+            transcripts.append(transcript)
+            analyses.append(analysis)
+            transcript_references.append(transcript_reference)
+            analysis_references.append(analysis_reference)
+            payloads[transcript_reference["key"]] = transcript_payload
+            payloads[analysis_reference["key"]] = analysis_payload
+            bindings.append({
+                "item_id": item["item_id"],
+                "video": video,
+                "transcript_digest": transcript_reference["digest"],
+                "analysis_digest": analysis_reference["digest"],
+            })
+        normalization = {
+            "kind": "watchcraft.topic-normalization",
+            "schema_version": 1,
+            "collection_id": project["project_id"],
+            "status": "complete",
+            "prompt_version": 2,
+            "display_label_prompt_version": 1,
+            "model": "gpt-5.4-mini",
+            "source_hash": "b" * 64,
+            "assignments": {
+                "vectors": {
+                    "canonical_key": "vectors",
+                    "canonical_label": "Vectors",
+                    "family_ids": ["family-vectors"],
+                },
+            },
+            "families": {
+                "family-vectors": {
+                    "canonical_key": "vectors",
+                    "label": "Vectors",
+                    "description": "Vector concepts.",
+                },
+            },
+            "display_labels": {"vectors": "Vectors"},
+            "related": {"vectors": []},
+            "provenance": {"plan_artifact_sha256": plan_reference["digest"]},
+        }
+        normalization_reference, normalization_payload = reference(
+            normalization,
+            "topic-normalization",
+            queued_authoring.TOPIC_NORMALIZATION_SCHEMA,
+        )
+        payloads[normalization_reference["key"]] = normalization_payload
+        spec = {
+            **queued_authoring.project_collection_compilation_spec(
+                project=project,
+                plan_job_id="plan-job-1",
+                plan_reference=plan_reference,
+                plan=plan,
+                transcript_references=transcript_references,
+                analysis_references=analysis_references,
+                bindings=bindings,
+                normalization_reference=normalization_reference,
+            ),
+            "registry_snapshot": registry_snapshot(collection_compilation=True),
+        }
+        store = Mock()
+        store.get_bytes.side_effect = lambda value: payloads[value["key"]]
+        context = Mock()
+        context.artifact_store.return_value = store
+        result = queued_authoring.compile_video_collection({
+            "job_id": "compile-job-1",
+            "spec_sha256": "c" * 64,
+            "spec": spec,
+        }, context)
+
+        self.assertEqual(result["kind"], "watchcraft.collection-compilation")
+        self.assertEqual(result["manifest"]["kind"], "watchcraft.collection")
+        self.assertEqual(result["manifest"]["collection_id"], project["project_id"])
+        self.assertEqual(len(result["manifest"]["items"]), len(plan["items"]))
+        self.assertEqual(len(result["resources"]), len(plan["items"]))
+        self.assertEqual(result["manifest"]["stats"]["topic_family_count"], 1)
+        self.assertEqual(context.report_progress.call_count, len(plan["items"]) + 1)
+
+    def test_collection_comparison_reports_revision_and_identity_drift(self):
+        published = {
+            "revision": 3,
+            "content_hash": "a" * 64,
+            "items": {"video-1": {}},
+            "topics": {"topic-1": {"canonical_key": "vectors"}},
+            "topic_families": {},
+        }
+        candidate = {
+            "revision": 1,
+            "content_hash": "b" * 64,
+            "items": {"video-1": {}, "video-2": {}},
+            "topics": {
+                "topic-2": {"canonical_key": "vectors"},
+                "topic-3": {"canonical_key": "matrices"},
+            },
+            "topic_families": {"family-1": {}},
+        }
+        comparison = queued_authoring.collection_comparison(candidate, published)
+        self.assertTrue(comparison["content_changed"])
+        self.assertEqual(comparison["proposed_revision"], 4)
+        self.assertEqual(comparison["items"]["shared_ids"], 1)
+        self.assertEqual(comparison["topics"]["shared_canonical_keys"], 1)
+
+    def test_compile_project_submits_one_deterministic_collection_job(self):
+        examples = queued_authoring.CATALOG_PROJECT_SCHEMA_PATH.parent / "examples"
+        project = json.loads(
+            (examples / "current-playlist.project.json").read_text(encoding="utf-8")
+        )
+        snapshot_reference = project["iterator"]["accepted_snapshot"]
+        plan_reference = {
+            **snapshot_reference,
+            "digest": "d" * 64,
+            "artifact_kind": "project-processing-plan",
+            "schema": queued_authoring.PROJECT_PROCESSING_PLAN_SCHEMA,
+            "key": "objects/sha256/dd/" + "d" * 62,
+        }
+        plan = {
+            "project": {
+                "project_id": project["project_id"],
+                "revision": project["revision"],
+            },
+            "source_snapshot": snapshot_reference,
+            "plan_hash": "c" * 64,
+            "collection_tasks": [
+                {"task_id": "topics-task"},
+                {"task_id": "compile-task"},
+            ],
+        }
+        transcript_artifact = transcript_reference()
+        analysis_reference = {
+            **transcript_artifact,
+            "digest": "e" * 64,
+            "artifact_kind": "analysis",
+            "schema": queued_authoring.VIDEO_ANALYSIS_SCHEMA,
+            "key": "objects/sha256/ee/" + "e" * 62,
+        }
+        normalization_reference = {
+            **transcript_artifact,
+            "digest": "f" * 64,
+            "artifact_kind": "topic-normalization",
+            "schema": queued_authoring.TOPIC_NORMALIZATION_SCHEMA,
+            "key": "objects/sha256/ff/" + "f" * 62,
+        }
+        bindings = [{
+            "item_id": "youtube:fNk_zzaMoSs",
+            "video": "fNk_zzaMoSs.youtube",
+            "transcript_digest": transcript_artifact["digest"],
+            "analysis_digest": analysis_reference["digest"],
+        }]
+        plan_job = {
+            "job_id": "plan-job-1",
+            "state": "succeeded",
+            "spec": {"handler": {
+                "id": queued_authoring.PROJECT_PROCESSING_PLANNER_HANDLER[0],
+                "version": queued_authoring.PROJECT_PROCESSING_PLANNER_HANDLER[1],
+            }},
+            "result": plan_reference,
+        }
+        captured = {}
+        control = Mock()
+
+        def post(path, payload):
+            if path == "/submissions/get":
+                return {"job": plan_job}
+            if path == "/projects/get":
+                return {"project": project}
+            if path == "/pipelines/get":
+                return {"run": None, "jobs": []}
+            if path == "/submissions/approve":
+                return {"job": {"job_id": captured["job_id"], "state": "ready"}}
+            raise AssertionError(path)
+
+        control.post.side_effect = post
+
+        def submit(_control, *, job_id, run_id, command_prefix, request, spec):
+            captured.update(
+                job_id=job_id,
+                run_id=run_id,
+                command_prefix=command_prefix,
+                request=request,
+                spec=spec,
+            )
+            return {
+                "run": {"run_id": run_id, "state": "planned"},
+                "job": {
+                    "job_id": job_id,
+                    "state": "awaiting_approval",
+                    "revision": 1,
+                    "spec_sha256": "a" * 64,
+                },
+            }
+
+        completed_job = {
+            "job_id": "compile-job",
+            "state": "succeeded",
+            "result": {
+                **normalization_reference,
+                "digest": "9" * 64,
+                "artifact_kind": "collection-compilation",
+                "schema": queued_authoring.COLLECTION_COMPILATION_SCHEMA,
+                "key": "objects/sha256/99/" + "9" * 62,
+            },
+        }
+        result = {
+            "kind": "watchcraft.collection-compilation",
+            "schema_version": 1,
+            "project": plan["project"],
+            "manifest": {
+                "collection_id": project["publication"]["collection_id"],
+                "revision": 1,
+                "content_hash": "8" * 64,
+                "items": {"video-1": {}},
+                "topics": {},
+                "topic_families": {},
+                "stats": {
+                    "video_count": 1,
+                    "topic_count": 0,
+                    "topic_family_count": 0,
+                },
+            },
+            "resources": [{"path": "analysis/video.analysis.json"}],
+            "provenance": {
+                "handler_id": queued_authoring.COLLECTION_COMPILATION_HANDLER[0],
+                "plan": plan_reference,
+                "normalization": normalization_reference,
+                "timing": {},
+            },
+        }
+        args = build_parser().parse_args([
+            "queue", "compile-project", "--plan-job-id", "plan-job-1",
+        ])
+        with patch("queued_authoring.operator_client", return_value=control), patch(
+            "queued_authoring.verified_json_result", side_effect=[plan, result]
+        ), patch(
+            "queued_authoring.validate_project_processing_plan"
+        ), patch(
+            "queued_authoring.completed_project_compilation_inputs",
+            return_value=(
+                [transcript_artifact],
+                [analysis_reference],
+                bindings,
+                normalization_reference,
+            ),
+        ), patch(
+            "queued_authoring.submit_spec", side_effect=submit
+        ), patch(
+            "queued_authoring._resume_pipeline_job"
+        ), patch(
+            "queued_authoring.wait_for_terminal_job",
+            return_value={"job": completed_job, "run": {}},
+        ), patch(
+            "build_collection.validate_collection_manifest"
+        ):
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(queued_authoring.run_compile_project(args), 0)
+        self.assertEqual(captured["spec"]["operation"], "compile")
+        self.assertEqual(captured["spec"]["inputs"], [plan_reference, snapshot_reference])
+        self.assertEqual(captured["spec"]["dependencies"], [
+            transcript_artifact,
+            analysis_reference,
+            normalization_reference,
+        ])
 
     def test_waiting_for_a_remote_job_reports_periodic_progress(self):
         client = Mock()

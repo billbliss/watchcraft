@@ -84,6 +84,10 @@ TOPIC_NORMALIZATION_HANDLER = (
     "watchcraft.normalize.collection-topics",
     "1",
 )
+COLLECTION_COMPILATION_HANDLER = (
+    "watchcraft.compile.video-collection",
+    "1",
+)
 PYTHON_EXECUTION_PROFILE = ("python-portable", "1")
 PYTHON_EXECUTION_WORKFLOW = "authoring-worker.yml"
 OPENAI_EXECUTION_PROFILE = ("python-openai", "1")
@@ -105,6 +109,10 @@ TOPIC_NORMALIZATION_RETRIES = 5
 TOPIC_NORMALIZATION_TIMEOUT_SECONDS = 300
 VIDEO_ANALYSIS_SCHEMA = {"id": "watchcraft.video-analysis", "version": 2}
 TOPIC_NORMALIZATION_SCHEMA = {"id": "watchcraft.topic-normalization", "version": 1}
+COLLECTION_COMPILATION_SCHEMA = {
+    "id": "watchcraft.collection-compilation",
+    "version": 1,
+}
 TRANSCRIPTION_SMOKE_TEXT = (
     "Watchcraft verifies real audio transcription on an Apple silicon worker."
 )
@@ -730,6 +738,13 @@ class NormalizationProviderError(RuntimeError):
     retryable = True
 
 
+class CompilationDependencyError(RuntimeError):
+    """An approved collection input set cannot be compiled."""
+
+    classification = "compilation_dependency_invalid"
+    retryable = False
+
+
 def educational_video_analysis(
     job: dict[str, Any], context: WorkerContext | None = None
 ) -> dict[str, Any]:
@@ -1081,6 +1096,265 @@ def collection_topic_normalization(
     return result
 
 
+def compile_video_collection(
+    job: dict[str, Any], context: WorkerContext | None = None
+) -> dict[str, Any]:
+    handler_started_at = time.monotonic()
+    if context is None:
+        raise RuntimeError("Collection compilation requires a worker context")
+    spec = job["spec"]
+    configuration = spec.get("configuration")
+    expected_keys = {
+        "items",
+        "logical_task_id",
+        "plan_artifact_sha256",
+        "plan_hash",
+        "plan_job_id",
+        "project",
+    }
+    if not isinstance(configuration, dict) or set(configuration) != expected_keys:
+        raise ValueError("the collection-compilation configuration is invalid")
+    project = configuration["project"]
+    validate_json_schema(project, CATALOG_PROJECT_SCHEMA_PATH, "Catalog project")
+    if (
+        project.get("collection_type") != {
+            "id": "watchcraft.video-collection",
+            "version": "1",
+            "configuration": {"structure": "ordered-list"},
+        }
+        or spec.get("source", {}).get("media_asset_id")
+        != f"catalog-project:{project['project_id']}"
+    ):
+        raise ValueError("the collection type is unsupported by this compiler")
+
+    inputs = spec.get("inputs")
+    dependencies = spec.get("dependencies")
+    bindings = configuration["items"]
+    if (
+        not isinstance(inputs, list)
+        or len(inputs) != 2
+        or not isinstance(dependencies, list)
+        or not isinstance(bindings, list)
+        or not bindings
+        or len(dependencies) != len(bindings) * 2 + 1
+    ):
+        raise CompilationDependencyError(
+            "Collection compilation requires its plan, snapshot, transcripts, analyses, and normalization"
+        )
+    plan_reference = validated_artifact_reference(inputs[0])
+    snapshot_reference = validated_artifact_reference(inputs[1])
+    if (
+        plan_reference.get("artifact_kind") != "project-processing-plan"
+        or plan_reference.get("schema") != PROJECT_PROCESSING_PLAN_SCHEMA
+        or plan_reference.get("digest") != configuration["plan_artifact_sha256"]
+        or snapshot_reference != project["iterator"].get("accepted_snapshot")
+    ):
+        raise CompilationDependencyError("Compilation inputs do not match the project plan")
+
+    transcript_references = dependencies[:len(bindings)]
+    analysis_references = dependencies[len(bindings):len(bindings) * 2]
+    normalization_reference = validated_artifact_reference(dependencies[-1])
+    if (
+        normalization_reference.get("artifact_kind") != "topic-normalization"
+        or normalization_reference.get("schema") != TOPIC_NORMALIZATION_SCHEMA
+    ):
+        raise CompilationDependencyError("Collection compilation has invalid normalization")
+
+    store = context.artifact_store()
+    try:
+        plan = json.loads(store.get_bytes(plan_reference).decode("utf-8"))
+        snapshot = json.loads(store.get_bytes(snapshot_reference).decode("utf-8"))
+        normalization = json.loads(
+            store.get_bytes(normalization_reference).decode("utf-8")
+        )
+    except Exception as error:
+        raise CompilationDependencyError(
+            "Could not retrieve and decode collection-level compilation inputs"
+        ) from error
+    validate_project_processing_plan(plan)
+    validate_json_schema(
+        snapshot, ITERATOR_SNAPSHOT_SCHEMA_PATH, "Collection iterator snapshot"
+    )
+    if (
+        plan.get("project") != {
+            "project_id": project["project_id"],
+            "revision": project["revision"],
+        }
+        or plan.get("source_snapshot") != snapshot_reference
+        or plan.get("plan_hash") != configuration["plan_hash"]
+        or snapshot.get("project", {}).get("project_id") != project["project_id"]
+        or snapshot.get("project", {}).get("revision", project["revision"])
+        > project["revision"]
+        or normalization.get("kind") != "watchcraft.topic-normalization"
+        or normalization.get("status") != "complete"
+        or normalization.get("collection_id") != project["project_id"]
+        or normalization.get("provenance", {}).get("plan_artifact_sha256")
+        != plan_reference["digest"]
+    ):
+        raise CompilationDependencyError(
+            "Compilation inputs do not describe the same authoritative project revision"
+        )
+
+    analyses = []
+    transcripts = []
+    resources = []
+    for index, binding in enumerate(bindings):
+        transcript_reference = validated_artifact_reference(transcript_references[index])
+        analysis_reference = validated_artifact_reference(analysis_references[index])
+        if (
+            not isinstance(binding, dict)
+            or set(binding) != {
+                "analysis_digest", "item_id", "transcript_digest", "video"
+            }
+            or transcript_reference.get("artifact_kind") != "transcript"
+            or transcript_reference.get("schema")
+            != {"id": "watchcraft.transcript", "version": 1}
+            or transcript_reference.get("digest") != binding["transcript_digest"]
+            or analysis_reference.get("artifact_kind") != "analysis"
+            or analysis_reference.get("schema") != VIDEO_ANALYSIS_SCHEMA
+            or analysis_reference.get("digest") != binding["analysis_digest"]
+        ):
+            raise CompilationDependencyError(
+                f"Compilation binding {index + 1} is invalid"
+            )
+        context.report_progress(
+            phase="fetching-resources",
+            completed=index,
+            total=len(bindings),
+            unit="items",
+            current=binding["item_id"],
+        )
+        try:
+            transcript = json.loads(store.get_bytes(transcript_reference).decode("utf-8"))
+            analysis = json.loads(store.get_bytes(analysis_reference).decode("utf-8"))
+        except Exception as error:
+            raise CompilationDependencyError(
+                f"Could not retrieve compilation resources for {binding['item_id']}"
+            ) from error
+        if (
+            transcript.get("kind") != "watchcraft.transcript"
+            or analysis.get("video") != binding["video"]
+            or analysis.get("provenance", {}).get("transcript") != transcript_reference
+        ):
+            raise CompilationDependencyError(
+                f"Compilation resources for {binding['item_id']} do not match"
+            )
+        transcripts.append(transcript)
+        analyses.append(analysis)
+        resources.append({
+            "path": f"analysis/{Path(binding['video']).stem}.analysis.json",
+            "artifact": analysis_reference,
+        })
+
+    snapshot_items = {item["item_id"]: item for item in snapshot["items"]}
+    positions = {}
+    for placement in snapshot["placements"]:
+        positions.setdefault(placement["item_id"], placement["position"])
+    sources = {}
+    for binding in bindings:
+        item = snapshot_items.get(binding["item_id"])
+        if not isinstance(item, dict):
+            raise CompilationDependencyError(
+                f"Snapshot is missing compilation item {binding['item_id']}"
+            )
+        media = next(
+            (value for value in item["media"] if value.get("type") == "youtube"),
+            None,
+        )
+        if not isinstance(media, dict):
+            raise CompilationDependencyError(
+                f"Compilation item {binding['item_id']} has no YouTube media"
+            )
+        sources[binding["video"]] = {
+            "type": "youtube",
+            "video_id": media["media_id"],
+            "url": media["canonical_url"],
+            "position": positions.get(binding["item_id"]),
+        }
+
+    try:
+        from build_collection import (
+            build_collection_manifest,
+            build_topic_chapter_map,
+            validate_collection_manifest,
+        )
+
+        compile_started_at = time.monotonic()
+        with tempfile.TemporaryDirectory(prefix="watchcraft-collection-compilation-") as directory:
+            root = Path(directory)
+            collection_metadata = {
+                "collection_id": project["publication"]["collection_id"],
+                **project["metadata"],
+                "source": snapshot["source"],
+                "listed": project["publication"].get("listed", True),
+            }
+            (root / "watchcraft-authoring.json").write_text(
+                json.dumps({"collection": collection_metadata, "sources": sources}),
+                encoding="utf-8",
+            )
+            chapter_maps = {
+                analysis["video"]: build_topic_chapter_map(
+                    analysis, transcript.get("segments", [])
+                )
+                for analysis, transcript in zip(analyses, transcripts)
+            }
+            manifest = build_collection_manifest(
+                root,
+                analyses,
+                chapter_maps,
+                previous=None,
+                normalization=normalization,
+            )
+            validate_collection_manifest(manifest)
+        compilation_ms = elapsed_milliseconds(compile_started_at)
+    except CompilationDependencyError:
+        raise
+    except Exception as error:
+        raise RuntimeError(f"Collection compilation failed: {error}") from error
+
+    context.report_progress(
+        phase="compiling",
+        completed=1,
+        total=1,
+        unit="collection",
+        current=project["project_id"],
+    )
+    return {
+        "kind": "watchcraft.collection-compilation",
+        "schema_version": 1,
+        "project": {
+            "project_id": project["project_id"],
+            "revision": project["revision"],
+        },
+        "manifest": manifest,
+        "resources": resources,
+        "provenance": {
+            "handler_id": COLLECTION_COMPILATION_HANDLER[0],
+            "handler_version": COLLECTION_COMPILATION_HANDLER[1],
+            "job_id": job["job_id"],
+            "spec_sha256": job["spec_sha256"],
+            "plan_job_id": configuration["plan_job_id"],
+            "plan": plan_reference,
+            "snapshot": snapshot_reference,
+            "normalization": normalization_reference,
+            "items": [
+                {
+                    **binding,
+                    "transcript": transcript_reference,
+                    "analysis": analysis_reference,
+                }
+                for binding, transcript_reference, analysis_reference in zip(
+                    bindings, transcript_references, analysis_references
+                )
+            ],
+            "timing": {
+                "compilation_ms": compilation_ms,
+                "handler_ms": elapsed_milliseconds(handler_started_at),
+            },
+        },
+    }
+
+
 def mlx_staged_transcription(
     job: dict[str, Any], context: WorkerContext | None = None
 ) -> dict[str, Any]:
@@ -1211,6 +1485,7 @@ HANDLERS: dict[
     ANALYSIS_HANDLER: lexical_analysis,
     EDUCATIONAL_VIDEO_ANALYSIS_HANDLER: educational_video_analysis,
     TOPIC_NORMALIZATION_HANDLER: collection_topic_normalization,
+    COLLECTION_COMPILATION_HANDLER: compile_video_collection,
     TRANSCRIPTION_SMOKE_HANDLER: mlx_transcription_smoke,
     HTTP_TRANSCRIPTION_SMOKE_HANDLER: mlx_http_transcription_smoke,
     STAGED_TRANSCRIPTION_SMOKE_HANDLER: mlx_staged_transcription,
@@ -1293,6 +1568,53 @@ LOCAL_HANDLER_CONTRACTS: dict[tuple[str, str], dict[str, Any]] = {
             "retryable_classifications": [
                 "analysis_dependency_unavailable",
                 "normalization_provider_failed",
+                "artifact_store_failed",
+                "lease_expired",
+            ],
+        },
+    },
+    COLLECTION_COMPILATION_HANDLER: {
+        "id": COLLECTION_COMPILATION_HANDLER[0],
+        "version": COLLECTION_COMPILATION_HANDLER[1],
+        "operation": "compile",
+        "inputs": [
+            {
+                "artifact_kind": "project-processing-plan",
+                "schema": PROJECT_PROCESSING_PLAN_SCHEMA,
+            },
+            {
+                "artifact_kind": "collection-iterator-snapshot",
+                "schema": COLLECTION_ITERATOR_SNAPSHOT_SCHEMA,
+            },
+        ],
+        "dependencies": [
+            {
+                "artifact_kind": "transcript",
+                "schema": {"id": "watchcraft.transcript", "version": 1},
+                "cardinality": {"minimum": 1, "maximum": 10_000},
+            },
+            {
+                "artifact_kind": "analysis",
+                "schema": VIDEO_ANALYSIS_SCHEMA,
+                "cardinality": {"minimum": 1, "maximum": 10_000},
+            },
+            {
+                "artifact_kind": "topic-normalization",
+                "schema": TOPIC_NORMALIZATION_SCHEMA,
+            },
+        ],
+        "output": {
+            "artifact_kind": "collection-compilation",
+            "schema": COLLECTION_COMPILATION_SCHEMA,
+        },
+        "execution_profile": {
+            "id": PYTHON_EXECUTION_PROFILE[0],
+            "version": PYTHON_EXECUTION_PROFILE[1],
+        },
+        "lease_class": "short",
+        "retry_policy": {
+            "max_attempts": 3,
+            "retryable_classifications": [
                 "artifact_store_failed",
                 "lease_expired",
             ],
@@ -2726,14 +3048,14 @@ def project_processing_planner(
             "stage": "topic-normalization",
             "task_id": normalization_task,
             "disposition": "deferred",
-            "reason": "No topic-normalization handler is registered yet.",
+            "reason": "Realized after every planned analysis has an immutable artifact.",
             "depends_on": analysis_ids,
         },
         {
             "stage": "collection-compilation",
             "task_id": f"project:{sha256_hex(project['project_id'])[:16]}:compile",
             "disposition": "deferred",
-            "reason": "No queued collection-compilation handler is registered yet.",
+            "reason": "Realized after topic normalization has an immutable artifact.",
             "depends_on": [normalization_task],
         },
     ]
@@ -3984,6 +4306,156 @@ def completed_project_analysis_set(
     return dependencies, bindings, job_ids
 
 
+def completed_project_compilation_inputs(
+    control: AuthoringHttpClient,
+    *,
+    plan_job_id: str,
+    plan: dict[str, Any],
+    plan_reference: dict[str, Any],
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    dict[str, Any],
+]:
+    analysis_references, analysis_bindings, _ = completed_project_analysis_set(
+        control,
+        plan_job_id=plan_job_id,
+        plan=plan,
+        plan_reference=plan_reference,
+    )
+    transcript_references = []
+    bindings = []
+    for item, analysis_reference, analysis_binding in zip(
+        executable_project_plan_items(plan, process_all=True),
+        analysis_references,
+        analysis_bindings,
+    ):
+        transcript_job_id = stable_project_execution_id(
+            plan_reference["digest"], item["item_id"], "transcription"
+        )
+        submission = control.post("/submissions/get", {"job_id": transcript_job_id})
+        job = submission.get("job")
+        run = submission.get("run")
+        request = run.get("request") if isinstance(run, dict) else None
+        if (
+            not isinstance(job, dict)
+            or job.get("state") != "succeeded"
+            or job.get("spec", {}).get("handler") != {
+                "id": PRODUCTION_TRANSCRIPTION_HANDLER[0],
+                "version": PRODUCTION_TRANSCRIPTION_HANDLER[1],
+            }
+            or not isinstance(request, dict)
+            or request.get("plan_job_id") != plan_job_id
+            or request.get("plan_artifact_sha256") != plan_reference["digest"]
+            or request.get("item_id") != item["item_id"]
+        ):
+            raise RuntimeError(
+                f"Planned item {item['item_id']} has no successful bound transcript job"
+            )
+        transcript_reference = validated_artifact_reference(job.get("result"))
+        if (
+            transcript_reference.get("artifact_kind") != "transcript"
+            or transcript_reference.get("schema")
+            != {"id": "watchcraft.transcript", "version": 1}
+        ):
+            raise RuntimeError(
+                f"Planned item {item['item_id']} has an invalid transcript artifact"
+            )
+        transcript_references.append(transcript_reference)
+        bindings.append({
+            "item_id": item["item_id"],
+            "video": analysis_binding["video"],
+            "transcript_digest": transcript_reference["digest"],
+            "analysis_digest": analysis_reference["digest"],
+        })
+
+    project_item_id = f"catalog-project:{plan['project']['project_id']}"
+    normalization_job_id = stable_project_execution_id(
+        plan_reference["digest"], project_item_id, "topic-normalization"
+    )
+    normalization_submission = control.post(
+        "/submissions/get", {"job_id": normalization_job_id}
+    )
+    normalization_job = normalization_submission.get("job")
+    normalization_run = normalization_submission.get("run")
+    normalization_request = (
+        normalization_run.get("request")
+        if isinstance(normalization_run, dict)
+        else None
+    )
+    if (
+        not isinstance(normalization_job, dict)
+        or normalization_job.get("state") != "succeeded"
+        or normalization_job.get("spec", {}).get("handler") != {
+            "id": TOPIC_NORMALIZATION_HANDLER[0],
+            "version": TOPIC_NORMALIZATION_HANDLER[1],
+        }
+        or not isinstance(normalization_request, dict)
+        or normalization_request.get("plan_job_id") != plan_job_id
+        or normalization_request.get("plan_artifact_sha256")
+        != plan_reference["digest"]
+    ):
+        raise RuntimeError("The project plan has no successful bound topic normalization")
+    normalization_reference = validated_artifact_reference(
+        normalization_job.get("result")
+    )
+    if (
+        normalization_reference.get("artifact_kind") != "topic-normalization"
+        or normalization_reference.get("schema") != TOPIC_NORMALIZATION_SCHEMA
+    ):
+        raise RuntimeError("The project topic-normalization artifact is invalid")
+    return (
+        transcript_references,
+        analysis_references,
+        bindings,
+        normalization_reference,
+    )
+
+
+def project_collection_compilation_spec(
+    *,
+    project: dict[str, Any],
+    plan_job_id: str,
+    plan_reference: dict[str, Any],
+    plan: dict[str, Any],
+    transcript_references: list[dict[str, Any]],
+    analysis_references: list[dict[str, Any]],
+    bindings: list[dict[str, Any]],
+    normalization_reference: dict[str, Any],
+) -> dict[str, Any]:
+    if (
+        not bindings
+        or len(bindings) != len(transcript_references)
+        or len(bindings) != len(analysis_references)
+    ):
+        raise ValueError("Collection compilation requires a complete project item set")
+    return {
+        "operation": "compile",
+        "artifact_kind": "collection-compilation",
+        "output_schema": COLLECTION_COMPILATION_SCHEMA,
+        "handler": {
+            "id": COLLECTION_COMPILATION_HANDLER[0],
+            "version": COLLECTION_COMPILATION_HANDLER[1],
+        },
+        "source": {"media_asset_id": f"catalog-project:{project['project_id']}"},
+        "inputs": [plan_reference, plan["source_snapshot"]],
+        "dependencies": [
+            *transcript_references,
+            *analysis_references,
+            normalization_reference,
+        ],
+        "configuration": {
+            "project": project,
+            "plan_job_id": plan_job_id,
+            "plan_artifact_sha256": plan_reference["digest"],
+            "plan_hash": plan["plan_hash"],
+            "logical_task_id": plan["collection_tasks"][1]["task_id"],
+            "items": bindings,
+        },
+    }
+
+
 def compact_project_item_execution(
     item: dict[str, Any], summary: dict[str, Any]
 ) -> dict[str, Any]:
@@ -4286,6 +4758,228 @@ def run_normalize_project(args: argparse.Namespace) -> int:
     }, ensure_ascii=False, indent=2, sort_keys=True))
     print(
         "Full normalization: ./authoring/watchcraft-author queue result "
+        "--operator-token-source keychain --r2-credentials-source keychain "
+        f"{job_id}",
+        flush=True,
+    )
+    return 0
+
+
+def collection_comparison(candidate: dict[str, Any], published: dict[str, Any]) -> dict[str, Any]:
+    candidate_topics = {
+        value.get("canonical_key")
+        for value in candidate.get("topics", {}).values()
+        if isinstance(value, dict)
+    }
+    published_topics = {
+        value.get("canonical_key")
+        for value in published.get("topics", {}).values()
+        if isinstance(value, dict)
+    }
+    candidate_items = set(candidate.get("items", {}))
+    published_items = set(published.get("items", {}))
+    changed = candidate.get("content_hash") != published.get("content_hash")
+    published_revision = published.get("revision")
+    return {
+        "content_changed": changed,
+        "published_revision": published_revision,
+        "proposed_revision": (
+            published_revision + 1
+            if changed and type(published_revision) is int
+            else published_revision
+        ),
+        "items": {
+            "candidate": len(candidate_items),
+            "published": len(published_items),
+            "shared_ids": len(candidate_items & published_items),
+            "candidate_only": len(candidate_items - published_items),
+            "published_only": len(published_items - candidate_items),
+        },
+        "topics": {
+            "candidate": len(candidate_topics),
+            "published": len(published_topics),
+            "shared_canonical_keys": len(candidate_topics & published_topics),
+            "candidate_only": len(candidate_topics - published_topics),
+            "published_only": len(published_topics - candidate_topics),
+        },
+        "families": {
+            "candidate": len(candidate.get("topic_families", {})),
+            "published": len(published.get("topic_families", {})),
+        },
+    }
+
+
+def run_compile_project(args: argparse.Namespace) -> int:
+    command_started_at = time.monotonic()
+    control = operator_client(args.operator_token_source)
+    plan_submission = control.post("/submissions/get", {"job_id": args.plan_job_id})
+    plan_job = plan_submission.get("job")
+    if (
+        not isinstance(plan_job, dict)
+        or plan_job.get("state") != "succeeded"
+        or plan_job.get("spec", {}).get("handler") != {
+            "id": PROJECT_PROCESSING_PLANNER_HANDLER[0],
+            "version": PROJECT_PROCESSING_PLANNER_HANDLER[1],
+        }
+    ):
+        raise RuntimeError(
+            f"Job {args.plan_job_id} is not a successful project processing plan"
+        )
+    plan_reference = validated_artifact_reference(plan_job.get("result"))
+    if (
+        plan_reference.get("artifact_kind") != "project-processing-plan"
+        or plan_reference.get("schema") != PROJECT_PROCESSING_PLAN_SCHEMA
+    ):
+        raise RuntimeError(
+            f"Job {args.plan_job_id} is not a successful project processing plan"
+        )
+    plan = verified_json_result(plan_job, args.r2_credentials_source)
+    validate_project_processing_plan(plan)
+    current = control.post("/projects/get", {"project_id": plan["project"]["project_id"]})
+    project = current.get("project")
+    validate_json_schema(project, CATALOG_PROJECT_SCHEMA_PATH, "Catalog project")
+    if (
+        project["revision"] != plan["project"]["revision"]
+        or project["iterator"].get("accepted_snapshot") != plan["source_snapshot"]
+    ):
+        raise RuntimeError(
+            "Processing plan is stale relative to the authoritative catalog project"
+        )
+    (
+        transcript_references,
+        analysis_references,
+        bindings,
+        normalization_reference,
+    ) = completed_project_compilation_inputs(
+        control,
+        plan_job_id=args.plan_job_id,
+        plan=plan,
+        plan_reference=plan_reference,
+    )
+    spec = project_collection_compilation_spec(
+        project=project,
+        plan_job_id=args.plan_job_id,
+        plan_reference=plan_reference,
+        plan=plan,
+        transcript_references=transcript_references,
+        analysis_references=analysis_references,
+        bindings=bindings,
+        normalization_reference=normalization_reference,
+    )
+    project_item_id = f"catalog-project:{project['project_id']}"
+    run_id = stable_project_execution_id(
+        plan_reference["digest"], project_item_id, "collection-compilation-run"
+    )
+    job_id = stable_project_execution_id(
+        plan_reference["digest"], project_item_id, "collection-compilation"
+    )
+    command_prefix = stable_project_execution_id(
+        plan_reference["digest"], project_item_id, "collection-compilation-commands"
+    )
+    request = {
+        "kind": "project-collection-compilation",
+        "plan_job_id": args.plan_job_id,
+        "plan_artifact_sha256": plan_reference["digest"],
+        "plan_hash": plan["plan_hash"],
+        "project_id": project["project_id"],
+        "project_revision": project["revision"],
+        "logical_task_id": plan["collection_tasks"][1]["task_id"],
+    }
+    existing = control.post("/pipelines/get", {"run_id": run_id})
+    if existing.get("run") is None:
+        submitted = submit_spec(
+            control,
+            job_id=job_id,
+            run_id=run_id,
+            command_prefix=command_prefix,
+            request=request,
+            spec=spec,
+        )
+        print(
+            f"submitted collection compilation {job_id} for {len(bindings)} items",
+            flush=True,
+        )
+    else:
+        submitted = existing
+        jobs = submitted.get("jobs")
+        if (
+            submitted.get("run", {}).get("request") != request
+            or not isinstance(jobs, list)
+            or len(jobs) != 1
+            or jobs[0].get("job_id") != job_id
+            or {
+                key: value
+                for key, value in jobs[0].get("spec", {}).items()
+                if key != "registry_snapshot"
+            } != spec
+        ):
+            raise RuntimeError("Existing collection compilation does not match its plan")
+        print(f"resuming collection compilation {job_id}", flush=True)
+    job = submitted.get("job")
+    if not isinstance(job, dict):
+        job = submitted["jobs"][0]
+    if job["state"] == "awaiting_approval":
+        job = control.post("/submissions/approve", {
+            "job_id": job_id,
+            "command_id": str(uuid.uuid4()),
+            "expected_revision": job["revision"],
+            "actor": "watchcraft-author-cli",
+            "spec_sha256": job["spec_sha256"],
+        })["job"]
+    _resume_pipeline_job(control, job, "collection compilation")
+    completed = wait_for_terminal_job(control, job_id, args.timeout_seconds)
+    result = verified_json_result(completed["job"], args.r2_credentials_source)
+    manifest = result.get("manifest") if isinstance(result, dict) else None
+    provenance = result.get("provenance") if isinstance(result, dict) else None
+    from build_collection import validate_collection_manifest
+    if (
+        result.get("kind") != "watchcraft.collection-compilation"
+        or result.get("schema_version") != COLLECTION_COMPILATION_SCHEMA["version"]
+        or result.get("project") != plan["project"]
+        or not isinstance(manifest, dict)
+        or manifest.get("collection_id") != project["publication"]["collection_id"]
+        or len(manifest.get("items", {})) != len(bindings)
+        or len(result.get("resources", [])) != len(bindings)
+        or not isinstance(provenance, dict)
+        or provenance.get("handler_id") != COLLECTION_COMPILATION_HANDLER[0]
+        or provenance.get("plan") != plan_reference
+        or provenance.get("normalization") != normalization_reference
+    ):
+        raise RuntimeError("Collection compilation returned an invalid result")
+    validate_collection_manifest(manifest)
+    summary = {
+        "job_id": job_id,
+        "run_id": run_id,
+        "state": completed["job"]["state"],
+        "artifact": completed["job"]["result"],
+        "project": plan["project"],
+        "collection": {
+            "collection_id": manifest["collection_id"],
+            "candidate_revision": manifest["revision"],
+            "content_hash": manifest["content_hash"],
+            "stats": manifest["stats"],
+            "resources": len(result["resources"]),
+        },
+        "timing": {
+            "local": {"command_total_ms": elapsed_milliseconds(command_started_at)},
+            "ledger": completed_job_timing(completed["job"]),
+            "worker": provenance.get("timing", {}),
+        },
+    }
+    if args.compare_to is not None:
+        try:
+            published = json.loads(args.compare_to.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise RuntimeError(
+                f"Could not read comparison collection {args.compare_to}"
+            ) from error
+        validate_collection_manifest(published)
+        if published["collection_id"] != manifest["collection_id"]:
+            raise RuntimeError("Comparison collection has a different collection_id")
+        summary["comparison"] = collection_comparison(manifest, published)
+    print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
+    print(
+        "Full compilation: ./authoring/watchcraft-author queue result "
         "--operator-token-source keychain --r2-credentials-source keychain "
         f"{job_id}",
         flush=True,
@@ -5282,6 +5976,29 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         default="auto",
         help="Read-only plan and result credential source (default: auto)",
     )
+    compile_project = commands.add_parser(
+        "compile-project",
+        parents=[credentials],
+        help="Compile a completed project plan into a candidate collection package",
+        description=(
+            "Bind the accepted iterator snapshot, every completed transcript and "
+            "analysis, and the completed topic normalization into an immutable "
+            "candidate watchcraft.collection package. This does not publish it."
+        ),
+    )
+    compile_project.add_argument("--plan-job-id", required=True)
+    compile_project.add_argument("--timeout-seconds", type=int, default=1800)
+    compile_project.add_argument(
+        "--r2-credentials-source",
+        choices=("auto", "keychain", "environment"),
+        default="auto",
+        help="Read-only plan and result credential source (default: auto)",
+    )
+    compile_project.add_argument(
+        "--compare-to",
+        type=Path,
+        help="Published collection.json to compare with the candidate",
+    )
     queued_analysis = commands.add_parser(
         "analyze-transcript",
         parents=[credentials],
@@ -5549,6 +6266,8 @@ def run_queue_command(args: argparse.Namespace) -> int:
         return run_process_project(args)
     if args.queue_command == "normalize-project-topics":
         return run_normalize_project(args)
+    if args.queue_command == "compile-project":
+        return run_compile_project(args)
     if args.queue_command == "analyze-transcript":
         return run_queued_video_analysis(args)
 

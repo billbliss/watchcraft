@@ -193,15 +193,71 @@ const projectProcessingPlanSpec = {
   configuration: { project: { project_id: "essence-of-linear-algebra" } },
 };
 
+const projectPlanDigest = "9".repeat(64);
+const projectPlanArtifact = {
+  ...iteratorSnapshotArtifact,
+  digest: projectPlanDigest,
+  byte_length: 32_253,
+  artifact_kind: "project-processing-plan",
+  schema: { id: "watchcraft.project-processing-plan", version: 1 },
+  key: `objects/sha256/${projectPlanDigest.slice(0, 2)}/${projectPlanDigest.slice(2)}`,
+};
+const normalizationDigest = "8".repeat(64);
+const normalizationArtifact = {
+  ...iteratorSnapshotArtifact,
+  digest: normalizationDigest,
+  byte_length: 50_000,
+  artifact_kind: "topic-normalization",
+  schema: { id: "watchcraft.topic-normalization", version: 1 },
+  key: `objects/sha256/${normalizationDigest.slice(0, 2)}/${normalizationDigest.slice(2)}`,
+};
+const collectionCompilationSpec = {
+  operation: "compile" as const,
+  artifact_kind: "collection-compilation",
+  output_schema: { id: "watchcraft.collection-compilation", version: 1 },
+  handler: { id: "watchcraft.compile.video-collection", version: "1" },
+  source: { media_asset_id: "catalog-project:essence-of-linear-algebra" },
+  inputs: [projectPlanArtifact, iteratorSnapshotArtifact],
+  dependencies: [
+    transcriptArtifact,
+    { ...transcriptArtifact, digest: "7".repeat(64), key: `objects/sha256/77/${"7".repeat(62)}` },
+    firstAnalysisArtifact,
+    secondAnalysisArtifact,
+    normalizationArtifact,
+  ],
+  configuration: { project: { project_id: "essence-of-linear-algebra" } },
+};
+
 test("the checked-in registry is valid, stable, and fully resolves an approved job", () => {
   const registry = parseCapabilityRegistry(DEFAULT_CAPABILITY_REGISTRY);
   const spec = resolveJobSpecAgainstRegistry(lexicalSpec, registry);
 
-  assert.equal(spec.registry_snapshot?.registry_version, "2026-09-08.3");
+  assert.equal(spec.registry_snapshot?.registry_version, "2026-09-08.4");
   assert.equal(spec.registry_snapshot?.registry_sha256, capabilityRegistrySha256(registry));
   assert.equal(spec.registry_snapshot?.execution_profile.id, "python-portable");
   assert.equal(spec.registry_snapshot?.execution_profile.dispatcher.workflow, "authoring-worker.yml");
   assert.deepEqual(verifyRegistryResolutionSnapshot(spec, registry), spec.registry_snapshot);
+});
+
+test("collection compilation binds complete typed project resources", () => {
+  const spec = resolveJobSpecAgainstRegistry(
+    collectionCompilationSpec,
+    DEFAULT_CAPABILITY_REGISTRY,
+  );
+  assert.equal(spec.registry_snapshot?.handler.id, "watchcraft.compile.video-collection");
+  assert.equal(spec.registry_snapshot?.execution_profile.id, "python-portable");
+  assert.deepEqual(spec.inputs, [projectPlanArtifact, iteratorSnapshotArtifact]);
+  assert.equal(spec.dependencies.length, 5);
+  assert.throws(
+    () => resolveJobSpecAgainstRegistry(
+      {
+        ...collectionCompilationSpec,
+        dependencies: [transcriptArtifact, normalizationArtifact],
+      },
+      DEFAULT_CAPABILITY_REGISTRY,
+    ),
+    /requires between 1 and 10000 matching artifacts/,
+  );
 });
 
 test("collection topic normalization binds a variable complete analysis set", () => {

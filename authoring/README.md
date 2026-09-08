@@ -594,6 +594,34 @@ then publish and activate the checked-in registry before running the command:
   --registry-admin-token-source keychain
 ```
 
+Compile the accepted snapshot and the complete derived artifact set into an immutable
+candidate collection bundle:
+
+```bash
+./authoring/watchcraft-author queue compile-project \
+  --plan-job-id PLAN_JOB_ID \
+  --operator-token-source keychain \
+  --r2-credentials-source keychain \
+  --compare-to /path/to/published/collection.json
+```
+
+The portable compiler binds the exact plan and accepted iterator snapshot, every
+successful transcript and analysis, and the completed topic-normalization result. It
+uses the existing schema-v4 collection compiler and transcript-assisted topic-to-chapter
+mapping. Its output contains a validated `watchcraft.collection` manifest plus one
+immutable analysis-resource reference for every item. Transcripts remain authoritative
+compilation inputs but are not copied into the reader package.
+
+`--compare-to` is optional and read-only. When supplied, the command reports item-ID,
+canonical-topic, family, content-hash, and proposed publication-revision differences
+against an existing `collection.json`. Compilation never changes that file or publishes
+the candidate. The manifest's revision is only a candidate placeholder; the later
+publication transition owns revision advancement against the reviewed current package.
+
+Compilation adds capability registry `2026-09-08.4`. Commit and push the worker code,
+then publish and activate that registry before running the command. It requires no new
+Convex deployment.
+
 `queue result` resolves the artifact reference from the authoritative completed job,
 downloads the object from private R2, and verifies its declared byte length and SHA-256
 digest. JSON is displayed in readable form by default; `--output PATH` writes the exact
