@@ -2,6 +2,7 @@ export * from "./artifact-store.ts";
 export * from "./contracts.ts";
 export * from "./control-client.ts";
 export * from "./project-contracts.ts";
+export * from "./project-control-contracts.ts";
 export * from "./project-registry.ts";
 export * from "./registry.ts";
 export * from "./run-state-machine.ts";

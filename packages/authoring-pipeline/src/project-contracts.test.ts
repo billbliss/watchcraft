@@ -4,12 +4,15 @@ import test from "node:test";
 
 import {
   acceptCatalogProjectCandidate,
+  acceptCatalogProjectCandidateForControl,
   artifactKey,
   DEFAULT_CATALOG_CAPABILITY_REGISTRY,
   parseCatalogProject,
   parseCollectionIteratorSnapshot,
   sha256Hex,
   validateCatalogCapabilityRegistry,
+  validateAcceptedProjectSnapshotForControl,
+  validateCatalogProjectForControl,
   validateCatalogProjectCapabilities,
   validateCatalogProjectSnapshot,
 } from "./index.ts";
@@ -50,6 +53,18 @@ test("current, Khan, and popular-video designs satisfy the typed contracts", asy
     assert.equal(
       validated.project.project_id,
       validated.snapshot.project.project_id,
+    );
+    assert.equal(
+      validateCatalogProjectForControl(project).project_id,
+      validated.project.project_id,
+    );
+    assert.equal(
+      validateAcceptedProjectSnapshotForControl(
+        project,
+        snapshot,
+        snapshotBytes,
+      ).snapshot.structure_hash,
+      validated.snapshot.structure_hash,
     );
   }
 });
@@ -184,6 +199,15 @@ test("accepting a candidate advances the project without mutating the source rev
   assert.equal((project as any).revision, 1);
   assert.equal(accepted.revision, 2);
   assert.deepEqual(accepted.iterator.accepted_snapshot, reference);
+  assert.deepEqual(
+    acceptCatalogProjectCandidateForControl(
+      project,
+      candidate,
+      reference,
+      bytes,
+    ),
+    accepted,
+  );
   assert.equal(
     validateCatalogProjectSnapshot(accepted, candidate, bytes).project.revision,
     2,

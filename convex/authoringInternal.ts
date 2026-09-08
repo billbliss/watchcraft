@@ -31,10 +31,10 @@ import {
 } from "../packages/authoring-pipeline/src/state-machine.ts";
 import { resolveJobSpecAgainstRegistry } from "../packages/authoring-pipeline/src/registry.ts";
 import {
-  acceptCatalogProjectCandidate,
-  validateCatalogProjectCapabilities,
-  validateCatalogProjectSnapshot,
-} from "../packages/authoring-pipeline/src/project-registry.ts";
+  acceptCatalogProjectCandidateForControl,
+  validateAcceptedProjectSnapshotForControl,
+  validateCatalogProjectForControl,
+} from "../packages/authoring-pipeline/src/project-control-contracts.ts";
 import { activeRegistry } from "./authoringRegistry.ts";
 
 type RunCommandWithoutRevision = RunCommand extends infer Command
@@ -283,7 +283,7 @@ export const getCatalogProject = internalQuery({
     const stored = await catalogProjectDocument(ctx, args.project_id);
     if (!stored) throw new Error(`Unknown catalog project ${args.project_id}.`);
     return {
-      project: validateCatalogProjectCapabilities(stored.aggregate).project,
+      project: validateCatalogProjectForControl(stored.aggregate),
       updated_at: stored.updated_at,
     };
   },
@@ -329,7 +329,7 @@ export const importCatalogProject = internalMutation({
   },
   returns: v.any(),
   handler: async (ctx, args) => {
-    const project = validateCatalogProjectCapabilities(args.project).project;
+    const project = validateCatalogProjectForControl(args.project);
     const replay = await catalogProjectCommand(
       ctx,
       project.project_id,
@@ -347,7 +347,7 @@ export const importCatalogProject = internalMutation({
     }
     const existing = await catalogProjectDocument(ctx, project.project_id);
     if (existing) {
-      const current = validateCatalogProjectCapabilities(existing.aggregate).project;
+      const current = validateCatalogProjectForControl(existing.aggregate);
       if (canonicalJson(current as unknown as JsonValue) === canonicalJson(project as unknown as JsonValue)) {
         return { created: false, project: current, updated_at: existing.updated_at };
       }
@@ -363,7 +363,11 @@ export const importCatalogProject = internalMutation({
         args.accepted_snapshot_json,
         "Accepted iterator snapshot",
       );
-      validateCatalogProjectSnapshot(project, snapshot.value, snapshot.bytes);
+      validateAcceptedProjectSnapshotForControl(
+        project,
+        snapshot.value,
+        snapshot.bytes,
+      );
     } else if (args.accepted_snapshot_json !== undefined) {
       throw new Error("An unbound iterator snapshot cannot be imported with this project.");
     }
@@ -421,7 +425,7 @@ export const acceptCatalogProjectSnapshot = internalMutation({
     }
     const stored = await catalogProjectDocument(ctx, args.project_id);
     if (!stored) throw new Error(`Unknown catalog project ${args.project_id}.`);
-    const project = validateCatalogProjectCapabilities(stored.aggregate).project;
+    const project = validateCatalogProjectForControl(stored.aggregate);
     if (project.revision !== args.expected_revision) {
       throw new Error(
         `Stale catalog project revision ${args.expected_revision}; current revision is ${project.revision}.`,
@@ -450,7 +454,7 @@ export const acceptCatalogProjectSnapshot = internalMutation({
       );
     }
     const snapshot = parsedJsonBytes(args.snapshot_json, "Iterator candidate snapshot");
-    const accepted = acceptCatalogProjectCandidate(
+    const accepted = acceptCatalogProjectCandidateForControl(
       project,
       snapshot.value,
       job.result,
