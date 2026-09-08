@@ -145,11 +145,34 @@ const playlistIteratorSpec = {
   configuration: { project: { project_id: "example" } },
 };
 
+const iteratorSnapshotDigest = "f".repeat(64);
+const iteratorSnapshotArtifact = {
+  store: "r2" as const,
+  algorithm: "sha256" as const,
+  digest: iteratorSnapshotDigest,
+  byte_length: 15_512,
+  media_type: "application/json",
+  artifact_kind: "collection-iterator-snapshot",
+  schema: { id: "watchcraft.collection-iterator-snapshot", version: 1 },
+  key: `objects/sha256/${iteratorSnapshotDigest.slice(0, 2)}/${iteratorSnapshotDigest.slice(2)}`,
+};
+
+const projectProcessingPlanSpec = {
+  operation: "generate" as const,
+  artifact_kind: "project-processing-plan",
+  output_schema: { id: "watchcraft.project-processing-plan", version: 1 },
+  handler: { id: "watchcraft.planner.video-collection", version: "1" },
+  source: { media_asset_id: "catalog-project:essence-of-linear-algebra" },
+  inputs: [iteratorSnapshotArtifact],
+  dependencies: [],
+  configuration: { project: { project_id: "essence-of-linear-algebra" } },
+};
+
 test("the checked-in registry is valid, stable, and fully resolves an approved job", () => {
   const registry = parseCapabilityRegistry(DEFAULT_CAPABILITY_REGISTRY);
   const spec = resolveJobSpecAgainstRegistry(lexicalSpec, registry);
 
-  assert.equal(spec.registry_snapshot?.registry_version, "2026-09-08.1");
+  assert.equal(spec.registry_snapshot?.registry_version, "2026-09-08.2");
   assert.equal(spec.registry_snapshot?.registry_sha256, capabilityRegistrySha256(registry));
   assert.equal(spec.registry_snapshot?.execution_profile.id, "python-portable");
   assert.equal(spec.registry_snapshot?.execution_profile.dispatcher.workflow, "authoring-worker.yml");
@@ -195,6 +218,20 @@ test("playlist iteration is routed to the portable Python worker", () => {
   assert.equal(
     spec.registry_snapshot?.execution_profile.dispatcher.workflow,
     "authoring-worker.yml",
+  );
+});
+
+test("project planning consumes an iterator snapshot on the portable worker", () => {
+  const spec = resolveJobSpecAgainstRegistry(
+    projectProcessingPlanSpec,
+    DEFAULT_CAPABILITY_REGISTRY,
+  );
+  assert.equal(spec.registry_snapshot?.handler.id, "watchcraft.planner.video-collection");
+  assert.deepEqual(spec.inputs, [iteratorSnapshotArtifact]);
+  assert.equal(spec.registry_snapshot?.execution_profile.id, "python-portable");
+  assert.equal(
+    spec.registry_snapshot?.handler.output.artifact_kind,
+    "project-processing-plan",
   );
 });
 

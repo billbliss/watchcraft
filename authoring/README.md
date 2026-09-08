@@ -445,8 +445,9 @@ disappearing.
 
 This command produces a candidate iterator snapshot. It does not accept that snapshot
 into a new `CatalogProject` revision, fan out transcription and analysis jobs, compile
-a collection, or publish it. Those are subsequent orchestration transitions. The new
-handler requires capability registry `2026-09-08.1` to be published and activated
+a collection, or publish it. Those are subsequent orchestration transitions. The
+iterator handler requires a capability registry containing
+`watchcraft.iterator.youtube-playlist@1` to be published and activated
 after the worker code is available on `main`, which is the branch dispatched by the
 operator CLI.
 
@@ -503,6 +504,30 @@ always bound to the authoritative current revision:
 Project persistence adds Convex schema and function changes, so deploy them with
 `npx convex deploy` before using these commands. It does not add a worker handler and
 therefore does not require publishing or activating a new capability registry.
+
+Create an immutable processing plan from the authoritative imported project and its
+accepted iterator snapshot:
+
+```bash
+./authoring/watchcraft-author queue plan-project \
+  --operator-token-source keychain \
+  --r2-credentials-source keychain \
+  essence-of-linear-algebra
+```
+
+The portable planner verifies the exact accepted R2 snapshot and plans once per unique
+video item, preserving all placement IDs. It describes local metadata enrichment and
+audio acquisition followed by the registered MLX transcription and educational-video
+analysis handlers. Topic normalization and collection compilation are present as
+deferred collection-wide tasks. Reuse decisions for derived artifacts remain deferred
+until their exact input digests exist.
+
+This command creates only the planner job and its immutable plan artifact. It does not
+download video audio or dispatch any of the described processing jobs. The compact
+result reports task counts, duration coverage, and conservative sequential worker
+timeout bounds; the printed `queue result` command retrieves the full plan. The
+planner requires capability registry `2026-09-08.2` to be published and activated
+after its code is available on `main`. It does not require another Convex deployment.
 
 `queue result` resolves the artifact reference from the authoritative completed job,
 downloads the object from private R2, and verifies its declared byte length and SHA-256

@@ -1,0 +1,234 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://watchcraft.dev/schemas/project-processing-plan-v1.json",
+  "title": "Watchcraft Project Processing Plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "schema_version",
+    "project",
+    "planner",
+    "source_snapshot",
+    "planned_at",
+    "items",
+    "collection_tasks",
+    "summary",
+    "estimate",
+    "plan_hash"
+  ],
+  "properties": {
+    "kind": { "const": "watchcraft.project-processing-plan" },
+    "schema_version": { "const": 1 },
+    "project": { "$ref": "#/$defs/projectReference" },
+    "planner": { "$ref": "#/$defs/versionedIdentity" },
+    "source_snapshot": { "$ref": "#/$defs/artifactReference" },
+    "planned_at": { "type": "string", "format": "date-time" },
+    "items": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/itemPlan" }
+    },
+    "collection_tasks": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/collectionTask" }
+    },
+    "summary": { "$ref": "#/$defs/summary" },
+    "estimate": { "$ref": "#/$defs/estimate" },
+    "plan_hash": { "$ref": "#/$defs/sha256" }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "versionedIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "projectReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_id", "revision"],
+      "properties": {
+        "project_id": { "$ref": "#/$defs/id" },
+        "revision": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "artifactReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "store",
+        "algorithm",
+        "digest",
+        "byte_length",
+        "media_type",
+        "artifact_kind",
+        "schema",
+        "key"
+      ],
+      "properties": {
+        "store": { "const": "r2" },
+        "algorithm": { "const": "sha256" },
+        "digest": { "$ref": "#/$defs/sha256" },
+        "byte_length": { "type": "integer", "minimum": 1 },
+        "media_type": { "const": "application/json" },
+        "artifact_kind": { "const": "collection-iterator-snapshot" },
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "version"],
+          "properties": {
+            "id": { "const": "watchcraft.collection-iterator-snapshot" },
+            "version": { "const": 1 }
+          }
+        },
+        "key": { "type": "string", "minLength": 1 }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["media_asset_id", "media_type", "media_id", "canonical_url"],
+      "properties": {
+        "media_asset_id": { "$ref": "#/$defs/id" },
+        "media_type": { "$ref": "#/$defs/id" },
+        "media_id": { "$ref": "#/$defs/id" },
+        "canonical_url": { "type": "string", "format": "uri" }
+      }
+    },
+    "stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "task_id",
+        "disposition",
+        "executor",
+        "handler",
+        "depends_on",
+        "reuse"
+      ],
+      "properties": {
+        "stage": {
+          "enum": ["metadata-enrichment", "source-acquisition", "transcription", "analysis"]
+        },
+        "task_id": { "$ref": "#/$defs/id" },
+        "disposition": { "enum": ["required", "deferred"] },
+        "executor": { "enum": ["operator-local", "registered-worker"] },
+        "handler": { "$ref": "#/$defs/versionedIdentity" },
+        "execution_profile": { "$ref": "#/$defs/versionedIdentity" },
+        "depends_on": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/id" },
+          "uniqueItems": true
+        },
+        "reuse": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "reason"],
+          "properties": {
+            "status": { "enum": ["not-applicable", "deferred"] },
+            "reason": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "itemPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["item_id", "title", "placement_ids", "source", "metadata_gaps", "stages"],
+      "properties": {
+        "item_id": { "$ref": "#/$defs/id" },
+        "title": { "type": "string", "minLength": 1 },
+        "placement_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/id" },
+          "uniqueItems": true
+        },
+        "source": { "$ref": "#/$defs/source" },
+        "metadata_gaps": {
+          "type": "array",
+          "items": { "enum": ["duration", "publication-date", "captions"] },
+          "uniqueItems": true
+        },
+        "stages": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/stage" }
+        }
+      }
+    },
+    "collectionTask": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "task_id", "disposition", "reason", "depends_on"],
+      "properties": {
+        "stage": { "enum": ["topic-normalization", "collection-compilation"] },
+        "task_id": { "$ref": "#/$defs/id" },
+        "disposition": { "const": "deferred" },
+        "reason": { "type": "string", "minLength": 1 },
+        "depends_on": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/id" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unique_items",
+        "placements",
+        "operator_local_tasks",
+        "registered_worker_jobs",
+        "deferred_collection_jobs"
+      ],
+      "properties": {
+        "unique_items": { "type": "integer", "minimum": 0 },
+        "placements": { "type": "integer", "minimum": 0 },
+        "operator_local_tasks": { "type": "integer", "minimum": 0 },
+        "registered_worker_jobs": { "type": "integer", "minimum": 0 },
+        "deferred_collection_jobs": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "estimate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "basis",
+        "known_media_duration_seconds",
+        "unknown_duration_items",
+        "sequential_worker_upper_bound_minutes",
+        "parallel_wall_clock_ms",
+        "caveats"
+      ],
+      "properties": {
+        "status": { "enum": ["bounded-only", "duration-informed"] },
+        "basis": { "const": "registered-worker-timeout-upper-bounds" },
+        "known_media_duration_seconds": { "type": "number", "minimum": 0 },
+        "unknown_duration_items": { "type": "integer", "minimum": 0 },
+        "sequential_worker_upper_bound_minutes": { "type": "integer", "minimum": 0 },
+        "parallel_wall_clock_ms": { "type": "null" },
+        "caveats": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

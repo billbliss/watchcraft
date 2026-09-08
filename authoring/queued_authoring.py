@@ -75,6 +75,10 @@ YOUTUBE_PLAYLIST_ITERATOR_HANDLER = (
     "watchcraft.iterator.youtube-playlist",
     "1",
 )
+PROJECT_PROCESSING_PLANNER_HANDLER = (
+    "watchcraft.planner.video-collection",
+    "1",
+)
 PYTHON_EXECUTION_PROFILE = ("python-portable", "1")
 PYTHON_EXECUTION_WORKFLOW = "authoring-worker.yml"
 OPENAI_EXECUTION_PROFILE = ("python-openai", "1")
@@ -119,6 +123,10 @@ COLLECTION_ITERATOR_CHECKPOINT_SCHEMA = {
     "id": "watchcraft.collection-iterator-checkpoint",
     "version": 1,
 }
+PROJECT_PROCESSING_PLAN_SCHEMA = {
+    "id": "watchcraft.project-processing-plan",
+    "version": 1,
+}
 CATALOG_PROJECT_SCHEMA_PATH = (
     Path(__file__).resolve().parents[1]
     / "packages"
@@ -128,6 +136,9 @@ CATALOG_PROJECT_SCHEMA_PATH = (
 )
 ITERATOR_SNAPSHOT_SCHEMA_PATH = CATALOG_PROJECT_SCHEMA_PATH.with_name(
     "collection-iterator-snapshot.schema.json"
+)
+PROJECT_PROCESSING_PLAN_SCHEMA_PATH = CATALOG_PROJECT_SCHEMA_PATH.with_name(
+    "project-processing-plan.schema.json"
 )
 WORD_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9'-]{2,}")
 STOP_WORDS = {
@@ -1163,6 +1174,35 @@ LOCAL_HANDLER_CONTRACTS: dict[tuple[str, str], dict[str, Any]] = {
             ],
         },
     },
+    PROJECT_PROCESSING_PLANNER_HANDLER: {
+        "id": PROJECT_PROCESSING_PLANNER_HANDLER[0],
+        "version": PROJECT_PROCESSING_PLANNER_HANDLER[1],
+        "operation": "generate",
+        "inputs": [
+            {
+                "artifact_kind": "collection-iterator-snapshot",
+                "schema": COLLECTION_ITERATOR_SNAPSHOT_SCHEMA,
+            },
+        ],
+        "dependencies": [],
+        "output": {
+            "artifact_kind": "project-processing-plan",
+            "schema": PROJECT_PROCESSING_PLAN_SCHEMA,
+        },
+        "execution_profile": {
+            "id": PYTHON_EXECUTION_PROFILE[0],
+            "version": PYTHON_EXECUTION_PROFILE[1],
+        },
+        "lease_class": "short",
+        "retry_policy": {
+            "max_attempts": 3,
+            "retryable_classifications": [
+                "artifact_store_failed",
+                "lease_expired",
+                "source_input_unavailable",
+            ],
+        },
+    },
 }
 LOCAL_EXECUTION_PROFILES = {
     PYTHON_EXECUTION_PROFILE: {
@@ -1666,6 +1706,13 @@ class IteratorExecutionError(RuntimeError):
         self.retryable = retryable
 
 
+class ProjectPlanningError(RuntimeError):
+    def __init__(self, message: str, *, retryable: bool = False):
+        super().__init__(message)
+        self.classification = "source_input_unavailable"
+        self.retryable = retryable
+
+
 def validate_json_schema(value: Any, path: Path, label: str) -> None:
     try:
         from jsonschema import Draft202012Validator, FormatChecker
@@ -1773,6 +1820,95 @@ def validate_iterator_snapshot(snapshot: dict[str, Any]) -> None:
             raise ValueError("Collection iterator snapshot placement graph is invalid")
     if snapshot["structure_hash"] != iterator_structure_sha256(snapshot):
         raise ValueError("Collection iterator snapshot structure hash is invalid")
+
+
+def project_processing_plan_sha256(plan: dict[str, Any]) -> str:
+    projection = {
+        key: value
+        for key, value in plan.items()
+        if key not in {"planned_at", "plan_hash"}
+    }
+    return sha256_hex(canonical_json(projection))
+
+
+def validate_project_processing_plan(plan: dict[str, Any]) -> None:
+    validate_json_schema(
+        plan,
+        PROJECT_PROCESSING_PLAN_SCHEMA_PATH,
+        "Project processing plan",
+    )
+    item_task_ids: list[str] = []
+    for item in plan["items"]:
+        stages = item["stages"]
+        if [stage["stage"] for stage in stages] != [
+            "metadata-enrichment",
+            "source-acquisition",
+            "transcription",
+            "analysis",
+        ]:
+            raise ValueError("Project processing plan item stages are out of order")
+        expected_dependencies: list[str] = []
+        for stage in stages:
+            if stage["depends_on"] != expected_dependencies:
+                raise ValueError("Project processing plan stage dependencies are inconsistent")
+            item_task_ids.append(stage["task_id"])
+            expected_dependencies = [stage["task_id"]]
+    if len(item_task_ids) != len(set(item_task_ids)):
+        raise ValueError("Project processing plan task identities are not unique")
+    collection_tasks = plan["collection_tasks"]
+    analysis_ids = [item["stages"][-1]["task_id"] for item in plan["items"]]
+    if (
+        len(collection_tasks) != 2
+        or collection_tasks[0]["stage"] != "topic-normalization"
+        or collection_tasks[0]["depends_on"] != analysis_ids
+        or collection_tasks[1]["stage"] != "collection-compilation"
+        or collection_tasks[1]["depends_on"] != [collection_tasks[0]["task_id"]]
+    ):
+        raise ValueError("Project processing plan collection dependencies are inconsistent")
+    summary = plan["summary"]
+    if summary != {
+        "unique_items": len(plan["items"]),
+        "placements": sum(len(item["placement_ids"]) for item in plan["items"]),
+        "operator_local_tasks": len(plan["items"]) * 2,
+        "registered_worker_jobs": len(plan["items"]) * 2,
+        "deferred_collection_jobs": len(collection_tasks),
+    }:
+        raise ValueError("Project processing plan summary is inconsistent")
+    if plan["plan_hash"] != project_processing_plan_sha256(plan):
+        raise ValueError("Project processing plan hash is invalid")
+
+
+def project_processing_plan_spec(
+    project: dict[str, Any],
+    *,
+    planned_at: str | None = None,
+) -> dict[str, Any]:
+    validate_json_schema(project, CATALOG_PROJECT_SCHEMA_PATH, "Catalog project")
+    accepted = project.get("iterator", {}).get("accepted_snapshot")
+    if accepted is None:
+        raise ValueError("Catalog project has no accepted iterator snapshot")
+    reference = validated_artifact_reference(accepted)
+    if (
+        reference.get("artifact_kind") != "collection-iterator-snapshot"
+        or reference.get("schema") != COLLECTION_ITERATOR_SNAPSHOT_SCHEMA
+    ):
+        raise ValueError("Catalog project accepted snapshot has the wrong artifact contract")
+    observation_time = planned_at or datetime.now(timezone.utc).isoformat().replace(
+        "+00:00", "Z"
+    )
+    return {
+        "operation": "generate",
+        "artifact_kind": "project-processing-plan",
+        "output_schema": PROJECT_PROCESSING_PLAN_SCHEMA,
+        "handler": {
+            "id": PROJECT_PROCESSING_PLANNER_HANDLER[0],
+            "version": PROJECT_PROCESSING_PLANNER_HANDLER[1],
+        },
+        "source": {"media_asset_id": f"catalog-project:{project['project_id']}"},
+        "inputs": [reference],
+        "dependencies": [],
+        "configuration": {"project": project, "planned_at": observation_time},
+    }
 
 
 def youtube_playlist_iterator_spec(
@@ -2142,6 +2278,245 @@ def youtube_playlist_iterator(
 
 
 HANDLERS[YOUTUBE_PLAYLIST_ITERATOR_HANDLER] = youtube_playlist_iterator
+
+
+def _planned_item_task_id(item_id: str, stage: str) -> str:
+    return f"item:{sha256_hex(item_id)[:16]}:{stage}"
+
+
+def project_processing_planner(
+    job: dict[str, Any], context: WorkerContext | None = None
+) -> dict[str, Any]:
+    if context is None:
+        raise RuntimeError("Project processing planner requires a worker context")
+    spec = job["spec"]
+    configuration = spec.get("configuration")
+    if not isinstance(configuration, dict) or set(configuration) != {
+        "project", "planned_at"
+    }:
+        raise ValueError("Project processing planner configuration is invalid")
+    project = configuration["project"]
+    validate_json_schema(project, CATALOG_PROJECT_SCHEMA_PATH, "Catalog project")
+    accepted = project.get("iterator", {}).get("accepted_snapshot")
+    inputs = spec.get("inputs")
+    if accepted is None or inputs != [accepted]:
+        raise ValueError("Project processing job is not bound to its accepted snapshot")
+    reference = validated_artifact_reference(accepted)
+    try:
+        payload = context.artifact_store().get_bytes(reference)
+    except Exception as error:
+        raise ProjectPlanningError(
+            "Could not retrieve and verify the accepted iterator snapshot",
+            retryable=True,
+        ) from error
+    try:
+        snapshot = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ProjectPlanningError(
+            "Accepted iterator snapshot is not valid UTF-8 JSON"
+        ) from error
+    if not isinstance(snapshot, dict):
+        raise ProjectPlanningError("Accepted iterator snapshot must be an object")
+    validate_iterator_snapshot(snapshot)
+    snapshot_project = snapshot.get("project", {})
+    if (
+        snapshot_project.get("project_id") != project["project_id"]
+        or snapshot_project.get("revision", project["revision"]) > project["revision"]
+        or snapshot.get("iterator") != {
+            "id": project["iterator"]["id"],
+            "version": project["iterator"]["version"],
+        }
+        or snapshot.get("provenance", {}).get("access_profile")
+        != project["iterator"]["access_profile"]
+    ):
+        raise ValueError("Accepted snapshot does not match the catalog project")
+
+    placements_by_item: dict[str, list[str]] = {
+        item["item_id"]: [] for item in snapshot["items"]
+    }
+    for placement in snapshot["placements"]:
+        placements_by_item[placement["item_id"]].append(placement["placement_id"])
+
+    item_plans = []
+    known_duration_seconds = 0.0
+    unknown_duration_items = 0
+    total = len(snapshot["items"])
+    for index, item in enumerate(snapshot["items"], start=1):
+        youtube_media = next(
+            (media for media in item["media"] if media["type"] == "youtube"),
+            None,
+        )
+        if youtube_media is None:
+            raise ValueError(
+                f"Project processing planner does not support item {item['item_id']} media"
+            )
+        metadata = item.get("metadata", {})
+        duration = metadata.get("duration_seconds")
+        metadata_gaps = []
+        if isinstance(duration, bool) or not isinstance(duration, (int, float)) or duration <= 0:
+            metadata_gaps.append("duration")
+            unknown_duration_items += 1
+        else:
+            known_duration_seconds += float(duration)
+        if not metadata.get("published_at"):
+            metadata_gaps.append("publication-date")
+        if "captions" not in metadata:
+            metadata_gaps.append("captions")
+
+        metadata_task = _planned_item_task_id(item["item_id"], "metadata")
+        acquisition_task = _planned_item_task_id(item["item_id"], "acquisition")
+        transcription_task = _planned_item_task_id(item["item_id"], "transcription")
+        analysis_task = _planned_item_task_id(item["item_id"], "analysis")
+        item_plans.append({
+            "item_id": item["item_id"],
+            "title": item["title"],
+            "placement_ids": placements_by_item[item["item_id"]],
+            "source": {
+                "media_asset_id": item["item_id"],
+                "media_type": youtube_media["type"],
+                "media_id": youtube_media["media_id"],
+                "canonical_url": youtube_media.get("canonical_url", item["canonical_url"]),
+            },
+            "metadata_gaps": metadata_gaps,
+            "stages": [
+                {
+                    "stage": "metadata-enrichment",
+                    "task_id": metadata_task,
+                    "disposition": "required",
+                    "executor": "operator-local",
+                    "handler": {"id": "watchcraft.metadata.youtube", "version": "1"},
+                    "depends_on": [],
+                    "reuse": {
+                        "status": "not-applicable",
+                        "reason": "Metadata is refreshed from the selected source item.",
+                    },
+                },
+                {
+                    "stage": "source-acquisition",
+                    "task_id": acquisition_task,
+                    "disposition": "required",
+                    "executor": "operator-local",
+                    "handler": {"id": "watchcraft.acquire.youtube-audio", "version": "1"},
+                    "depends_on": [metadata_task],
+                    "reuse": {
+                        "status": "deferred",
+                        "reason": "Safe reuse requires an exact source-audio content digest.",
+                    },
+                },
+                {
+                    "stage": "transcription",
+                    "task_id": transcription_task,
+                    "disposition": "required",
+                    "executor": "registered-worker",
+                    "handler": {
+                        "id": PRODUCTION_TRANSCRIPTION_HANDLER[0],
+                        "version": PRODUCTION_TRANSCRIPTION_HANDLER[1],
+                    },
+                    "execution_profile": {
+                        "id": MLX_EXECUTION_PROFILE[0],
+                        "version": MLX_EXECUTION_PROFILE[1],
+                    },
+                    "depends_on": [acquisition_task],
+                    "reuse": {
+                        "status": "deferred",
+                        "reason": "Safe reuse requires the acquired audio digest and exact job spec.",
+                    },
+                },
+                {
+                    "stage": "analysis",
+                    "task_id": analysis_task,
+                    "disposition": "required",
+                    "executor": "registered-worker",
+                    "handler": {
+                        "id": EDUCATIONAL_VIDEO_ANALYSIS_HANDLER[0],
+                        "version": EDUCATIONAL_VIDEO_ANALYSIS_HANDLER[1],
+                    },
+                    "execution_profile": {
+                        "id": OPENAI_EXECUTION_PROFILE[0],
+                        "version": OPENAI_EXECUTION_PROFILE[1],
+                    },
+                    "depends_on": [transcription_task],
+                    "reuse": {
+                        "status": "deferred",
+                        "reason": "Safe reuse requires the authoritative transcript digest and exact job spec.",
+                    },
+                },
+            ],
+        })
+        context.report_progress(
+            phase="planning",
+            completed=index,
+            total=total,
+            unit="items",
+            current=item["title"],
+        )
+
+    analysis_ids = [item["stages"][-1]["task_id"] for item in item_plans]
+    normalization_task = f"project:{sha256_hex(project['project_id'])[:16]}:topics"
+    collection_tasks = [
+        {
+            "stage": "topic-normalization",
+            "task_id": normalization_task,
+            "disposition": "deferred",
+            "reason": "No topic-normalization handler is registered yet.",
+            "depends_on": analysis_ids,
+        },
+        {
+            "stage": "collection-compilation",
+            "task_id": f"project:{sha256_hex(project['project_id'])[:16]}:compile",
+            "disposition": "deferred",
+            "reason": "No queued collection-compilation handler is registered yet.",
+            "depends_on": [normalization_task],
+        },
+    ]
+    plan = {
+        "kind": "watchcraft.project-processing-plan",
+        "schema_version": 1,
+        "project": {
+            "project_id": project["project_id"],
+            "revision": project["revision"],
+        },
+        "planner": {
+            "id": PROJECT_PROCESSING_PLANNER_HANDLER[0],
+            "version": PROJECT_PROCESSING_PLANNER_HANDLER[1],
+        },
+        "source_snapshot": reference,
+        "planned_at": configuration["planned_at"],
+        "items": item_plans,
+        "collection_tasks": collection_tasks,
+        "summary": {
+            "unique_items": len(item_plans),
+            "placements": len(snapshot["placements"]),
+            "operator_local_tasks": len(item_plans) * 2,
+            "registered_worker_jobs": len(item_plans) * 2,
+            "deferred_collection_jobs": len(collection_tasks),
+        },
+        "estimate": {
+            "status": (
+                "duration-informed" if unknown_duration_items == 0 else "bounded-only"
+            ),
+            "basis": "registered-worker-timeout-upper-bounds",
+            "known_media_duration_seconds": known_duration_seconds,
+            "unknown_duration_items": unknown_duration_items,
+            "sequential_worker_upper_bound_minutes": len(item_plans) * (
+                LOCAL_EXECUTION_PROFILES[MLX_EXECUTION_PROFILE]["timeout_minutes"]
+                + LOCAL_EXECUTION_PROFILES[OPENAI_EXECUTION_PROFILE]["timeout_minutes"]
+            ),
+            "parallel_wall_clock_ms": None,
+            "caveats": [
+                "The bound excludes local metadata enrichment and source acquisition.",
+                "Actual concurrency and queue latency are not known at planning time.",
+                "Historical duration heuristics have not been calibrated yet.",
+            ],
+        },
+        "plan_hash": "",
+    }
+    plan["plan_hash"] = project_processing_plan_sha256(plan)
+    validate_project_processing_plan(plan)
+    return plan
+
+
+HANDLERS[PROJECT_PROCESSING_PLANNER_HANDLER] = project_processing_planner
 
 
 def run_worker(*, job_id: str, spec_sha256: str, dispatch_generation: int, expected_revision: int) -> dict[str, Any]:
@@ -3091,6 +3466,64 @@ def run_iterate_project(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_plan_project(args: argparse.Namespace) -> int:
+    control = operator_client(args.operator_token_source)
+    current = control.post("/projects/get", {"project_id": args.project_id})
+    project = current.get("project")
+    validate_json_schema(project, CATALOG_PROJECT_SCHEMA_PATH, "Catalog project")
+    spec = project_processing_plan_spec(project)
+    submitted = submit_spec(
+        control,
+        request={
+            "kind": "project-processing-plan",
+            "project_id": project["project_id"],
+            "project_revision": project["revision"],
+            "accepted_snapshot_sha256": project["iterator"]["accepted_snapshot"]["digest"],
+        },
+        spec=spec,
+    )
+    job = submitted["job"]
+    print(f"submitted {job['job_id']} ({job['spec']['handler']['id']})", flush=True)
+    approved = control.post("/submissions/approve", {
+        "job_id": job["job_id"],
+        "command_id": str(uuid.uuid4()),
+        "expected_revision": job["revision"],
+        "actor": "watchcraft-author-cli",
+        "spec_sha256": job["spec_sha256"],
+    })
+    pending = dispatch_submission(control, approved["job"])
+    print(
+        f"dispatched {pending['job_id']} via {dispatch_workflow(pending)} "
+        f"generation {pending['dispatch']['generation']}",
+        flush=True,
+    )
+    completed = wait_for_terminal_job(control, job["job_id"], args.timeout_seconds)
+    plan = verified_json_result(completed["job"], args.r2_credentials_source)
+    validate_project_processing_plan(plan)
+    if plan.get("project") != {
+        "project_id": project["project_id"],
+        "revision": project["revision"],
+    } or plan.get("source_snapshot") != project["iterator"]["accepted_snapshot"]:
+        raise RuntimeError("Processing plan does not match the authoritative project revision")
+    print(json.dumps({
+        "job_id": completed["job"]["job_id"],
+        "run_id": completed["run"]["run_id"],
+        "state": completed["job"]["state"],
+        "artifact": completed["job"]["result"],
+        "project": plan["project"],
+        "plan_hash": plan["plan_hash"],
+        "summary": plan["summary"],
+        "estimate": plan["estimate"],
+    }, ensure_ascii=False, indent=2, sort_keys=True))
+    print(
+        "Full plan: ./authoring/watchcraft-author queue result "
+        "--operator-token-source keychain --r2-credentials-source keychain "
+        f"{completed['job']['job_id']}",
+        flush=True,
+    )
+    return 0
+
+
 def run_queued_video_analysis(args: argparse.Namespace) -> int:
     command_started_at = time.monotonic()
     control = operator_client(args.operator_token_source)
@@ -3869,6 +4302,24 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         default="auto",
         help="Read-only result credential source (default: auto)",
     )
+    plan_project = commands.add_parser(
+        "plan-project",
+        parents=[credentials],
+        help="Plan processing for an imported project's accepted snapshot",
+        description=(
+            "Load the authoritative imported CatalogProject and accepted iterator "
+            "snapshot, then create an immutable logical processing plan. This does "
+            "not acquire media or dispatch transcription and analysis jobs."
+        ),
+    )
+    plan_project.add_argument("project_id")
+    plan_project.add_argument("--timeout-seconds", type=int, default=900)
+    plan_project.add_argument(
+        "--r2-credentials-source",
+        choices=("auto", "keychain", "environment"),
+        default="auto",
+        help="Read-only result credential source (default: auto)",
+    )
     queued_analysis = commands.add_parser(
         "analyze-transcript",
         parents=[credentials],
@@ -4130,6 +4581,8 @@ def run_queue_command(args: argparse.Namespace) -> int:
         return run_project_accept_snapshot(args)
     if args.queue_command == "iterate-project":
         return run_iterate_project(args)
+    if args.queue_command == "plan-project":
+        return run_plan_project(args)
     if args.queue_command == "analyze-transcript":
         return run_queued_video_analysis(args)
 

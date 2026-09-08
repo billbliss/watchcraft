@@ -36,6 +36,7 @@ The schemas are:
 
 - `packages/authoring-pipeline/project/catalog-project.schema.json`
 - `packages/authoring-pipeline/project/collection-iterator-snapshot.schema.json`
+- `packages/authoring-pipeline/project/project-processing-plan.schema.json`
 
 The schemas validate the language-neutral envelopes. Registered collection types and iterators additionally validate their own versioned configuration.
 
@@ -148,6 +149,16 @@ The project's iterator may exist before discovery without an `accepted_snapshot`
 
 Acceptance is a compare-and-swap transition against the current project revision. The candidate must be the successful output of an iterator job whose embedded project aggregate exactly equals that current revision. The operator retrieves and verifies the exact R2 bytes, then submits those bytes with the acceptance command; the control plane independently hashes them, compares them with the job's artifact reference, validates the snapshot and collection-type policy, and writes the next immutable project revision. A replayed command is idempotent, while a stale revision, changed project configuration, mismatched job, or changed byte fails closed.
 
+## Project processing plans
+
+Processing starts from the authoritative project revision and its accepted iterator snapshot, never from an unaccepted candidate or a fresh provider crawl. `watchcraft.planner.video-collection@1` reads and verifies those exact snapshot bytes, then emits an immutable, content-addressed `watchcraft.project-processing-plan` artifact. Planning is one ordinary portable-worker job and does not acquire media or dispatch the jobs it describes.
+
+The planner creates one item plan per unique snapshot item, not per placement. Each item retains all of its placement IDs and has the same logical sequence: source metadata enrichment on the operator machine, local source-audio acquisition and staging, registered MLX transcription, then registered educational-video analysis. Topic normalization depends on every analysis, and collection compilation depends on normalization. Those collection-wide tasks remain explicitly deferred until their handlers are registered.
+
+The plan fixes stable logical task IDs, handler and execution-profile identities, dependency edges, output roles, and conservative worker timeout bounds. It does not claim that a downstream job can be reused before its exact content-addressed input exists. Acquisition reuse is decided only after an audio digest is known; transcription reuse is decided against that audio digest and an exact job specification; analysis reuse is decided against the authoritative transcript digest and its exact job specification. Execution realizes those logical tasks into immutable `AuthoringJobSpec` records as their inputs become available and binds operator approval to that realized plan.
+
+Until historical timing data is calibrated, estimates are intentionally limited to known source duration coverage and the sum of registered worker timeout upper bounds. They do not predict queue latency, local acquisition time, or wall-clock time under concurrency.
+
 ## Metadata observation and approval
 
 Iterators capture useful surrounding context while enumerating members, including course, unit, lesson, playlist, channel, shelf, and item-page metadata. Observed titles, descriptions, publisher identities, canonical URLs, artwork, attribution, licenses, provider IDs, published dates, chapters, ranking observations, and parent relationships belong in the iterator snapshot.
@@ -216,6 +227,8 @@ The first implementation keeps a versioned static registry in the authoring-pipe
 Compatibility is checked explicitly. For example, the course type requires hierarchical nodes and curricular placements, while a flat playlist iterator would need either to provide that shape or be rejected for that project. This check is a seam between the two abstractions, not a third abstraction exposed to authors.
 
 The first executable implementation is `watchcraft.youtube-playlist@1`, registered as the `watchcraft.iterator.youtube-playlist@1` authoring handler on the portable Python worker. It reuses the existing source-only playlist discovery behavior, emits an immutable candidate snapshot, reports placement progress through the generic worker context, and checkpoints every ten source entries. This establishes the execution seam before Khan course and channel-ranking adapters are added.
+
+The first project planner is registered as `watchcraft.planner.video-collection@1` on the same portable worker. It supports accepted snapshots whose items resolve to YouTube media and records operator-local acquisition separately from GitHub-hosted transcription and analysis. Adding another iterator does not require changing this planner when it produces the same compatible video-item contract.
 
 Catalog project persistence and candidate acceptance are implemented in the Convex control plane. `project-import` creates the initial immutable revision, `project-status` reads the current aggregate, `project-history` lists its revision transitions, and `project-accept-snapshot` verifies a succeeded iterator artifact and advances the project exactly once. `iterate-project` accepts either a local project document or an imported project ID, so refreshes use the authoritative stored revision.
 

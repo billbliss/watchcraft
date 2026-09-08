@@ -23,10 +23,22 @@ def registry_snapshot(
     staged_transcription=False,
     staged_smoke=False,
     playlist_iterator=False,
+    project_planner=False,
 ):
+    if project_planner:
+        return {
+            "registry_version": "2026-09-08.2",
+            "registry_sha256": "c" * 64,
+            "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
+                queued_authoring.PROJECT_PROCESSING_PLANNER_HANDLER
+            ],
+            "execution_profile": queued_authoring.LOCAL_EXECUTION_PROFILES[
+                queued_authoring.PYTHON_EXECUTION_PROFILE
+            ],
+        }
     if playlist_iterator:
         return {
-            "registry_version": "2026-09-08.1",
+            "registry_version": "2026-09-08.2",
             "registry_sha256": "c" * 64,
             "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
                 queued_authoring.YOUTUBE_PLAYLIST_ITERATOR_HANDLER
@@ -37,7 +49,7 @@ def registry_snapshot(
         }
     if educational_analysis:
         return {
-            "registry_version": "2026-09-08.1",
+            "registry_version": "2026-09-08.2",
             "registry_sha256": "c" * 64,
             "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
                 queued_authoring.EDUCATIONAL_VIDEO_ANALYSIS_HANDLER
@@ -61,7 +73,7 @@ def registry_snapshot(
             )
         )
         return {
-            "registry_version": "2026-09-08.1",
+            "registry_version": "2026-09-08.2",
             "registry_sha256": "c" * 64,
             "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[handler],
             "execution_profile": queued_authoring.LOCAL_EXECUTION_PROFILES[
@@ -69,7 +81,7 @@ def registry_snapshot(
             ],
         }
     return {
-        "registry_version": "2026-09-08.1",
+        "registry_version": "2026-09-08.2",
         "registry_sha256": "c" * 64,
         "handler": {
             "id": "watchcraft.analysis.lexical",
@@ -256,6 +268,13 @@ class QueuedAuthoringTests(unittest.TestCase):
         ])
         self.assertEqual(iterator.project, "project.json")
         self.assertEqual(iterator.timeout_seconds, 1800)
+        planner = build_parser().parse_args([
+            "queue", "plan-project", "essence-of-linear-algebra",
+            "--operator-token-source", "keychain",
+            "--r2-credentials-source", "keychain",
+        ])
+        self.assertEqual(planner.project_id, "essence-of-linear-algebra")
+        self.assertEqual(planner.timeout_seconds, 900)
         project_import = build_parser().parse_args([
             "queue", "project-import", "project.json",
         ])
@@ -347,6 +366,93 @@ class QueuedAuthoringTests(unittest.TestCase):
         ):
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(queued_authoring.run_queue_command(args), 0)
+
+    def test_plan_project_uses_the_authoritative_project_and_only_dispatches_planner(self):
+        examples = queued_authoring.CATALOG_PROJECT_SCHEMA_PATH.parent / "examples"
+        project = json.loads(
+            (examples / "current-playlist.project.json").read_text(encoding="utf-8")
+        )
+        captured = {}
+        submitted_job = {
+            "job_id": "plan-job-1",
+            "run_id": "plan-run-1",
+            "revision": 2,
+            "state": "awaiting_approval",
+            "spec_sha256": "a" * 64,
+            "spec": {
+                **queued_authoring.project_processing_plan_spec(
+                    project,
+                    planned_at="2026-09-08T20:00:00Z",
+                ),
+                "registry_snapshot": registry_snapshot(project_planner=True),
+            },
+        }
+        control = Mock()
+
+        def post(path, payload):
+            if path == "/projects/get":
+                self.assertEqual(payload, {"project_id": project["project_id"]})
+                return {"project": project}
+            if path == "/submissions/approve":
+                return {"job": {**submitted_job, "revision": 3, "state": "ready"}}
+            raise AssertionError(path)
+
+        control.post.side_effect = post
+
+        def submit(_control, *, request, spec):
+            captured.update(request=request, spec=spec)
+            return {"job": submitted_job, "run": {"run_id": "plan-run-1"}}
+
+        pending = {
+            **submitted_job,
+            "revision": 4,
+            "state": "dispatch_pending",
+            "dispatch": {"generation": 1},
+        }
+        completed = {
+            "job": {
+                **pending,
+                "state": "succeeded",
+                "result": {"digest": "d" * 64},
+            },
+            "run": {"run_id": "plan-run-1", "state": "complete"},
+        }
+        plan = {
+            "project": {
+                "project_id": project["project_id"],
+                "revision": project["revision"],
+            },
+            "source_snapshot": project["iterator"]["accepted_snapshot"],
+            "plan_hash": "e" * 64,
+            "summary": {"unique_items": 16},
+            "estimate": {"status": "duration-informed"},
+        }
+        args = build_parser().parse_args([
+            "queue", "plan-project", project["project_id"],
+            "--operator-token-source", "keychain",
+            "--r2-credentials-source", "keychain",
+        ])
+        output = io.StringIO()
+        with patch("queued_authoring.operator_client", return_value=control), patch(
+            "queued_authoring.submit_spec", side_effect=submit
+        ), patch(
+            "queued_authoring.dispatch_submission", return_value=pending
+        ), patch(
+            "queued_authoring.wait_for_terminal_job", return_value=completed
+        ), patch(
+            "queued_authoring.verified_json_result", return_value=plan
+        ), patch(
+            "queued_authoring.validate_project_processing_plan"
+        ):
+            with redirect_stdout(output):
+                self.assertEqual(queued_authoring.run_queue_command(args), 0)
+        self.assertEqual(captured["request"]["kind"], "project-processing-plan")
+        self.assertEqual(captured["spec"]["inputs"], [project["iterator"]["accepted_snapshot"]])
+        self.assertEqual(
+            captured["spec"]["handler"]["id"],
+            queued_authoring.PROJECT_PROCESSING_PLANNER_HANDLER[0],
+        )
+        self.assertIn("Full plan:", output.getvalue())
 
     def test_result_parser_exposes_separate_control_and_artifact_credentials(self):
         args = build_parser().parse_args([
@@ -2182,6 +2288,102 @@ class QueuedAuthoringTests(unittest.TestCase):
         )
         self.assertEqual(resumed[0], 10)
         self.assertEqual(len(resumed[1]), 10)
+
+    def test_project_planner_plans_unique_items_from_the_accepted_snapshot(self):
+        examples = queued_authoring.CATALOG_PROJECT_SCHEMA_PATH.parent / "examples"
+        project = json.loads(
+            (examples / "current-playlist.project.json").read_text(encoding="utf-8")
+        )
+        snapshot = json.loads(
+            (examples / "current-playlist.snapshot.json").read_text(encoding="utf-8")
+        )
+        duplicate = {
+            **snapshot["placements"][0],
+            "placement_id": "youtube-playlist:duplicate-placement",
+            "position": len(snapshot["placements"]) + 1,
+        }
+        snapshot["placements"].append(duplicate)
+        snapshot["coverage"]["expected"] += 1
+        snapshot["coverage"]["resolved"] += 1
+        snapshot["structure_hash"] = queued_authoring.iterator_structure_sha256(snapshot)
+        payload = queued_authoring.canonical_json(snapshot).encode("utf-8")
+        digest = queued_authoring.sha256_hex(payload)
+        accepted = {
+            "store": "r2",
+            "algorithm": "sha256",
+            "digest": digest,
+            "byte_length": len(payload),
+            "media_type": "application/json",
+            "artifact_kind": "collection-iterator-snapshot",
+            "schema": queued_authoring.COLLECTION_ITERATOR_SNAPSHOT_SCHEMA,
+            "key": f"objects/sha256/{digest[:2]}/{digest[2:]}",
+        }
+        project["iterator"]["accepted_snapshot"] = accepted
+        spec = {
+            **queued_authoring.project_processing_plan_spec(
+                project,
+                planned_at="2026-09-08T20:00:00Z",
+            ),
+            "registry_snapshot": registry_snapshot(project_planner=True),
+        }
+        artifacts = Mock()
+        artifacts.get_bytes.return_value = payload
+        context = Mock()
+        context.artifact_store.return_value = artifacts
+        job = {
+            "job_id": "job-project-plan",
+            "spec_sha256": "a" * 64,
+            "spec": spec,
+        }
+
+        plan = queued_authoring.project_processing_planner(job, context)
+
+        queued_authoring.validate_project_processing_plan(plan)
+        self.assertEqual(plan["source_snapshot"], accepted)
+        item_count = len(snapshot["items"])
+        self.assertEqual(plan["summary"], {
+            "unique_items": item_count,
+            "placements": len(snapshot["placements"]),
+            "operator_local_tasks": item_count * 2,
+            "registered_worker_jobs": item_count * 2,
+            "deferred_collection_jobs": 2,
+        })
+        self.assertEqual(len(plan["items"]), item_count)
+        self.assertEqual(len(plan["items"][0]["placement_ids"]), 2)
+        self.assertEqual(
+            [stage["stage"] for stage in plan["items"][0]["stages"]],
+            [
+                "metadata-enrichment",
+                "source-acquisition",
+                "transcription",
+                "analysis",
+            ],
+        )
+        self.assertEqual(
+            plan["items"][0]["stages"][2]["reuse"]["status"],
+            "deferred",
+        )
+        self.assertEqual(plan["estimate"]["status"], "duration-informed")
+        self.assertEqual(plan["estimate"]["unknown_duration_items"], 0)
+        self.assertEqual(
+            plan["estimate"]["sequential_worker_upper_bound_minutes"],
+            item_count * 90,
+        )
+        self.assertEqual(context.report_progress.call_count, item_count)
+        self.assertEqual(
+            context.report_progress.call_args.kwargs,
+            {
+                "phase": "planning",
+                "completed": item_count,
+                "total": item_count,
+                "unit": "items",
+                "current": snapshot["items"][-1]["title"],
+            },
+        )
+
+        plan["summary"]["unique_items"] = 15
+        with self.assertRaisesRegex(ValueError, "summary"):
+            queued_authoring.validate_project_processing_plan(plan)
 
     def test_python_worker_preserves_classified_staged_input_failures(self):
         reference = staged_audio_reference()
