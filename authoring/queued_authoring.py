@@ -3317,11 +3317,14 @@ def submit_spec(
     *,
     request: dict[str, Any],
     spec: dict[str, Any],
+    job_id: str | None = None,
+    run_id: str | None = None,
+    command_prefix: str | None = None,
 ) -> dict[str, Any]:
     return control.post("/submissions/submit", {
-        "job_id": str(uuid.uuid4()),
-        "run_id": str(uuid.uuid4()),
-        "command_prefix": str(uuid.uuid4()),
+        "job_id": job_id or str(uuid.uuid4()),
+        "run_id": run_id or str(uuid.uuid4()),
+        "command_prefix": command_prefix or str(uuid.uuid4()),
         "request": request,
         "spec": spec,
     })
@@ -4208,12 +4211,13 @@ def run_normalize_project(args: argparse.Namespace) -> int:
     }
     existing = control.post("/pipelines/get", {"run_id": run_id})
     if existing.get("run") is None:
-        submitted = submit_pipeline(
+        submitted = submit_spec(
             control,
+            job_id=job_id,
             run_id=run_id,
             command_prefix=command_prefix,
             request=request,
-            jobs=[{"job_id": job_id, "spec": spec}],
+            spec=spec,
         )
         print(
             f"submitted topic normalization {job_id} for {len(bindings)} analyses",
@@ -4236,17 +4240,18 @@ def run_normalize_project(args: argparse.Namespace) -> int:
             raise RuntimeError("Existing topic normalization does not match its plan")
         print(f"resuming topic normalization {job_id}", flush=True)
     run = submitted["run"]
-    if run["state"] == "planned":
-        approved = control.post("/pipelines/approve", {
-            "run_id": run_id,
-            "command_id": str(uuid.uuid4()),
-            "expected_revision": run["revision"],
-            "actor": "watchcraft-author-cli",
-            "approval_sha256": run["approval_sha256"],
-        })
-        job = approved["jobs"][0]
-    else:
+    job = submitted.get("job")
+    if not isinstance(job, dict):
         job = submitted["jobs"][0]
+    if job["state"] == "awaiting_approval":
+        approved = control.post("/submissions/approve", {
+            "job_id": job_id,
+            "command_id": str(uuid.uuid4()),
+            "expected_revision": job["revision"],
+            "actor": "watchcraft-author-cli",
+            "spec_sha256": job["spec_sha256"],
+        })
+        job = approved["job"]
     _resume_pipeline_job(control, job, "topic normalization")
     completed = wait_for_terminal_job(control, job_id, args.timeout_seconds)
     result = verified_json_result(completed["job"], args.r2_credentials_source)

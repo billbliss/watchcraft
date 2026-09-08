@@ -2435,23 +2435,25 @@ class QueuedAuthoringTests(unittest.TestCase):
                 return {"project": project}
             if path == "/pipelines/get":
                 return {"run": None, "jobs": []}
-            if path == "/pipelines/approve":
-                return {"jobs": [{
+            if path == "/submissions/approve":
+                return {"job": {
                     "job_id": captured["job_id"],
                     "state": "ready",
-                }]}
+                }}
             raise AssertionError(path)
 
         control.post.side_effect = post
         captured = {}
 
-        def submit(_control, *, run_id, command_prefix, request, jobs):
+        def submit(
+            _control, *, job_id, run_id, command_prefix, request, spec
+        ):
             captured.update(
                 run_id=run_id,
                 command_prefix=command_prefix,
                 request=request,
-                job_id=jobs[0]["job_id"],
-                spec=jobs[0]["spec"],
+                job_id=job_id,
+                spec=spec,
             )
             return {
                 "run": {
@@ -2460,7 +2462,12 @@ class QueuedAuthoringTests(unittest.TestCase):
                     "revision": 1,
                     "approval_sha256": "f" * 64,
                 },
-                "jobs": [{"job_id": jobs[0]["job_id"], "state": "awaiting_approval"}],
+                "job": {
+                    "job_id": job_id,
+                    "state": "awaiting_approval",
+                    "revision": 1,
+                    "spec_sha256": "f" * 64,
+                },
             }
 
         completed_job = {
@@ -2505,7 +2512,7 @@ class QueuedAuthoringTests(unittest.TestCase):
                 "digest": analysis_reference["digest"],
             }], ["analysis-job-1"]),
         ), patch(
-            "queued_authoring.submit_pipeline", side_effect=submit
+            "queued_authoring.submit_spec", side_effect=submit
         ), patch(
             "queued_authoring._resume_pipeline_job"
         ), patch(
