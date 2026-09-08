@@ -526,7 +526,7 @@ This command creates only the planner job and its immutable plan artifact. It do
 download video audio or dispatch any of the described processing jobs. The compact
 result reports task counts, duration coverage, and conservative sequential worker
 timeout bounds; the printed `queue result` command retrieves the full plan. The
-planner requires capability registry `2026-09-08.2` to be published and activated
+planner requires capability registry `2026-09-08.2` or later to be published and activated
 after its code is available on `main`. It does not require another Convex deployment.
 
 Execute every item from a successful immutable plan with bounded concurrency:
@@ -563,6 +563,36 @@ require the underlying problem to be addressed before another attempt can be cre
 `process-project` adds the read-only `/pipelines/get` Convex endpoint, so deploy the
 Convex functions with `npx convex deploy` after pushing the code. It composes existing
 handlers and does not require another capability-registry publication.
+
+After every planned item has a successful analysis, normalize the complete collection
+topic set:
+
+```bash
+./authoring/watchcraft-author queue normalize-project-topics \
+  --plan-job-id PLAN_JOB_ID \
+  --operator-token-source keychain \
+  --r2-credentials-source keychain
+```
+
+The command derives every analysis-job identity from the exact plan artifact and
+rejects missing, failed, foreign, or stale item executions. The normalization job binds
+the immutable R2 reference for every analysis as a typed dependency, then runs the
+existing topic-family, assignment, compact-label, and related-topic logic on the OpenAI
+worker. Its deterministic run and job IDs make the command safe to resume. The compact
+result reports the raw and canonical topic counts, families, labels, related pairs, and
+timing; the printed `queue result` command retrieves the complete normalization artifact.
+
+This adds a variable-cardinality dependency contract and capability registry
+`2026-09-08.3`. After committing and pushing, deploy Convex with `npx convex deploy`,
+then publish and activate the checked-in registry before running the command:
+
+```bash
+./authoring/watchcraft-author queue registry-publish \
+  --registry-admin-token-source keychain
+
+./authoring/watchcraft-author queue registry-activate \
+  --registry-admin-token-source keychain
+```
 
 `queue result` resolves the artifact reference from the authoritative completed job,
 downloads the object from private R2, and verifies its declared byte length and SHA-256

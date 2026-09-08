@@ -48,6 +48,15 @@
             "id": { "type": "string", "minLength": 1 },
             "version": { "type": "integer", "minimum": 1 }
           }
+        },
+        "cardinality": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["minimum", "maximum"],
+          "properties": {
+            "minimum": { "type": "integer", "minimum": 0 },
+            "maximum": { "type": "integer", "minimum": 1 }
+          }
         }
       }
     },

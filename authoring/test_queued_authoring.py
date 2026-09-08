@@ -24,7 +24,19 @@ def registry_snapshot(
     staged_smoke=False,
     playlist_iterator=False,
     project_planner=False,
+    topic_normalization=False,
 ):
+    if topic_normalization:
+        return {
+            "registry_version": "2026-09-08.3",
+            "registry_sha256": "c" * 64,
+            "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
+                queued_authoring.TOPIC_NORMALIZATION_HANDLER
+            ],
+            "execution_profile": queued_authoring.LOCAL_EXECUTION_PROFILES[
+                queued_authoring.OPENAI_EXECUTION_PROFILE
+            ],
+        }
     if project_planner:
         return {
             "registry_version": "2026-09-08.2",
@@ -296,6 +308,14 @@ class QueuedAuthoringTests(unittest.TestCase):
         ])
         self.assertTrue(all_project_processing.process_all)
         self.assertEqual(all_project_processing.concurrency, 3)
+        normalization = build_parser().parse_args([
+            "queue", "normalize-project-topics",
+            "--plan-job-id", "plan-job-1",
+            "--operator-token-source", "keychain",
+            "--r2-credentials-source", "keychain",
+        ])
+        self.assertEqual(normalization.plan_job_id, "plan-job-1")
+        self.assertEqual(normalization.timeout_seconds, 3600)
         project_import = build_parser().parse_args([
             "queue", "project-import", "project.json",
         ])
@@ -2264,6 +2284,242 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertIn("authoring-openai-worker.yml", output.getvalue())
         self.assertIn('"analysis_ms": 2000', output.getvalue())
         self.assertIn("Full analysis:", output.getvalue())
+
+    def test_collection_topic_normalizer_uses_the_existing_normalization_core(self):
+        references = []
+        analyses = []
+        for index, video_id in enumerate(("fNk_zzaMoSs", "k7RM-ot2NWY")):
+            digest = str(index + 1) * 64
+            references.append({
+                "store": "r2",
+                "algorithm": "sha256",
+                "digest": digest,
+                "byte_length": 1_000,
+                "media_type": "application/json",
+                "artifact_kind": "analysis",
+                "schema": queued_authoring.VIDEO_ANALYSIS_SCHEMA,
+                "key": f"objects/sha256/{digest[:2]}/{digest[2:]}",
+            })
+            analyses.append({
+                "schema_version": 2,
+                "video": f"{video_id}.youtube",
+                "title": f"Lesson {index + 1}",
+                "topics": ["vectors", "linear algebra"],
+                "sections": [{
+                    "start": "00:00:00",
+                    "end": "00:01:00",
+                    "title": "Vectors",
+                    "concepts": ["vectors"],
+                    "description": "Introduces vectors.",
+                }],
+                "provenance": {
+                    "handler_id": queued_authoring.EDUCATIONAL_VIDEO_ANALYSIS_HANDLER[0],
+                },
+            })
+        bindings = [
+            {
+                "item_id": f"youtube:{Path(analysis['video']).stem}",
+                "video": analysis["video"],
+                "digest": reference["digest"],
+            }
+            for analysis, reference in zip(analyses, references)
+        ]
+        spec = queued_authoring.project_topic_normalization_spec(
+            plan_job_id="plan-job-1",
+            plan_reference={"digest": "d" * 64},
+            plan={
+                "project": {"project_id": "linear-algebra", "revision": 2},
+                "plan_hash": "c" * 64,
+                "collection_tasks": [{"task_id": "project:linear-algebra:topics"}],
+            },
+            dependencies=references,
+            bindings=bindings,
+        )
+        job = {"job_id": "normalization-job-1", "spec_sha256": "a" * 64, "spec": spec}
+        store = Mock()
+        store.get_bytes.side_effect = [
+            json.dumps(analysis).encode("utf-8") for analysis in analyses
+        ]
+        context = Mock()
+        context.artifact_store.return_value = store
+
+        def normalize(args):
+            output = args.root / "Video Catalog" / "topic-normalization.json"
+            output.write_text(json.dumps({
+                "schema_version": 1,
+                "prompt_version": queued_authoring.TOPIC_NORMALIZATION_PROMPT_VERSION,
+                "display_label_prompt_version": (
+                    queued_authoring.TOPIC_DISPLAY_LABEL_PROMPT_VERSION
+                ),
+                "collection_id": "linear-algebra",
+                "status": "complete",
+                "model": queued_authoring.TOPIC_NORMALIZATION_MODEL,
+                "source_hash": "e" * 64,
+                "stats": {
+                    "raw_topic_count": 2,
+                    "canonical_topic_count": 2,
+                    "family_count": 8,
+                    "display_label_count": 2,
+                    "related_edge_count": 1,
+                },
+            }), encoding="utf-8")
+            return 0
+
+        with patch("normalize_topics.run", side_effect=normalize):
+            result = queued_authoring.collection_topic_normalization(job, context)
+        self.assertEqual(result["kind"], "watchcraft.topic-normalization")
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["provenance"]["plan_job_id"], "plan-job-1")
+        self.assertEqual(len(result["provenance"]["analyses"]), 2)
+        self.assertEqual(store.get_bytes.call_count, 2)
+        self.assertEqual(context.report_progress.call_count, 4)
+
+    def test_normalize_project_submits_the_complete_analysis_set_deterministically(self):
+        snapshot = {
+            "store": "r2",
+            "algorithm": "sha256",
+            "digest": "b" * 64,
+            "byte_length": 100,
+            "media_type": "application/json",
+            "artifact_kind": "collection-iterator-snapshot",
+            "schema": queued_authoring.COLLECTION_ITERATOR_SNAPSHOT_SCHEMA,
+            "key": "objects/sha256/bb/" + "b" * 62,
+        }
+        project = json.loads((
+            queued_authoring.CATALOG_PROJECT_SCHEMA_PATH.parent
+            / "examples/current-playlist.project.json"
+        ).read_text(encoding="utf-8"))
+        project["iterator"]["accepted_snapshot"] = snapshot
+        plan = {
+            "project": {
+                "project_id": project["project_id"],
+                "revision": project["revision"],
+            },
+            "source_snapshot": snapshot,
+            "plan_hash": "c" * 64,
+            "items": [],
+            "collection_tasks": [{"task_id": "project:linear-algebra:topics"}],
+        }
+        plan_reference = {
+            "store": "r2",
+            "algorithm": "sha256",
+            "digest": "d" * 64,
+            "byte_length": 1_000,
+            "media_type": "application/json",
+            "artifact_kind": "project-processing-plan",
+            "schema": queued_authoring.PROJECT_PROCESSING_PLAN_SCHEMA,
+            "key": "objects/sha256/dd/" + "d" * 62,
+        }
+        analysis_reference = {
+            **plan_reference,
+            "digest": "e" * 64,
+            "artifact_kind": "analysis",
+            "schema": queued_authoring.VIDEO_ANALYSIS_SCHEMA,
+            "key": "objects/sha256/ee/" + "e" * 62,
+        }
+        plan_job = {
+            "job_id": "plan-job-1",
+            "state": "succeeded",
+            "spec": {"handler": {
+                "id": queued_authoring.PROJECT_PROCESSING_PLANNER_HANDLER[0],
+                "version": queued_authoring.PROJECT_PROCESSING_PLANNER_HANDLER[1],
+            }},
+            "result": plan_reference,
+        }
+        control = Mock()
+
+        def post(path, payload):
+            if path == "/submissions/get":
+                return {"job": plan_job}
+            if path == "/projects/get":
+                return {"project": project}
+            if path == "/pipelines/get":
+                return {"run": None, "jobs": []}
+            if path == "/pipelines/approve":
+                return {"jobs": [{
+                    "job_id": captured["job_id"],
+                    "state": "ready",
+                }]}
+            raise AssertionError(path)
+
+        control.post.side_effect = post
+        captured = {}
+
+        def submit(_control, *, run_id, command_prefix, request, jobs):
+            captured.update(
+                run_id=run_id,
+                command_prefix=command_prefix,
+                request=request,
+                job_id=jobs[0]["job_id"],
+                spec=jobs[0]["spec"],
+            )
+            return {
+                "run": {
+                    "run_id": run_id,
+                    "state": "planned",
+                    "revision": 1,
+                    "approval_sha256": "f" * 64,
+                },
+                "jobs": [{"job_id": jobs[0]["job_id"], "state": "awaiting_approval"}],
+            }
+
+        completed_job = {
+            "job_id": "unused",
+            "state": "succeeded",
+            "result": {
+                **analysis_reference,
+                "digest": "9" * 64,
+                "artifact_kind": "topic-normalization",
+                "schema": queued_authoring.TOPIC_NORMALIZATION_SCHEMA,
+                "key": "objects/sha256/99/" + "9" * 62,
+            },
+        }
+        result = {
+            "kind": "watchcraft.topic-normalization",
+            "status": "complete",
+            "collection_id": project["project_id"],
+            "model": queued_authoring.TOPIC_NORMALIZATION_MODEL,
+            "source_hash": "8" * 64,
+            "stats": {"raw_topic_count": 10},
+            "provenance": {
+                "handler_id": queued_authoring.TOPIC_NORMALIZATION_HANDLER[0],
+                "plan_artifact_sha256": plan_reference["digest"],
+                "analyses": [{"artifact": analysis_reference}],
+                "timing": {"normalization_ms": 1_000},
+            },
+        }
+        args = build_parser().parse_args([
+            "queue", "normalize-project-topics",
+            "--plan-job-id", "plan-job-1",
+        ])
+        output = io.StringIO()
+        with patch("queued_authoring.operator_client", return_value=control), patch(
+            "queued_authoring.verified_json_result", side_effect=[plan, result]
+        ), patch(
+            "queued_authoring.validate_project_processing_plan"
+        ), patch(
+            "queued_authoring.completed_project_analysis_set",
+            return_value=([analysis_reference], [{
+                "item_id": "youtube:fNk_zzaMoSs",
+                "video": "fNk_zzaMoSs.youtube",
+                "digest": analysis_reference["digest"],
+            }], ["analysis-job-1"]),
+        ), patch(
+            "queued_authoring.submit_pipeline", side_effect=submit
+        ), patch(
+            "queued_authoring._resume_pipeline_job"
+        ), patch(
+            "queued_authoring.wait_for_terminal_job",
+            return_value={"job": completed_job, "run": {"run_id": "normalization-run"}},
+        ):
+            with redirect_stdout(output):
+                self.assertEqual(queued_authoring.run_normalize_project(args), 0)
+        self.assertEqual(captured["request"]["analysis_job_ids"], ["analysis-job-1"])
+        self.assertEqual(captured["spec"]["dependencies"], [analysis_reference])
+        self.assertEqual(captured["spec"]["handler"]["id"], (
+            queued_authoring.TOPIC_NORMALIZATION_HANDLER[0]
+        ))
+        self.assertIn("Full normalization:", output.getvalue())
         self.assertNotIn('"sections": [', output.getvalue())
 
     def test_waiting_for_a_remote_job_reports_periodic_progress(self):
@@ -2412,6 +2668,32 @@ class QueuedAuthoringTests(unittest.TestCase):
             analysis_profile["dispatcher"]["workflow"],
             "authoring-openai-worker.yml",
         )
+
+        normalization_job = {
+            "job_id": "job-topic-normalization",
+            "spec": {
+                "operation": "generate",
+                "artifact_kind": "topic-normalization",
+                "output_schema": queued_authoring.TOPIC_NORMALIZATION_SCHEMA,
+                "handler": {
+                    "id": queued_authoring.TOPIC_NORMALIZATION_HANDLER[0],
+                    "version": queued_authoring.TOPIC_NORMALIZATION_HANDLER[1],
+                },
+                "source": {"media_asset_id": "catalog-project:example"},
+                "inputs": [],
+                "dependencies": [transcript_reference(), transcript_reference()],
+                "configuration": {},
+                "registry_snapshot": registry_snapshot(topic_normalization=True),
+            },
+        }
+        for dependency in normalization_job["spec"]["dependencies"]:
+            dependency["artifact_kind"] = "analysis"
+            dependency["schema"] = queued_authoring.VIDEO_ANALYSIS_SCHEMA
+        with patch.dict(os.environ, analysis_environment, clear=True):
+            normalization_profile = queued_authoring.validate_registry_snapshot(
+                normalization_job
+            )
+        self.assertEqual(normalization_profile["id"], "python-openai")
 
     def test_result_displays_verified_json_from_the_authoritative_reference(self):
         payload = queued_authoring.canonical_json({

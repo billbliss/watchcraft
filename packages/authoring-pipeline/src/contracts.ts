@@ -42,6 +42,10 @@ export interface RegistryArtifactContract {
     id: string;
     version: number;
   };
+  cardinality?: {
+    minimum: number;
+    maximum: number;
+  };
 }
 
 export interface RegistryHandlerDefinition {
@@ -333,12 +337,27 @@ function uniqueStrings(value: unknown, label: string): string[] {
 function parseRegistryArtifactContract(value: unknown, label: string): RegistryArtifactContract {
   const candidate = objectValue(value, label);
   const schema = objectValue(candidate.schema, `${label} schema`);
+  const cardinality = candidate.cardinality === undefined
+    ? undefined
+    : objectValue(candidate.cardinality, `${label} cardinality`);
+  const minimum = cardinality === undefined
+    ? undefined
+    : integerValue(cardinality.minimum, `${label} minimum cardinality`, 0);
+  const maximum = cardinality === undefined
+    ? undefined
+    : integerValue(cardinality.maximum, `${label} maximum cardinality`, 1);
+  if (minimum !== undefined && maximum !== undefined && maximum < minimum) {
+    throw new TypeError(`${label} maximum cardinality must not be less than its minimum.`);
+  }
   return {
     artifact_kind: stringValue(candidate.artifact_kind, `${label} artifact kind`),
     schema: {
       id: stringValue(schema.id, `${label} schema ID`),
       version: integerValue(schema.version, `${label} schema version`, 1),
     },
+    ...(minimum !== undefined && maximum !== undefined
+      ? { cardinality: { minimum, maximum } }
+      : {}),
   };
 }
 

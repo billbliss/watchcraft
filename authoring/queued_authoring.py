@@ -80,6 +80,10 @@ PROJECT_PROCESSING_PLANNER_HANDLER = (
     "watchcraft.planner.video-collection",
     "1",
 )
+TOPIC_NORMALIZATION_HANDLER = (
+    "watchcraft.normalize.collection-topics",
+    "1",
+)
 PYTHON_EXECUTION_PROFILE = ("python-portable", "1")
 PYTHON_EXECUTION_WORKFLOW = "authoring-worker.yml"
 OPENAI_EXECUTION_PROFILE = ("python-openai", "1")
@@ -93,7 +97,14 @@ EDUCATIONAL_VIDEO_ANALYSIS_PROMPT_VERSION = 3
 EDUCATIONAL_VIDEO_ANALYSIS_MAX_TRANSCRIPT_CHARS = 1_500_000
 EDUCATIONAL_VIDEO_ANALYSIS_RETRIES = 5
 EDUCATIONAL_VIDEO_ANALYSIS_TIMEOUT_SECONDS = 300
+TOPIC_NORMALIZATION_MODEL = "gpt-5.4-mini"
+TOPIC_NORMALIZATION_PROMPT_VERSION = 2
+TOPIC_DISPLAY_LABEL_PROMPT_VERSION = 1
+TOPIC_NORMALIZATION_BATCH_SIZE = 40
+TOPIC_NORMALIZATION_RETRIES = 5
+TOPIC_NORMALIZATION_TIMEOUT_SECONDS = 300
 VIDEO_ANALYSIS_SCHEMA = {"id": "watchcraft.video-analysis", "version": 2}
+TOPIC_NORMALIZATION_SCHEMA = {"id": "watchcraft.topic-normalization", "version": 1}
 TRANSCRIPTION_SMOKE_TEXT = (
     "Watchcraft verifies real audio transcription on an Apple silicon worker."
 )
@@ -705,6 +716,20 @@ class AnalysisProviderError(RuntimeError):
     retryable = True
 
 
+class NormalizationDependencyError(RuntimeError):
+    """An authoritative analysis set cannot be normalized."""
+
+    classification = "analysis_dependency_invalid"
+    retryable = False
+
+
+class NormalizationProviderError(RuntimeError):
+    """The registered normalization provider did not produce a result."""
+
+    classification = "normalization_provider_failed"
+    retryable = True
+
+
 def educational_video_analysis(
     job: dict[str, Any], context: WorkerContext | None = None
 ) -> dict[str, Any]:
@@ -864,6 +889,198 @@ def educational_video_analysis(
     return result
 
 
+def collection_topic_normalization(
+    job: dict[str, Any], context: WorkerContext | None = None
+) -> dict[str, Any]:
+    handler_started_at = time.monotonic()
+    if context is None:
+        raise RuntimeError("Collection topic normalization requires a worker context")
+    spec = job["spec"]
+    configuration = spec.get("configuration")
+    expected_keys = {
+        "analyses",
+        "batch_size",
+        "display_label_prompt_version",
+        "logical_task_id",
+        "model",
+        "plan_artifact_sha256",
+        "plan_hash",
+        "plan_job_id",
+        "project_id",
+        "project_revision",
+        "prompt_version",
+        "retries",
+        "timeout_seconds",
+    }
+    if not isinstance(configuration, dict) or set(configuration) != expected_keys:
+        raise ValueError("the collection topic-normalization configuration is invalid")
+    if (
+        configuration["model"] != TOPIC_NORMALIZATION_MODEL
+        or configuration["prompt_version"] != TOPIC_NORMALIZATION_PROMPT_VERSION
+        or configuration["display_label_prompt_version"]
+        != TOPIC_DISPLAY_LABEL_PROMPT_VERSION
+        or configuration["batch_size"] != TOPIC_NORMALIZATION_BATCH_SIZE
+        or configuration["retries"] != TOPIC_NORMALIZATION_RETRIES
+        or configuration["timeout_seconds"] != TOPIC_NORMALIZATION_TIMEOUT_SECONDS
+        or spec.get("source", {}).get("media_asset_id")
+        != f"catalog-project:{configuration['project_id']}"
+        or spec.get("inputs") != []
+    ):
+        raise ValueError("the collection topic-normalization policy is unsupported")
+    analysis_bindings = configuration["analyses"]
+    dependencies = spec.get("dependencies")
+    if (
+        not isinstance(analysis_bindings, list)
+        or not analysis_bindings
+        or not isinstance(dependencies, list)
+        or len(dependencies) != len(analysis_bindings)
+    ):
+        raise NormalizationDependencyError(
+            "Collection topic normalization requires one analysis for every planned item"
+        )
+
+    store = context.artifact_store()
+    analyses = []
+    dependency_started_at = time.monotonic()
+    for index, (binding, dependency) in enumerate(
+        zip(analysis_bindings, dependencies), start=1
+    ):
+        reference = validated_artifact_reference(dependency)
+        if (
+            not isinstance(binding, dict)
+            or set(binding) != {"digest", "item_id", "video"}
+            or binding.get("digest") != reference.get("digest")
+            or reference.get("artifact_kind") != "analysis"
+            or reference.get("schema") != VIDEO_ANALYSIS_SCHEMA
+            or reference.get("media_type") != "application/json"
+        ):
+            raise NormalizationDependencyError(
+                "A topic-normalization analysis binding is invalid"
+            )
+        context.report_progress(
+            phase="fetching-analyses",
+            completed=index - 1,
+            total=len(dependencies),
+            unit="analyses",
+            current=binding["item_id"],
+        )
+        try:
+            analysis = json.loads(store.get_bytes(reference).decode("utf-8"))
+        except Exception as error:
+            failure = NormalizationDependencyError(
+                f"Could not retrieve analysis dependency for {binding['item_id']}"
+            )
+            failure.classification = "analysis_dependency_unavailable"
+            failure.retryable = True
+            raise failure from error
+        provenance = analysis.get("provenance") if isinstance(analysis, dict) else None
+        if (
+            not isinstance(analysis, dict)
+            or analysis.get("schema_version") != VIDEO_ANALYSIS_SCHEMA["version"]
+            or analysis.get("video") != binding["video"]
+            or not analysis.get("topics")
+            or not analysis.get("sections")
+            or not isinstance(provenance, dict)
+            or provenance.get("handler_id") != EDUCATIONAL_VIDEO_ANALYSIS_HANDLER[0]
+        ):
+            raise NormalizationDependencyError(
+                f"Analysis dependency for {binding['item_id']} is invalid"
+            )
+        analyses.append(analysis)
+    dependency_ms = elapsed_milliseconds(dependency_started_at)
+    context.report_progress(
+        phase="normalizing-topics",
+        completed=0,
+        total=1,
+        unit="collection",
+        current=configuration["project_id"],
+    )
+
+    try:
+        import normalize_topics
+
+        normalization_started_at = time.monotonic()
+        with tempfile.TemporaryDirectory(
+            prefix="watchcraft-topic-normalization-"
+        ) as directory:
+            root = Path(directory)
+            catalog = root / "Video Catalog"
+            analysis_root = catalog / "analysis"
+            analysis_root.mkdir(parents=True)
+            (catalog / "collection.json").write_text(
+                json.dumps({"collection_id": configuration["project_id"]}),
+                encoding="utf-8",
+            )
+            for analysis in analyses:
+                (analysis_root / f"{Path(analysis['video']).stem}.analysis.json").write_text(
+                    json.dumps(analysis, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+            normalize_topics.run(argparse.Namespace(
+                root=root,
+                normalization_model=configuration["model"],
+                limit=None,
+                batch_size=configuration["batch_size"],
+                retries=configuration["retries"],
+                timeout=configuration["timeout_seconds"],
+                force=False,
+                rebuild_related=False,
+                rebuild_display_labels=False,
+                dry_run=False,
+                no_rebuild=True,
+            ))
+            result = json.loads(
+                (catalog / "topic-normalization.json").read_text(encoding="utf-8")
+            )
+        normalization_ms = elapsed_milliseconds(normalization_started_at)
+    except (NormalizationDependencyError, ValueError):
+        raise
+    except Exception as error:
+        raise NormalizationProviderError(str(error)) from error
+
+    if (
+        not isinstance(result, dict)
+        or result.get("schema_version") != TOPIC_NORMALIZATION_SCHEMA["version"]
+        or result.get("prompt_version") != TOPIC_NORMALIZATION_PROMPT_VERSION
+        or result.get("display_label_prompt_version")
+        != TOPIC_DISPLAY_LABEL_PROMPT_VERSION
+        or result.get("collection_id") != configuration["project_id"]
+        or result.get("model") != TOPIC_NORMALIZATION_MODEL
+        or result.get("status") != "complete"
+        or not isinstance(result.get("stats"), dict)
+    ):
+        raise RuntimeError("Collection topic normalization returned an invalid result")
+    result["kind"] = "watchcraft.topic-normalization"
+    result["provenance"] = {
+        "handler_id": TOPIC_NORMALIZATION_HANDLER[0],
+        "handler_version": TOPIC_NORMALIZATION_HANDLER[1],
+        "job_id": job["job_id"],
+        "spec_sha256": job["spec_sha256"],
+        "plan_job_id": configuration["plan_job_id"],
+        "plan_artifact_sha256": configuration["plan_artifact_sha256"],
+        "plan_hash": configuration["plan_hash"],
+        "logical_task_id": configuration["logical_task_id"],
+        "project_revision": configuration["project_revision"],
+        "analyses": [
+            {**binding, "artifact": dependency}
+            for binding, dependency in zip(analysis_bindings, dependencies)
+        ],
+        "timing": {
+            "dependency_fetch_ms": dependency_ms,
+            "normalization_ms": normalization_ms,
+            "handler_ms": elapsed_milliseconds(handler_started_at),
+        },
+    }
+    context.report_progress(
+        phase="normalizing-topics",
+        completed=1,
+        total=1,
+        unit="collection",
+        current=configuration["project_id"],
+    )
+    return result
+
+
 def mlx_staged_transcription(
     job: dict[str, Any], context: WorkerContext | None = None
 ) -> dict[str, Any]:
@@ -993,6 +1210,7 @@ HANDLERS: dict[
 ] = {
     ANALYSIS_HANDLER: lexical_analysis,
     EDUCATIONAL_VIDEO_ANALYSIS_HANDLER: educational_video_analysis,
+    TOPIC_NORMALIZATION_HANDLER: collection_topic_normalization,
     TRANSCRIPTION_SMOKE_HANDLER: mlx_transcription_smoke,
     HTTP_TRANSCRIPTION_SMOKE_HANDLER: mlx_http_transcription_smoke,
     STAGED_TRANSCRIPTION_SMOKE_HANDLER: mlx_staged_transcription,
@@ -1044,6 +1262,37 @@ LOCAL_HANDLER_CONTRACTS: dict[tuple[str, str], dict[str, Any]] = {
             "retryable_classifications": [
                 "analysis_dependency_unavailable",
                 "analysis_provider_failed",
+                "artifact_store_failed",
+                "lease_expired",
+            ],
+        },
+    },
+    TOPIC_NORMALIZATION_HANDLER: {
+        "id": TOPIC_NORMALIZATION_HANDLER[0],
+        "version": TOPIC_NORMALIZATION_HANDLER[1],
+        "operation": "generate",
+        "inputs": [],
+        "dependencies": [
+            {
+                "artifact_kind": "analysis",
+                "schema": VIDEO_ANALYSIS_SCHEMA,
+                "cardinality": {"minimum": 1, "maximum": 10_000},
+            },
+        ],
+        "output": {
+            "artifact_kind": "topic-normalization",
+            "schema": TOPIC_NORMALIZATION_SCHEMA,
+        },
+        "execution_profile": {
+            "id": OPENAI_EXECUTION_PROFILE[0],
+            "version": OPENAI_EXECUTION_PROFILE[1],
+        },
+        "lease_class": "model-api",
+        "retry_policy": {
+            "max_attempts": 2,
+            "retryable_classifications": [
+                "analysis_dependency_unavailable",
+                "normalization_provider_failed",
                 "artifact_store_failed",
                 "lease_expired",
             ],
@@ -1296,18 +1545,36 @@ def validate_registry_snapshot(job: dict[str, Any]) -> dict[str, Any]:
     for field in ("inputs", "dependencies"):
         references = spec.get(field)
         contracts = handler.get(field)
-        if not isinstance(references, list) or len(references) != len(contracts):
+        if not isinstance(references, list) or not isinstance(contracts, list):
             raise RegistrySupportError(
                 f"Resolved handler {field} do not match the job specification"
             )
-        for reference, contract in zip(references, contracts):
-            if not isinstance(reference, dict) or {
-                "artifact_kind": reference.get("artifact_kind"),
-                "schema": reference.get("schema"),
-            } != contract:
+        reference_index = 0
+        for contract in contracts:
+            cardinality = contract.get("cardinality", {"minimum": 1, "maximum": 1})
+            count = 0
+            expected_artifact = {
+                "artifact_kind": contract.get("artifact_kind"),
+                "schema": contract.get("schema"),
+            }
+            while reference_index < len(references) and count < cardinality["maximum"]:
+                reference = references[reference_index]
+                actual_artifact = {
+                    "artifact_kind": reference.get("artifact_kind"),
+                    "schema": reference.get("schema"),
+                } if isinstance(reference, dict) else None
+                if actual_artifact != expected_artifact:
+                    break
+                reference_index += 1
+                count += 1
+            if count < cardinality["minimum"]:
                 raise RegistrySupportError(
                     f"Resolved handler {field} do not match the job specification"
                 )
+        if reference_index != len(references):
+            raise RegistrySupportError(
+                f"Resolved handler {field} do not match the job specification"
+            )
 
     expected_profile = (
         os.environ.get("WATCHCRAFT_EXECUTION_PROFILE_ID", PYTHON_EXECUTION_PROFILE[0]),
@@ -3617,6 +3884,103 @@ def project_item_execution_context(
     }
 
 
+def project_topic_normalization_spec(
+    *,
+    plan_job_id: str,
+    plan_reference: dict[str, Any],
+    plan: dict[str, Any],
+    dependencies: list[dict[str, Any]],
+    bindings: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if len(dependencies) != len(bindings) or not dependencies:
+        raise ValueError("Topic normalization requires a complete non-empty analysis set")
+    return {
+        "operation": "generate",
+        "artifact_kind": "topic-normalization",
+        "output_schema": TOPIC_NORMALIZATION_SCHEMA,
+        "handler": {
+            "id": TOPIC_NORMALIZATION_HANDLER[0],
+            "version": TOPIC_NORMALIZATION_HANDLER[1],
+        },
+        "source": {
+            "media_asset_id": f"catalog-project:{plan['project']['project_id']}"
+        },
+        "inputs": [],
+        "dependencies": dependencies,
+        "configuration": {
+            "project_id": plan["project"]["project_id"],
+            "project_revision": plan["project"]["revision"],
+            "plan_job_id": plan_job_id,
+            "plan_artifact_sha256": plan_reference["digest"],
+            "plan_hash": plan["plan_hash"],
+            "logical_task_id": plan["collection_tasks"][0]["task_id"],
+            "model": TOPIC_NORMALIZATION_MODEL,
+            "prompt_version": TOPIC_NORMALIZATION_PROMPT_VERSION,
+            "display_label_prompt_version": TOPIC_DISPLAY_LABEL_PROMPT_VERSION,
+            "batch_size": TOPIC_NORMALIZATION_BATCH_SIZE,
+            "retries": TOPIC_NORMALIZATION_RETRIES,
+            "timeout_seconds": TOPIC_NORMALIZATION_TIMEOUT_SECONDS,
+            "analyses": bindings,
+        },
+    }
+
+
+def completed_project_analysis_set(
+    control: AuthoringHttpClient,
+    *,
+    plan_job_id: str,
+    plan: dict[str, Any],
+    plan_reference: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    dependencies = []
+    bindings = []
+    job_ids = []
+    for item in executable_project_plan_items(plan, process_all=True):
+        analysis_job_id = stable_project_execution_id(
+            plan_reference["digest"], item["item_id"], "analysis"
+        )
+        submission = control.post("/submissions/get", {"job_id": analysis_job_id})
+        job = submission.get("job")
+        run = submission.get("run")
+        request = run.get("request") if isinstance(run, dict) else None
+        if (
+            not isinstance(job, dict)
+            or job.get("state") != "succeeded"
+            or job.get("spec", {}).get("handler") != {
+                "id": EDUCATIONAL_VIDEO_ANALYSIS_HANDLER[0],
+                "version": EDUCATIONAL_VIDEO_ANALYSIS_HANDLER[1],
+            }
+            or not isinstance(request, dict)
+            or request.get("kind") != "project-item-processing"
+            or request.get("plan_job_id") != plan_job_id
+            or request.get("plan_artifact_sha256") != plan_reference["digest"]
+            or request.get("plan_hash") != plan["plan_hash"]
+            or request.get("project_id") != plan["project"]["project_id"]
+            or request.get("project_revision") != plan["project"]["revision"]
+            or request.get("item_id") != item["item_id"]
+        ):
+            raise RuntimeError(
+                f"Planned item {item['item_id']} has no successful bound analysis job"
+            )
+        reference = validated_artifact_reference(job.get("result"))
+        if (
+            reference.get("artifact_kind") != "analysis"
+            or reference.get("schema") != VIDEO_ANALYSIS_SCHEMA
+            or reference.get("media_type") != "application/json"
+        ):
+            raise RuntimeError(
+                f"Planned item {item['item_id']} has an invalid analysis artifact"
+            )
+        dependencies.append(reference)
+        bindings.append({
+            "item_id": item["item_id"],
+            "video": f"{item['source']['media_id']}.youtube",
+            "digest": reference["digest"],
+        })
+        job_ids.append(analysis_job_id)
+    return dependencies, bindings, job_ids
+
+
 def compact_project_item_execution(
     item: dict[str, Any], summary: dict[str, Any]
 ) -> dict[str, Any]:
@@ -3766,6 +4130,161 @@ def run_process_project(args: argparse.Namespace) -> int:
             f"Project processing completed with {len(failures)} failed item(s); "
             "rerun after addressing the reported failures"
         )
+    return 0
+
+
+def run_normalize_project(args: argparse.Namespace) -> int:
+    command_started_at = time.monotonic()
+    control = operator_client(args.operator_token_source)
+    plan_submission = control.post(
+        "/submissions/get", {"job_id": args.plan_job_id}
+    )
+    plan_job = plan_submission.get("job")
+    if (
+        not isinstance(plan_job, dict)
+        or plan_job.get("state") != "succeeded"
+        or plan_job.get("spec", {}).get("handler") != {
+            "id": PROJECT_PROCESSING_PLANNER_HANDLER[0],
+            "version": PROJECT_PROCESSING_PLANNER_HANDLER[1],
+        }
+    ):
+        raise RuntimeError(
+            f"Job {args.plan_job_id} is not a successful project processing plan"
+        )
+    plan_reference = validated_artifact_reference(plan_job.get("result"))
+    if (
+        plan_reference.get("artifact_kind") != "project-processing-plan"
+        or plan_reference.get("schema") != PROJECT_PROCESSING_PLAN_SCHEMA
+    ):
+        raise RuntimeError(
+            f"Job {args.plan_job_id} is not a successful project processing plan"
+        )
+    plan = verified_json_result(plan_job, args.r2_credentials_source)
+    validate_project_processing_plan(plan)
+    current = control.post(
+        "/projects/get", {"project_id": plan["project"]["project_id"]}
+    )
+    project = current.get("project")
+    validate_json_schema(project, CATALOG_PROJECT_SCHEMA_PATH, "Catalog project")
+    if (
+        project["revision"] != plan["project"]["revision"]
+        or project["iterator"].get("accepted_snapshot") != plan["source_snapshot"]
+    ):
+        raise RuntimeError(
+            "Processing plan is stale relative to the authoritative catalog project"
+        )
+    dependencies, bindings, analysis_job_ids = completed_project_analysis_set(
+        control,
+        plan_job_id=args.plan_job_id,
+        plan=plan,
+        plan_reference=plan_reference,
+    )
+    spec = project_topic_normalization_spec(
+        plan_job_id=args.plan_job_id,
+        plan_reference=plan_reference,
+        plan=plan,
+        dependencies=dependencies,
+        bindings=bindings,
+    )
+    project_item_id = f"catalog-project:{plan['project']['project_id']}"
+    run_id = stable_project_execution_id(
+        plan_reference["digest"], project_item_id, "topic-normalization-run"
+    )
+    job_id = stable_project_execution_id(
+        plan_reference["digest"], project_item_id, "topic-normalization"
+    )
+    command_prefix = stable_project_execution_id(
+        plan_reference["digest"], project_item_id, "topic-normalization-commands"
+    )
+    request = {
+        "kind": "project-topic-normalization",
+        "plan_job_id": args.plan_job_id,
+        "plan_artifact_sha256": plan_reference["digest"],
+        "plan_hash": plan["plan_hash"],
+        "project_id": plan["project"]["project_id"],
+        "project_revision": plan["project"]["revision"],
+        "analysis_job_ids": analysis_job_ids,
+        "logical_task_id": plan["collection_tasks"][0]["task_id"],
+    }
+    existing = control.post("/pipelines/get", {"run_id": run_id})
+    if existing.get("run") is None:
+        submitted = submit_pipeline(
+            control,
+            run_id=run_id,
+            command_prefix=command_prefix,
+            request=request,
+            jobs=[{"job_id": job_id, "spec": spec}],
+        )
+        print(
+            f"submitted topic normalization {job_id} for {len(bindings)} analyses",
+            flush=True,
+        )
+    else:
+        submitted = existing
+        jobs = submitted.get("jobs")
+        if (
+            submitted.get("run", {}).get("request") != request
+            or not isinstance(jobs, list)
+            or len(jobs) != 1
+            or jobs[0].get("job_id") != job_id
+            or {
+                key: value
+                for key, value in jobs[0].get("spec", {}).items()
+                if key != "registry_snapshot"
+            } != spec
+        ):
+            raise RuntimeError("Existing topic normalization does not match its plan")
+        print(f"resuming topic normalization {job_id}", flush=True)
+    run = submitted["run"]
+    if run["state"] == "planned":
+        approved = control.post("/pipelines/approve", {
+            "run_id": run_id,
+            "command_id": str(uuid.uuid4()),
+            "expected_revision": run["revision"],
+            "actor": "watchcraft-author-cli",
+            "approval_sha256": run["approval_sha256"],
+        })
+        job = approved["jobs"][0]
+    else:
+        job = submitted["jobs"][0]
+    _resume_pipeline_job(control, job, "topic normalization")
+    completed = wait_for_terminal_job(control, job_id, args.timeout_seconds)
+    result = verified_json_result(completed["job"], args.r2_credentials_source)
+    provenance = result.get("provenance") if isinstance(result, dict) else None
+    if (
+        result.get("kind") != "watchcraft.topic-normalization"
+        or result.get("status") != "complete"
+        or result.get("collection_id") != plan["project"]["project_id"]
+        or not isinstance(provenance, dict)
+        or provenance.get("handler_id") != TOPIC_NORMALIZATION_HANDLER[0]
+        or provenance.get("plan_artifact_sha256") != plan_reference["digest"]
+        or len(provenance.get("analyses", [])) != len(bindings)
+    ):
+        raise RuntimeError("Project topic normalization returned an invalid result")
+    total_ms = elapsed_milliseconds(command_started_at)
+    print(f"completed topic normalization {job_id} in {format_elapsed(total_ms)}", flush=True)
+    print(json.dumps({
+        "job_id": job_id,
+        "run_id": run_id,
+        "state": completed["job"]["state"],
+        "artifact": completed["job"]["result"],
+        "project": plan["project"],
+        "analysis_count": len(bindings),
+        "model": result["model"],
+        "source_hash": result["source_hash"],
+        "stats": result["stats"],
+        "timing": {
+            "local": {"command_total_ms": total_ms},
+            "ledger": completed_job_timing(completed["job"]),
+            "worker": provenance.get("timing", {}),
+        },
+    }, ensure_ascii=False, indent=2, sort_keys=True))
+    print(
+        "Full normalization: ./authoring/watchcraft-author queue result "
+        "--operator-token-source keychain --r2-credentials-source keychain "
+        f"{job_id}",
+        flush=True,
+    )
     return 0
 
 
@@ -4740,6 +5259,24 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         default="auto",
         help="Temporary source-media uploader credential source (default: auto)",
     )
+    normalize_project = commands.add_parser(
+        "normalize-project-topics",
+        parents=[credentials],
+        help="Normalize topics across every completed analysis in a project plan",
+        description=(
+            "Verify a successful immutable project plan and every deterministic "
+            "per-item analysis, then dispatch the registered collection-wide topic "
+            "normalizer with those exact analysis artifacts as dependencies."
+        ),
+    )
+    normalize_project.add_argument("--plan-job-id", required=True)
+    normalize_project.add_argument("--timeout-seconds", type=int, default=3600)
+    normalize_project.add_argument(
+        "--r2-credentials-source",
+        choices=("auto", "keychain", "environment"),
+        default="auto",
+        help="Read-only plan and result credential source (default: auto)",
+    )
     queued_analysis = commands.add_parser(
         "analyze-transcript",
         parents=[credentials],
@@ -5005,6 +5542,8 @@ def run_queue_command(args: argparse.Namespace) -> int:
         return run_plan_project(args)
     if args.queue_command == "process-project":
         return run_process_project(args)
+    if args.queue_command == "normalize-project-topics":
+        return run_normalize_project(args)
     if args.queue_command == "analyze-transcript":
         return run_queued_video_analysis(args)
 

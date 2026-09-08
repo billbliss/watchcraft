@@ -131,6 +131,31 @@ const educationalAnalysisSpec = {
   },
 };
 
+const secondAnalysisArtifact = {
+  ...transcriptArtifact,
+  digest: "e".repeat(64),
+  artifact_kind: "analysis",
+  schema: { id: "watchcraft.video-analysis", version: 2 },
+  key: `objects/sha256/ee/${"e".repeat(62)}`,
+};
+
+const firstAnalysisArtifact = {
+  ...secondAnalysisArtifact,
+  digest: "c".repeat(64),
+  key: `objects/sha256/cc/${"c".repeat(62)}`,
+};
+
+const topicNormalizationSpec = {
+  operation: "generate" as const,
+  artifact_kind: "topic-normalization",
+  output_schema: { id: "watchcraft.topic-normalization", version: 1 },
+  handler: { id: "watchcraft.normalize.collection-topics", version: "1" },
+  source: { media_asset_id: "catalog-project:essence-of-linear-algebra" },
+  inputs: [],
+  dependencies: [firstAnalysisArtifact, secondAnalysisArtifact],
+  configuration: { project_id: "essence-of-linear-algebra" },
+};
+
 const playlistIteratorSpec = {
   operation: "generate" as const,
   artifact_kind: "collection-iterator-snapshot",
@@ -172,11 +197,39 @@ test("the checked-in registry is valid, stable, and fully resolves an approved j
   const registry = parseCapabilityRegistry(DEFAULT_CAPABILITY_REGISTRY);
   const spec = resolveJobSpecAgainstRegistry(lexicalSpec, registry);
 
-  assert.equal(spec.registry_snapshot?.registry_version, "2026-09-08.2");
+  assert.equal(spec.registry_snapshot?.registry_version, "2026-09-08.3");
   assert.equal(spec.registry_snapshot?.registry_sha256, capabilityRegistrySha256(registry));
   assert.equal(spec.registry_snapshot?.execution_profile.id, "python-portable");
   assert.equal(spec.registry_snapshot?.execution_profile.dispatcher.workflow, "authoring-worker.yml");
   assert.deepEqual(verifyRegistryResolutionSnapshot(spec, registry), spec.registry_snapshot);
+});
+
+test("collection topic normalization binds a variable complete analysis set", () => {
+  const spec = resolveJobSpecAgainstRegistry(
+    topicNormalizationSpec,
+    DEFAULT_CAPABILITY_REGISTRY,
+  );
+  assert.equal(spec.registry_snapshot?.handler.id, "watchcraft.normalize.collection-topics");
+  assert.equal(spec.registry_snapshot?.execution_profile.id, "python-openai");
+  assert.deepEqual(spec.dependencies, [firstAnalysisArtifact, secondAnalysisArtifact]);
+  assert.deepEqual(spec.registry_snapshot?.handler.dependencies[0]?.cardinality, {
+    minimum: 1,
+    maximum: 10_000,
+  });
+  assert.throws(
+    () => resolveJobSpecAgainstRegistry(
+      { ...topicNormalizationSpec, dependencies: [] },
+      DEFAULT_CAPABILITY_REGISTRY,
+    ),
+    /requires between 1 and 10000 matching artifacts/,
+  );
+  assert.throws(
+    () => resolveJobSpecAgainstRegistry(
+      { ...topicNormalizationSpec, dependencies: [transcriptArtifact] },
+      DEFAULT_CAPABILITY_REGISTRY,
+    ),
+    /requires between 1 and 10000 matching artifacts/,
+  );
 });
 
 test("educational analysis binds an authoritative transcript to the OpenAI profile", () => {

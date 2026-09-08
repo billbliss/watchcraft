@@ -373,6 +373,13 @@ the upstream job has succeeded with the declared artifact kind and schema. The a
 worker resolves that job through its authenticated control-plane connection and then
 verifies the resulting R2 artifact normally.
 
+Artifact contracts default to exactly one matching input or dependency. A handler that
+performs a bounded fan-in may instead declare minimum and maximum cardinality on one
+contract. Resolution expands that contract only across matching artifacts and rejects
+too few, too many, or differently typed references before approval. Collection topic
+normalization uses this mechanism to bind the complete immutable video-analysis set;
+the references are dependencies, not opaque configuration discovered later by a worker.
+
 All jobs in the plan share one run. Recording the first dispatch starts it; successful
 intermediate jobs leave it running; and only success of every planned job completes it.
 The plan approval digest binds the ordered job IDs and their resolved specification

@@ -33,14 +33,28 @@ function assertArtifactContracts(
   references: AuthoringDependency[],
   contracts: RegistryArtifactContract[],
 ): void {
-  if (references.length !== contracts.length) {
-    throw new TypeError(`${label} count does not match the registered handler contract.`);
-  }
-  references.forEach((reference, index) => {
-    if (!artifactMatches(reference, contracts[index])) {
-      throw new TypeError(`${label} ${index} does not match the registered handler contract.`);
+  let referenceIndex = 0;
+  contracts.forEach((contract, contractIndex) => {
+    const minimum = contract.cardinality?.minimum ?? 1;
+    const maximum = contract.cardinality?.maximum ?? 1;
+    let count = 0;
+    while (
+      referenceIndex < references.length
+      && count < maximum
+      && artifactMatches(references[referenceIndex], contract)
+    ) {
+      referenceIndex += 1;
+      count += 1;
+    }
+    if (count < minimum) {
+      throw new TypeError(
+        `${label} contract ${contractIndex} requires between ${minimum} and ${maximum} matching artifacts.`,
+      );
     }
   });
+  if (referenceIndex !== references.length) {
+    throw new TypeError(`${label} contains artifacts outside the registered handler contract.`);
+  }
 }
 
 export function resolveJobSpecAgainstRegistry(
