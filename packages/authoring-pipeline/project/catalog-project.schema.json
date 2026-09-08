@@ -1,0 +1,210 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://watchcraft.dev/schemas/catalog-project-v1.json",
+  "title": "Watchcraft Catalog Project",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "schema_version",
+    "project_id",
+    "revision",
+    "collection_type",
+    "iterator",
+    "metadata",
+    "metadata_basis",
+    "publication"
+  ],
+  "properties": {
+    "kind": { "const": "watchcraft.catalog-project" },
+    "schema_version": { "const": 1 },
+    "project_id": { "$ref": "#/$defs/id" },
+    "revision": { "type": "integer", "minimum": 1 },
+    "collection_type": { "$ref": "#/$defs/configuredCapability" },
+    "iterator": { "$ref": "#/$defs/iterator" },
+    "metadata": { "$ref": "#/$defs/projectMetadata" },
+    "metadata_basis": {
+      "type": "object",
+      "propertyNames": { "type": "string", "minLength": 1 },
+      "additionalProperties": { "$ref": "#/$defs/metadataBasis" }
+    },
+    "publication": { "$ref": "#/$defs/publication" },
+    "extensions": { "$ref": "#/$defs/extensions" }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "uri": { "type": "string", "format": "uri", "minLength": 1 },
+    "jsonObject": { "type": "object" },
+    "versionedIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "version": { "type": "string", "minLength": 1, "maxLength": 50 }
+      }
+    },
+    "configuredCapability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "configuration"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "version": { "type": "string", "minLength": 1, "maxLength": 50 },
+        "configuration": { "$ref": "#/$defs/jsonObject" }
+      }
+    },
+    "publisher": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "canonical_url": { "$ref": "#/$defs/uri" },
+        "provider_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "artwork": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "url"],
+      "properties": {
+        "role": { "enum": ["thumbnail", "banner", "icon"] },
+        "url": { "$ref": "#/$defs/uri" },
+        "alt": { "type": "string" }
+      }
+    },
+    "projectMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "publisher": { "$ref": "#/$defs/publisher" },
+        "language": { "type": "string", "minLength": 2 },
+        "artwork": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/artwork" }
+        },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        }
+      }
+    },
+    "metadataBasis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["origin"],
+      "properties": {
+        "origin": {
+          "enum": [
+            "editorial",
+            "source-observation",
+            "generated",
+            "legacy-import"
+          ]
+        },
+        "iterator_snapshot_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "source_path": { "type": "string", "minLength": 1 },
+        "generator": { "$ref": "#/$defs/versionedIdentity" }
+      }
+    },
+    "iterator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version",
+        "configuration",
+        "access_profile",
+        "refresh"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "version": { "type": "string", "minLength": 1, "maxLength": 50 },
+        "configuration": { "$ref": "#/$defs/jsonObject" },
+        "access_profile": { "$ref": "#/$defs/id" },
+        "accepted_snapshot": { "$ref": "#/$defs/iteratorSnapshotReference" },
+        "refresh": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "stale_while_refresh"],
+          "properties": {
+            "mode": { "const": "on-demand" },
+            "stale_while_refresh": { "type": "boolean" }
+          }
+        },
+        "extensions": { "$ref": "#/$defs/extensions" }
+      }
+    },
+    "iteratorSnapshotReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "store",
+        "algorithm",
+        "digest",
+        "byte_length",
+        "media_type",
+        "artifact_kind",
+        "schema",
+        "key"
+      ],
+      "properties": {
+        "store": { "const": "r2" },
+        "algorithm": { "const": "sha256" },
+        "digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "byte_length": { "type": "integer", "minimum": 1 },
+        "media_type": { "const": "application/json" },
+        "artifact_kind": { "const": "collection-iterator-snapshot" },
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "version"],
+          "properties": {
+            "id": { "const": "watchcraft.collection-iterator-snapshot" },
+            "version": { "const": 1 }
+          }
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^objects/sha256/[a-f0-9]{2}/[a-f0-9]{62}$"
+        }
+      }
+    },
+    "publication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["collection_id", "listed"],
+      "properties": {
+        "collection_id": { "$ref": "#/$defs/id" },
+        "listed": { "type": "boolean" }
+      }
+    },
+    "extensionEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "value"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/versionedIdentity" },
+        "value": {}
+      }
+    },
+    "extensions": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$" },
+      "additionalProperties": { "$ref": "#/$defs/extensionEnvelope" }
+    }
+  }
+}

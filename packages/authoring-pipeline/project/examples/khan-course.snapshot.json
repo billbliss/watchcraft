@@ -1,0 +1,153 @@
+{
+  "kind": "watchcraft.collection-iterator-snapshot",
+  "schema_version": 1,
+  "project": {
+    "project_id": "khan-linear-algebra-course",
+    "revision": 1
+  },
+  "iterator": {
+    "id": "watchcraft.khan-course",
+    "version": "1"
+  },
+  "observed_at": "2026-09-06T12:00:00Z",
+  "source": {
+    "source_id": "khan-course:linear-algebra",
+    "source_type": "khan-course",
+    "title": "Linear algebra",
+    "canonical_url": "https://www.khanacademy.org/math/linear-algebra",
+    "metadata": {
+      "provider": "Khan Academy",
+      "provider_course_id": "linear-algebra"
+    }
+  },
+  "nodes": [
+    {
+      "node_id": "course:linear-algebra",
+      "node_type": "course",
+      "title": "Linear algebra",
+      "canonical_url": "https://www.khanacademy.org/math/linear-algebra",
+      "parent_node_id": null,
+      "position": 1,
+      "metadata": {
+        "provider_id": "linear-algebra"
+      }
+    },
+    {
+      "node_id": "unit:vectors-and-spaces",
+      "node_type": "unit",
+      "title": "Vectors and spaces",
+      "canonical_url": "https://www.khanacademy.org/math/linear-algebra/vectors-and-spaces",
+      "parent_node_id": "course:linear-algebra",
+      "position": 1,
+      "metadata": {
+        "provider_id": "vectors-and-spaces"
+      }
+    },
+    {
+      "node_id": "lesson:vector-introduction",
+      "node_type": "lesson",
+      "title": "Introduction to vectors",
+      "canonical_url": "https://www.khanacademy.org/math/linear-algebra/vectors-and-spaces/vectors",
+      "parent_node_id": "unit:vectors-and-spaces",
+      "position": 1,
+      "metadata": {
+        "provider_id": "vectors"
+      }
+    },
+    {
+      "node_id": "lesson:vector-examples",
+      "node_type": "lesson",
+      "title": "Vector examples",
+      "canonical_url": "https://www.khanacademy.org/math/linear-algebra/vectors-and-spaces/vector-examples",
+      "parent_node_id": "unit:vectors-and-spaces",
+      "position": 2,
+      "metadata": {
+        "provider_id": "vector-examples"
+      }
+    }
+  ],
+  "items": [
+    {
+      "item_id": "khan-video:introduction-to-vectors",
+      "title": "Introduction to vectors",
+      "canonical_url": "https://www.khanacademy.org/math/linear-algebra/vectors-and-spaces/vectors/v/introduction-to-vectors",
+      "media": [
+        {
+          "type": "youtube",
+          "media_id": "khan-youtube-video-id",
+          "canonical_url": "https://www.youtube.com/watch?v=khan-example"
+        }
+      ],
+      "attribution": {
+        "publisher": "Khan Academy",
+        "publisher_url": "https://www.khanacademy.org/",
+        "license": null,
+        "license_url": null
+      },
+      "source_provenance": {
+        "provider": "khan-academy",
+        "provider_content_id": "introduction-to-vectors",
+        "resolved_media_provider": "youtube"
+      },
+      "metadata": {}
+    }
+  ],
+  "placements": [
+    {
+      "placement_id": "khan-placement:vector-introduction",
+      "item_id": "khan-video:introduction-to-vectors",
+      "parent_node_id": "lesson:vector-introduction",
+      "position": 1,
+      "source_url": "https://www.khanacademy.org/math/linear-algebra/vectors-and-spaces/vectors/v/introduction-to-vectors",
+      "metadata": {}
+    },
+    {
+      "placement_id": "khan-placement:vector-examples-review",
+      "item_id": "khan-video:introduction-to-vectors",
+      "parent_node_id": "lesson:vector-examples",
+      "position": 1,
+      "source_url": "https://www.khanacademy.org/math/linear-algebra/vectors-and-spaces/vector-examples",
+      "metadata": {
+        "context": "review"
+      }
+    }
+  ],
+  "coverage": {
+    "basis": "placements",
+    "expected": 2,
+    "resolved": 2,
+    "unresolved": []
+  },
+  "metadata_proposals": [
+    {
+      "field": "metadata.title",
+      "value": "Linear algebra",
+      "basis": {
+        "source_path": "source.title",
+        "confidence": 1.0
+      }
+    },
+    {
+      "field": "metadata.publisher",
+      "value": {
+        "name": "Khan Academy",
+        "canonical_url": "https://www.khanacademy.org/"
+      },
+      "basis": {
+        "source_path": "source.metadata.provider",
+        "confidence": 1.0
+      }
+    }
+  ],
+  "structure_hash": "457ec70a7e4f41ef09555ed89273906e8a771cb6b1e987c67568ac10123cb777",
+  "provenance": {
+    "access_profile": "public-anonymous",
+    "discovery_mode": "bounded-crawl",
+    "requested_url": "https://www.khanacademy.org/math/linear-algebra",
+    "retrieved_urls": [
+      "https://www.khanacademy.org/math/linear-algebra",
+      "https://www.khanacademy.org/math/linear-algebra/vectors-and-spaces/vectors"
+    ],
+    "warnings": []
+  }
+}

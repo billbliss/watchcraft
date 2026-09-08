@@ -1,0 +1,152 @@
+{
+  "kind": "watchcraft.collection-iterator-snapshot",
+  "schema_version": 1,
+  "project": {
+    "project_id": "gdc-popular-videos",
+    "revision": 1
+  },
+  "iterator": {
+    "id": "watchcraft.youtube-channel-popular",
+    "version": "1"
+  },
+  "observed_at": "2026-09-06T12:00:00Z",
+  "source": {
+    "source_id": "youtube-channel:GDCFestivalofGaming",
+    "source_type": "youtube-channel-videos",
+    "title": "Popular videos",
+    "canonical_url": "https://www.youtube.com/@GDCFestivalofGaming/videos",
+    "metadata": {
+      "channel": "GDC",
+      "channel_url": "https://www.youtube.com/@GDCFestivalofGaming",
+      "ranking": "provider-popular",
+      "requested_limit": 2
+    }
+  },
+  "nodes": [
+    {
+      "node_id": "channel:GDCFestivalofGaming",
+      "node_type": "channel",
+      "title": "GDC",
+      "canonical_url": "https://www.youtube.com/@GDCFestivalofGaming",
+      "parent_node_id": null,
+      "position": 1,
+      "metadata": {}
+    },
+    {
+      "node_id": "shelf:popular-videos",
+      "node_type": "ranked-shelf",
+      "title": "Popular videos",
+      "canonical_url": "https://www.youtube.com/@GDCFestivalofGaming/videos",
+      "parent_node_id": "channel:GDCFestivalofGaming",
+      "position": 1,
+      "metadata": {
+        "ranking": "provider-popular"
+      }
+    }
+  ],
+  "items": [
+    {
+      "item_id": "youtube:POPULAR_VIDEO_1",
+      "title": "DOOM: Behind the Music",
+      "canonical_url": "https://www.youtube.com/watch?v=POPULAR_VIDEO_1",
+      "media": [
+        {
+          "type": "youtube",
+          "media_id": "POPULAR_VIDEO_1",
+          "canonical_url": "https://www.youtube.com/watch?v=POPULAR_VIDEO_1"
+        }
+      ],
+      "attribution": {
+        "publisher": "GDC",
+        "publisher_url": "https://www.youtube.com/@GDCFestivalofGaming",
+        "license": null,
+        "license_url": null
+      },
+      "source_provenance": {
+        "channel_handle": "@GDCFestivalofGaming"
+      },
+      "metadata": {
+        "view_count_observed": 1700000,
+        "published_age_display_observed": "9 years ago"
+      }
+    },
+    {
+      "item_id": "youtube:POPULAR_VIDEO_2",
+      "title": "How to Survive in Gamedev for Eleven Years Without a Hit",
+      "canonical_url": "https://www.youtube.com/watch?v=POPULAR_VIDEO_2",
+      "media": [
+        {
+          "type": "youtube",
+          "media_id": "POPULAR_VIDEO_2",
+          "canonical_url": "https://www.youtube.com/watch?v=POPULAR_VIDEO_2"
+        }
+      ],
+      "attribution": {
+        "publisher": "GDC",
+        "publisher_url": "https://www.youtube.com/@GDCFestivalofGaming",
+        "license": null,
+        "license_url": null
+      },
+      "source_provenance": {
+        "channel_handle": "@GDCFestivalofGaming"
+      },
+      "metadata": {
+        "view_count_observed": 1100000,
+        "published_age_display_observed": "9 years ago"
+      }
+    }
+  ],
+  "placements": [
+    {
+      "placement_id": "popular-rank:1",
+      "item_id": "youtube:POPULAR_VIDEO_1",
+      "parent_node_id": "shelf:popular-videos",
+      "position": 1,
+      "source_url": "https://www.youtube.com/@GDCFestivalofGaming/videos",
+      "metadata": {
+        "ranking": "provider-popular",
+        "rank_observed": 1
+      }
+    },
+    {
+      "placement_id": "popular-rank:2",
+      "item_id": "youtube:POPULAR_VIDEO_2",
+      "parent_node_id": "shelf:popular-videos",
+      "position": 2,
+      "source_url": "https://www.youtube.com/@GDCFestivalofGaming/videos",
+      "metadata": {
+        "ranking": "provider-popular",
+        "rank_observed": 2
+      }
+    }
+  ],
+  "coverage": {
+    "basis": "source-entries",
+    "expected": 2,
+    "resolved": 2,
+    "unresolved": []
+  },
+  "metadata_proposals": [
+    {
+      "field": "metadata.publisher",
+      "value": {
+        "name": "GDC",
+        "canonical_url": "https://www.youtube.com/@GDCFestivalofGaming"
+      },
+      "basis": {
+        "source_path": "source.metadata.channel",
+        "confidence": 1.0
+      }
+    }
+  ],
+  "structure_hash": "87632507a37fbfee4972f8912840a430de5719df335624c50e18fd9481423cd8",
+  "provenance": {
+    "access_profile": "public-anonymous",
+    "discovery_mode": "provider-query",
+    "requested_url": "https://www.youtube.com/@GDCFestivalofGaming/videos",
+    "retrieved_urls": ["https://www.youtube.com/@GDCFestivalofGaming/videos"],
+    "warnings": [
+      "Provider-popular ordering is observational and may change between refreshes."
+    ]
+  }
+}

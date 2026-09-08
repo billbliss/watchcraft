@@ -1,0 +1,275 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://watchcraft.dev/schemas/collection-iterator-snapshot-v1.json",
+  "title": "Watchcraft Collection Iterator Snapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "schema_version",
+    "project",
+    "iterator",
+    "observed_at",
+    "source",
+    "nodes",
+    "items",
+    "placements",
+    "coverage",
+    "metadata_proposals",
+    "structure_hash",
+    "provenance"
+  ],
+  "properties": {
+    "kind": { "const": "watchcraft.collection-iterator-snapshot" },
+    "schema_version": { "const": 1 },
+    "project": { "$ref": "#/$defs/projectReference" },
+    "iterator": { "$ref": "#/$defs/versionedIdentity" },
+    "observed_at": { "type": "string", "format": "date-time" },
+    "source": { "$ref": "#/$defs/sourceRoot" },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/node" }
+    },
+    "items": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/item" }
+    },
+    "placements": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/placement" }
+    },
+    "coverage": { "$ref": "#/$defs/coverage" },
+    "metadata_proposals": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/metadataProposal" }
+    },
+    "structure_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "provenance": { "$ref": "#/$defs/provenance" },
+    "extensions": { "$ref": "#/$defs/extensions" }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "uri": { "type": "string", "format": "uri", "minLength": 1 },
+    "versionedIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "projectReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_id", "revision"],
+      "properties": {
+        "project_id": { "$ref": "#/$defs/id" },
+        "revision": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "sourceRoot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "source_type",
+        "title",
+        "canonical_url",
+        "metadata"
+      ],
+      "properties": {
+        "source_id": { "$ref": "#/$defs/id" },
+        "source_type": { "$ref": "#/$defs/id" },
+        "title": { "type": "string", "minLength": 1 },
+        "canonical_url": { "$ref": "#/$defs/uri" },
+        "metadata": { "type": "object" }
+      }
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_id",
+        "node_type",
+        "title",
+        "parent_node_id",
+        "position",
+        "metadata"
+      ],
+      "properties": {
+        "node_id": { "$ref": "#/$defs/id" },
+        "node_type": { "$ref": "#/$defs/id" },
+        "title": { "type": "string" },
+        "canonical_url": { "$ref": "#/$defs/uri" },
+        "parent_node_id": {
+          "oneOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }]
+        },
+        "position": { "type": "integer", "minimum": 1 },
+        "metadata": { "type": "object" },
+        "extensions": { "$ref": "#/$defs/extensions" }
+      }
+    },
+    "mediaIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "media_id"],
+      "properties": {
+        "type": { "$ref": "#/$defs/id" },
+        "media_id": { "$ref": "#/$defs/id" },
+        "canonical_url": { "$ref": "#/$defs/uri" },
+        "metadata": { "type": "object" }
+      }
+    },
+    "attribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["publisher"],
+      "properties": {
+        "publisher": { "type": "string", "minLength": 1 },
+        "publisher_url": { "$ref": "#/$defs/uri" },
+        "license": { "type": ["string", "null"] },
+        "license_url": {
+          "oneOf": [{ "$ref": "#/$defs/uri" }, { "type": "null" }]
+        }
+      }
+    },
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "item_id",
+        "title",
+        "canonical_url",
+        "media",
+        "attribution",
+        "source_provenance",
+        "metadata"
+      ],
+      "properties": {
+        "item_id": { "$ref": "#/$defs/id" },
+        "title": { "type": "string", "minLength": 1 },
+        "canonical_url": { "$ref": "#/$defs/uri" },
+        "media": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/mediaIdentity" }
+        },
+        "attribution": { "$ref": "#/$defs/attribution" },
+        "source_provenance": { "type": "object" },
+        "metadata": { "type": "object" },
+        "extensions": { "$ref": "#/$defs/extensions" }
+      }
+    },
+    "placement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "placement_id",
+        "item_id",
+        "parent_node_id",
+        "position",
+        "source_url",
+        "metadata"
+      ],
+      "properties": {
+        "placement_id": { "$ref": "#/$defs/id" },
+        "item_id": { "$ref": "#/$defs/id" },
+        "parent_node_id": { "$ref": "#/$defs/id" },
+        "position": { "type": "integer", "minimum": 1 },
+        "source_url": { "$ref": "#/$defs/uri" },
+        "metadata": { "type": "object" },
+        "extensions": { "$ref": "#/$defs/extensions" }
+      }
+    },
+    "unresolved": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_ref", "classification", "message"],
+      "properties": {
+        "source_ref": { "type": "string", "minLength": 1 },
+        "classification": { "$ref": "#/$defs/id" },
+        "message": { "type": "string", "minLength": 1 }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["basis", "expected", "resolved", "unresolved"],
+      "properties": {
+        "basis": { "enum": ["source-entries", "items", "placements"] },
+        "expected": { "type": "integer", "minimum": 0 },
+        "resolved": { "type": "integer", "minimum": 0 },
+        "unresolved": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/unresolved" }
+        }
+      }
+    },
+    "metadataProposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "value", "basis"],
+      "properties": {
+        "field": { "type": "string", "minLength": 1 },
+        "value": {},
+        "basis": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source_path"],
+          "properties": {
+            "source_path": { "type": "string", "minLength": 1 },
+            "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+          }
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "access_profile",
+        "discovery_mode",
+        "requested_url",
+        "retrieved_urls",
+        "warnings"
+      ],
+      "properties": {
+        "access_profile": { "$ref": "#/$defs/id" },
+        "discovery_mode": {
+          "enum": ["bounded-crawl", "provider-query", "legacy-import"]
+        },
+        "requested_url": { "$ref": "#/$defs/uri" },
+        "retrieved_urls": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/uri" },
+          "uniqueItems": true
+        },
+        "warnings": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "extensionEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "value"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/versionedIdentity" },
+        "value": {}
+      }
+    },
+    "extensions": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$" },
+      "additionalProperties": { "$ref": "#/$defs/extensionEnvelope" }
+    }
+  }
+}

@@ -1,0 +1,82 @@
+{
+  "kind": "watchcraft.catalog-project",
+  "schema_version": 1,
+  "project_id": "khan-linear-algebra-course",
+  "revision": 1,
+  "collection_type": {
+    "id": "watchcraft.course",
+    "version": "1",
+    "configuration": {
+      "preserve_source_hierarchy": true,
+      "completion_basis": "video-placements",
+      "presentation": {
+        "show_units": true,
+        "show_lessons": true,
+        "show_source_backlinks": true
+      }
+    }
+  },
+  "metadata": {
+    "title": "Linear algebra",
+    "description": "A structured course covering vectors, matrices, transformations, and related concepts.",
+    "publisher": {
+      "name": "Khan Academy",
+      "canonical_url": "https://www.khanacademy.org/"
+    },
+    "language": "en"
+  },
+  "metadata_basis": {
+    "title": {
+      "origin": "source-observation",
+      "iterator_snapshot_sha256": "05f8dca730dcef6ca0aff9072b326312d302042d58d858b2100637c96aaeb5b2",
+      "source_path": "source.title"
+    },
+    "description": {
+      "origin": "generated",
+      "iterator_snapshot_sha256": "05f8dca730dcef6ca0aff9072b326312d302042d58d858b2100637c96aaeb5b2",
+      "generator": {
+        "id": "watchcraft.course-metadata",
+        "version": "1"
+      }
+    },
+    "publisher": {
+      "origin": "source-observation",
+      "iterator_snapshot_sha256": "05f8dca730dcef6ca0aff9072b326312d302042d58d858b2100637c96aaeb5b2",
+      "source_path": "source.metadata.publisher"
+    }
+  },
+  "iterator": {
+    "id": "watchcraft.khan-course",
+    "version": "1",
+    "configuration": {
+      "canonical_url": "https://www.khanacademy.org/math/linear-algebra",
+      "course_id": "linear-algebra",
+      "selection": {
+        "kind": "complete-course-outline",
+        "included_content_kinds": ["video"]
+      }
+    },
+    "access_profile": "public-anonymous",
+    "accepted_snapshot": {
+      "store": "r2",
+      "algorithm": "sha256",
+      "digest": "05f8dca730dcef6ca0aff9072b326312d302042d58d858b2100637c96aaeb5b2",
+      "byte_length": 4592,
+      "media_type": "application/json",
+      "artifact_kind": "collection-iterator-snapshot",
+      "schema": {
+        "id": "watchcraft.collection-iterator-snapshot",
+        "version": 1
+      },
+      "key": "objects/sha256/05/f8dca730dcef6ca0aff9072b326312d302042d58d858b2100637c96aaeb5b2"
+    },
+    "refresh": {
+      "mode": "on-demand",
+      "stale_while_refresh": true
+    }
+  },
+  "publication": {
+    "collection_id": "khan-linear-algebra-course",
+    "listed": true
+  }
+}

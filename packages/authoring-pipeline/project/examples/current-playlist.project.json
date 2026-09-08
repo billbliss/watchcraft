@@ -1,0 +1,63 @@
+{
+  "kind": "watchcraft.catalog-project",
+  "schema_version": 1,
+  "project_id": "essence-of-linear-algebra",
+  "revision": 1,
+  "collection_type": {
+    "id": "watchcraft.video-collection",
+    "version": "1",
+    "configuration": {
+      "structure": "ordered-list"
+    }
+  },
+  "metadata": {
+    "title": "Essence of linear algebra",
+    "description": "A visual introduction to the core ideas of linear algebra.",
+    "publisher": {
+      "name": "3Blue1Brown",
+      "canonical_url": "https://www.youtube.com/@3blue1brown"
+    },
+    "language": "en"
+  },
+  "metadata_basis": {
+    "title": { "origin": "legacy-import" },
+    "description": { "origin": "editorial" },
+    "publisher": {
+      "origin": "legacy-import"
+    }
+  },
+  "iterator": {
+    "id": "watchcraft.youtube-playlist",
+    "version": "1",
+    "configuration": {
+      "canonical_url": "https://www.youtube.com/playlist?list=PLZHQObOWTQDPD3MizzM2xVFitgF8hE_ab",
+      "playlist_id": "PLZHQObOWTQDPD3MizzM2xVFitgF8hE_ab",
+      "selection": {
+        "kind": "published-order",
+        "excluded_item_ids": []
+      }
+    },
+    "access_profile": "public-anonymous",
+    "accepted_snapshot": {
+      "store": "r2",
+      "algorithm": "sha256",
+      "digest": "a7ede9c601adf73e5341b9abe9b23d7d4849c162eb12d1c4c81cc1465455903d",
+      "byte_length": 3863,
+      "media_type": "application/json",
+      "artifact_kind": "collection-iterator-snapshot",
+      "schema": {
+        "id": "watchcraft.collection-iterator-snapshot",
+        "version": 1
+      },
+      "key": "objects/sha256/a7/ede9c601adf73e5341b9abe9b23d7d4849c162eb12d1c4c81cc1465455903d"
+    },
+    "refresh": {
+      "mode": "on-demand",
+      "stale_while_refresh": true
+    }
+  },
+  "publication": {
+    "collection_id": "essence-of-linear-algebra",
+    "listed": true
+  }
+}

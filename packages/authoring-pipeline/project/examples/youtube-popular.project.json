@@ -1,0 +1,74 @@
+{
+  "kind": "watchcraft.catalog-project",
+  "schema_version": 1,
+  "project_id": "gdc-popular-videos",
+  "revision": 1,
+  "collection_type": {
+    "id": "watchcraft.ranked-video-catalog",
+    "version": "1",
+    "configuration": {
+      "ranking_is_snapshot_relative": true,
+      "retain_previous_publication_until_approved": true,
+      "presentation": {
+        "show_rank": true,
+        "show_observed_at": true,
+        "source_backlink_label": "View current popular videos"
+      }
+    }
+  },
+  "metadata": {
+    "title": "Popular GDC videos",
+    "description": "A snapshot of popular talks and presentations from the GDC channel.",
+    "publisher": {
+      "name": "GDC",
+      "canonical_url": "https://www.youtube.com/@GDCFestivalofGaming"
+    },
+    "language": "en"
+  },
+  "metadata_basis": {
+    "title": { "origin": "editorial" },
+    "description": { "origin": "editorial" },
+    "publisher": {
+      "origin": "source-observation",
+      "iterator_snapshot_sha256": "c4a723a2e514809fd57b93fa8bfdd96a4b51fbf900899f873034a9dea12d8fbf",
+      "source_path": "source.metadata.channel"
+    }
+  },
+  "iterator": {
+    "id": "watchcraft.youtube-channel-popular",
+    "version": "1",
+    "configuration": {
+      "canonical_url": "https://www.youtube.com/@GDCFestivalofGaming/videos",
+      "channel_handle": "@GDCFestivalofGaming",
+      "selection": {
+        "kind": "ranked-videos",
+        "ranking": "provider-popular",
+        "limit": 2,
+        "include_shorts": false,
+        "include_live_archives": false
+      }
+    },
+    "access_profile": "public-anonymous",
+    "accepted_snapshot": {
+      "store": "r2",
+      "algorithm": "sha256",
+      "digest": "c4a723a2e514809fd57b93fa8bfdd96a4b51fbf900899f873034a9dea12d8fbf",
+      "byte_length": 4446,
+      "media_type": "application/json",
+      "artifact_kind": "collection-iterator-snapshot",
+      "schema": {
+        "id": "watchcraft.collection-iterator-snapshot",
+        "version": 1
+      },
+      "key": "objects/sha256/c4/a723a2e514809fd57b93fa8bfdd96a4b51fbf900899f873034a9dea12d8fbf"
+    },
+    "refresh": {
+      "mode": "on-demand",
+      "stale_while_refresh": true
+    }
+  },
+  "publication": {
+    "collection_id": "gdc-popular-videos",
+    "listed": true
+  }
+}

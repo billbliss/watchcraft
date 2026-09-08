@@ -1,0 +1,223 @@
+# ADR 0005: Catalog projects, collection types, and iterators
+
+- Status: Proposed
+- Date: 2026-09-06
+
+## Context
+
+The current authoring workspace and published `watchcraft.collection` package use "collection" for two different things: the durable intention to gather and shape material, and the compiled package installed by a reader. We need an authoring identity that survives discovery refreshes and publication revisions without complicating the simple act of defining a collection.
+
+Current projects are primarily manually curated lists or YouTube playlists. Near-term additions include a Khan Academy course and a changing channel ranking such as YouTube "Popular videos". These differ along two practical axes: what kind of collection Watchcraft is building, and how Watchcraft enumerates its members.
+
+The existing seventeen collections must remain usable and publishable without retranscription, analysis, topic normalization, or a content-revision change merely to adopt the new authoring model.
+
+## Decision
+
+The author-facing model has two extensibility points:
+
+1. A `CollectionType` defines what the resulting collection means. It owns type-specific fields, validation, compilation rules, and reader presentation.
+2. A `CollectionIterator` defines how to discover and enumerate the collection's members. It owns provider access, traversal, source normalization, observed metadata, and completeness reporting.
+
+A `CatalogProject` is a durable, revisioned instance that chooses and configures one collection type and one iterator:
+
+```text
+CatalogProject
+  ├── CollectionType: what the collection means
+  └── CollectionIterator: where its members come from
+
+CollectionIterator run
+  └── immutable iterator snapshot
+
+CollectionType + snapshot + processing artifacts
+  └── published CollectionPackage
+```
+
+The schemas are:
+
+- `packages/authoring-pipeline/project/catalog-project.schema.json`
+- `packages/authoring-pipeline/project/collection-iterator-snapshot.schema.json`
+
+The schemas validate the language-neutral envelopes. Registered collection types and iterators additionally validate their own versioned configuration.
+
+## Catalog projects
+
+A project contains stable `project_id` and `revision` fields, approved collection metadata, publication configuration, a configured collection type, and a configured iterator. Its essential shape is:
+
+```json
+{
+  "kind": "watchcraft.catalog-project",
+  "schema_version": 1,
+  "project_id": "gdc-popular-videos",
+  "revision": 1,
+  "collection_type": {
+    "id": "watchcraft.ranked-video-catalog",
+    "version": "1",
+    "configuration": {}
+  },
+  "iterator": {
+    "id": "watchcraft.youtube-channel-popular",
+    "version": "1",
+    "configuration": {},
+    "access_profile": "public-anonymous",
+    "refresh": {
+      "mode": "on-demand",
+      "stale_while_refresh": true
+    }
+  }
+}
+```
+
+`project_id` identifies the long-lived authoring project. `publication.collection_id` identifies its current published output. They may initially be equal, but they are not aliases: project history and unpublished revisions can exist independently of a published collection revision.
+
+Catalog projects are revisioned JSON aggregates stored in Convex. Their semantics are defined by the JSON contract rather than the physical Convex tables, and they must be exportable as JSON.
+
+## Collection types
+
+A collection type is a registered, versioned capability. It defines:
+
+- its custom configuration and metadata fields;
+- structural invariants expected of iterator output;
+- compilation rules for producing a collection package;
+- reader navigation and presentation; and
+- compatibility with iterator output shapes.
+
+Reader presentation is deliberately part of the collection type rather than an independent registry. A type may expose presentation settings in its configuration and may support additional named views later, but project documents do not contain arbitrary JavaScript, HTML, or remote executable code.
+
+The candidate v1 types are:
+
+- `watchcraft.video-collection@1`: the conservative ordered-video type used by current collections;
+- `watchcraft.course@1`: an ordered course hierarchy with explicit units, lessons, coverage, and placements; and
+- `watchcraft.ranked-video-catalog@1`: membership and ordering relative to a recorded provider ranking.
+
+## Collection iterators
+
+A collection iterator is a registered, versioned class of discovery operation. It accepts validated configuration and returns a normalized iterator snapshot. Although the name evokes a programming-language iterator, an implementation may make paginated requests, perform a bounded crawl, checkpoint long work, coalesce concurrent requests, use cached observations, and report partial coverage.
+
+An iterator owns source recognition, fetching, traversal, and normalization. It does not decide the collection's semantics or manufacture reader routes. It may recommend compatible collection types and propose metadata, but the project records the author's accepted choice.
+
+The initial iterator families are:
+
+- `watchcraft.youtube-playlist@1`: enumerate a playlist in its published order;
+- `watchcraft.khan-course@1`: crawl the bounded Khan course outline and enumerate its curricular placements;
+- `watchcraft.youtube-channel-popular@1`: observe a channel's provider-defined popular-video ranking; and
+- a legacy import path for adopting existing workspaces without rediscovery.
+
+The first schema permits one iterator per project. Multiple or composed iterators are deferred until a concrete project requires them.
+
+## Iterator snapshots
+
+The output of an iterator is stored as an immutable, content-addressed `watchcraft.collection-iterator-snapshot`. This is pipeline bookkeeping and evidence, not a third author-facing abstraction.
+
+A snapshot records:
+
+- the project revision and iterator identity that produced it;
+- source identity, canonical URL, and observed source metadata;
+- hierarchy `nodes`, when applicable;
+- deduplicated `items` and their media identities;
+- ordered `placements` connecting items to nodes;
+- expected, resolved, and classified unresolved coverage;
+- metadata proposals and their source paths;
+- observation time, retrieval provenance, and warnings; and
+- a deterministic structural hash.
+
+Items and placements remain separate because one item may appear more than once in a course, shelf, playlist, or future combined collection. A Khan item remains a Khan source item even when its resolved media identity has `type: "youtube"`.
+
+`structure_hash` is SHA-256 over the canonical structural projection: source stable identity, node IDs/types/parents/positions, item and media identities, and placement IDs/items/parents/positions. It excludes observation time, volatile popularity metrics, metadata proposals, and retrieval diagnostics.
+
+The project's iterator may exist before discovery without an `accepted_snapshot`. Approving an observation creates a new project revision whose iterator points to the exact R2 object key, digest, byte length, and schema identity of that snapshot. Refresh creates another immutable candidate; it never mutates the snapshot accepted by an existing revision.
+
+## Metadata observation and approval
+
+Iterators capture useful surrounding context while enumerating members, including course, unit, lesson, playlist, channel, shelf, and item-page metadata. Observed titles, descriptions, publisher identities, canonical URLs, artwork, attribution, licenses, provider IDs, published dates, chapters, ranking observations, and parent relationships belong in the iterator snapshot.
+
+The snapshot may propose collection metadata with a source path and confidence. Accepted values live in the project, and `metadata_basis` records whether each value is editorial, copied from an iterator snapshot, generated, or imported from a legacy workspace. Refreshing an iterator may propose a new value but never silently overwrites approved project metadata.
+
+## Storage and lifecycle
+
+Catalog projects are stored as revisioned JSON aggregates in Convex. Iterator snapshots, plans, transcripts, analyses, normalization results, and compilation results are content-addressed objects in R2. Reviewed collection packages remain publication artifacts, currently stored in Git.
+
+A pipeline run binds an exact `(project_id, revision)`, which in turn binds the accepted iterator snapshot. Publishing creates a new collection revision only when compiled package content changes.
+
+## Adoption of current collections
+
+Each of the seventeen existing `watchcraft-authoring.json` workspaces can be imported as a `watchcraft.video-collection@1` project. Its existing source enumeration becomes an iterator snapshot; existing transcripts, analyses, normalization results, and published package remain authoritative.
+
+| Existing field or artifact | Adopted representation |
+| --- | --- |
+| `collection.collection_id` | project ID and publication collection ID |
+| collection title, description, publisher | approved project metadata with `legacy-import` or editorial basis |
+| `collection.source` | iterator configuration |
+| `sources` video records | snapshot items and ordered placements |
+| `position` | placement position |
+| explicit source exclusions | iterator selection configuration and classified exclusion records |
+| caption/audio/embedding exclusions | downstream processing policy and classified exclusion records |
+| transcript files | existing authoritative transcription inputs |
+| analysis files | existing authoritative analysis inputs |
+| `topic-normalization.json` | existing normalization input to compilation |
+| `collection.json` | unchanged published collection package |
+
+Adoption must preserve collection IDs, ordering, exclusions, analysis content, topic IDs, package revision, and content hash. It is an envelope around existing work, not regeneration.
+
+The representative current design is shown in:
+
+- `project/examples/current-playlist.project.json`
+- `project/examples/current-playlist.snapshot.json`
+
+## Candidate v1: Khan Academy course
+
+The Khan candidate combines `watchcraft.course@1` with `watchcraft.khan-course@1`. The collection type owns course semantics, hierarchy requirements, completion rules, and the course-oriented reader UI. The iterator owns the Khan URL, bounded crawl, provider IDs, hierarchy normalization, and completeness observation.
+
+The Khan course outline is the completeness authority. YouTube playlists may be hints or cross-checks, and YouTube may provide the resolved media, but neither changes the source identity from Khan Academy. The snapshot preserves ordered course, unit, and lesson nodes; deduplicated items; separate curricular placements; attribution; and coverage.
+
+The example deliberately places one video in two lessons to demonstrate that item identity and curricular placement are independent:
+
+- `project/examples/khan-course.project.json`
+- `project/examples/khan-course.snapshot.json`
+
+## Candidate v1: YouTube channel popular videos
+
+The channel candidate combines `watchcraft.ranked-video-catalog@1` with `watchcraft.youtube-channel-popular@1`. The collection type owns snapshot-relative ranking semantics and the ranked-gallery reader UI. The iterator owns channel discovery and observation of YouTube's provider-defined popular order.
+
+"Popular" is a provider query, not a stable playlist and not necessarily a simple sort by displayed view count. The iterator snapshot freezes exact membership, order, access profile, and observation time. Volatile metrics may explain an observation but do not replace ordered placements as authority. Refresh proposes a new snapshot and project revision; the published collection remains active until the changes are approved.
+
+The example uses symbolic video IDs because it illustrates the contract rather than claiming to be a current crawl of the pictured channel:
+
+- `project/examples/youtube-popular.project.json`
+- `project/examples/youtube-popular.snapshot.json`
+
+## Registration and compatibility
+
+Collection types and iterators are registered capabilities. A type registration provides its configuration validator, snapshot-shape requirements, compiler, and reader implementation. An iterator registration provides its configuration validator, output contract, discovery implementation, and execution requirements.
+
+The first implementation keeps a versioned static registry in the authoring-pipeline package. This establishes typed identities, configuration validation, output capabilities, and compatibility checks without prematurely choosing the persistent registry administration model.
+
+Compatibility is checked explicitly. For example, the course type requires hierarchical nodes and curricular placements, while a flat playlist iterator would need either to provide that shape or be rejected for that project. This check is a seam between the two abstractions, not a third abstraction exposed to authors.
+
+## Validation beyond JSON Schema
+
+Application validation must additionally prove that:
+
+- project revisions are compare-and-swap transitions;
+- accepted-snapshot byte lengths, digests, and content-addressed keys match the bytes;
+- iterator identity in the snapshot matches the configured project iterator;
+- metadata-basis snapshot digests match the accepted snapshot;
+- exactly one node is the snapshot root, node parents exist, and the graph is acyclic;
+- node sibling and placement positions are positive and unambiguous;
+- item, node, placement, and media identities are unique in their scopes;
+- every placement references an existing item and node;
+- coverage arithmetic and collection-type policy are satisfied;
+- structure hashes match canonical content; and
+- the selected collection type and iterator are compatible registered capabilities.
+
+## Consequences
+
+The model has one obvious authoring object and two understandable plug-in points. Playlist fan-out becomes an iterator implementation rather than the definition of a collection. Khan and ranked-channel projects can add source-specific discovery and type-specific UI without contaminating the generic video model. The immutable snapshot still supplies the auditability, idempotence, approval binding, and reproducibility required by the queued pipeline.
+
+## Deferred decisions
+
+- composed or supplemental iterators;
+- promotion between collection types;
+- independently distributed or signed third-party collection types;
+- exact collection-type and iterator registry storage APIs;
+- merge policy if multiple iterators are introduced; and
+- automatic versus explicit approval thresholds for ranked-source refreshes.
