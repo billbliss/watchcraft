@@ -213,6 +213,8 @@ The first implementation keeps a versioned static registry in the authoring-pipe
 
 Compatibility is checked explicitly. For example, the course type requires hierarchical nodes and curricular placements, while a flat playlist iterator would need either to provide that shape or be rejected for that project. This check is a seam between the two abstractions, not a third abstraction exposed to authors.
 
+The first executable implementation is `watchcraft.youtube-playlist@1`, registered as the `watchcraft.iterator.youtube-playlist@1` authoring handler on the portable Python worker. It reuses the existing source-only playlist discovery behavior, emits an immutable candidate snapshot, reports placement progress through the generic worker context, and checkpoints every ten source entries. This establishes the execution seam before Khan course and channel-ranking adapters are added.
+
 ## Validation beyond JSON Schema
 
 Application validation must additionally prove that:

@@ -424,6 +424,32 @@ result` commands retrieve the full transcript and analysis independently. This c
 requires the updated Convex functions to be deployed; it does not require a new
 capability-registry version because it composes existing registered handlers.
 
+Run the first queued collection iterator against a `CatalogProject` document:
+
+```bash
+./authoring/watchcraft-author queue iterate-project \
+  --operator-token-source keychain \
+  --r2-credentials-source keychain \
+  packages/authoring-pipeline/project/examples/current-playlist.project.json
+```
+
+`watchcraft.iterator.youtube-playlist@1` runs on the portable Linux worker. It resolves
+the public playlist, observes each visible video into deduplicated items and separate
+ordered placements, validates the complete snapshot, and stores it as an immutable R2
+artifact. The CLI prints phase changes and `n of total placements` as the worker
+heartbeats. Every ten entries the worker stores a specification-bound checkpoint; a
+replacement attempt verifies and resumes that checkpoint only when its project
+revision, playlist identity, and exact source-entry digest still agree. Excluded or
+unavailable entries remain explicit classified coverage records rather than silently
+disappearing.
+
+This command produces a candidate iterator snapshot. It does not accept that snapshot
+into a new `CatalogProject` revision, fan out transcription and analysis jobs, compile
+a collection, or publish it. Those are subsequent orchestration transitions. The new
+handler requires capability registry `2026-09-08.1` to be published and activated
+after the worker code is available on `main`, which is the branch dispatched by the
+operator CLI.
+
 `queue result` resolves the artifact reference from the authoritative completed job,
 downloads the object from private R2, and verifies its declared byte length and SHA-256
 digest. JSON is displayed in readable form by default; `--output PATH` writes the exact

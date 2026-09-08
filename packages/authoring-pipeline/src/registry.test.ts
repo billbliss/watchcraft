@@ -131,11 +131,25 @@ const educationalAnalysisSpec = {
   },
 };
 
+const playlistIteratorSpec = {
+  operation: "generate" as const,
+  artifact_kind: "collection-iterator-snapshot",
+  output_schema: {
+    id: "watchcraft.collection-iterator-snapshot",
+    version: 1,
+  },
+  handler: { id: "watchcraft.iterator.youtube-playlist", version: "1" },
+  source: { media_asset_id: "youtube-playlist:PL1234567890_example" },
+  inputs: [],
+  dependencies: [],
+  configuration: { project: { project_id: "example" } },
+};
+
 test("the checked-in registry is valid, stable, and fully resolves an approved job", () => {
   const registry = parseCapabilityRegistry(DEFAULT_CAPABILITY_REGISTRY);
   const spec = resolveJobSpecAgainstRegistry(lexicalSpec, registry);
 
-  assert.equal(spec.registry_snapshot?.registry_version, "2026-09-05.5");
+  assert.equal(spec.registry_snapshot?.registry_version, "2026-09-08.1");
   assert.equal(spec.registry_snapshot?.registry_sha256, capabilityRegistrySha256(registry));
   assert.equal(spec.registry_snapshot?.execution_profile.id, "python-portable");
   assert.equal(spec.registry_snapshot?.execution_profile.dispatcher.workflow, "authoring-worker.yml");
@@ -165,6 +179,22 @@ test("educational analysis binds an authoritative transcript to the OpenAI profi
     spec.registry_snapshot?.execution_profile.secret_capabilities.includes(
       "openai.responses",
     ),
+  );
+});
+
+test("playlist iteration is routed to the portable Python worker", () => {
+  const spec = resolveJobSpecAgainstRegistry(
+    playlistIteratorSpec,
+    DEFAULT_CAPABILITY_REGISTRY,
+  );
+  assert.equal(
+    spec.registry_snapshot?.handler.id,
+    "watchcraft.iterator.youtube-playlist",
+  );
+  assert.equal(spec.registry_snapshot?.execution_profile.id, "python-portable");
+  assert.equal(
+    spec.registry_snapshot?.execution_profile.dispatcher.workflow,
+    "authoring-worker.yml",
   );
 });
 

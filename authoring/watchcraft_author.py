@@ -38,6 +38,7 @@ from normalize_topics import (
 )
 from repair_timelines import repair_one
 from queued_authoring import add_queue_parsers, run_queue_command
+from youtube_discovery import discover_youtube_playlist, discover_youtube_video
 from video_catalog import (
     AUTHORING_CONFIG_NAME,
     atomic_write_text,
@@ -296,63 +297,11 @@ def youtube_playlist_batch(
 
 
 def youtube_playlist(value: str) -> dict[str, Any]:
-    playlist_id = youtube_playlist_id(value)
-    canonical_url = "https://www.youtube.com/playlist?" + urllib.parse.urlencode(
-        {"list": playlist_id}
+    return discover_youtube_playlist(
+        value,
+        fetch_text=request_text,
+        fetch_json=request_json,
     )
-    page = request_text(f"{canonical_url}&hl=en")
-    initial_data = youtube_initial_data(page)
-    metadata = first_nested_mapping(initial_data, "playlistMetadataRenderer") or {}
-    title = youtube_text(metadata.get("title"))
-    description = youtube_text(metadata.get("description"))
-    video_ids, continuation = youtube_playlist_batch(initial_data, playlist_id)
-    if not video_ids:
-        raise RuntimeError(
-            "The YouTube playlist is unavailable, private, empty, or has no visible videos"
-        )
-
-    api_key = first_json_string(page, "INNERTUBE_API_KEY")
-    client_version = first_json_string(page, "INNERTUBE_CLIENT_VERSION")
-    if continuation and (not api_key or not client_version):
-        raise RuntimeError("YouTube did not expose playlist pagination data")
-
-    seen_tokens: set[str] = set()
-    while continuation:
-        if continuation in seen_tokens:
-            raise RuntimeError("YouTube repeated a playlist continuation token")
-        seen_tokens.add(continuation)
-        response = request_json(
-            f"https://www.youtube.com/youtubei/v1/browse?key={api_key}",
-            {
-                "context": {
-                    "client": {
-                        "clientName": "WEB",
-                        "clientVersion": client_version,
-                        "hl": "en",
-                    }
-                },
-                "continuation": continuation,
-            },
-        )
-        batch, continuation = youtube_playlist_batch(response, playlist_id)
-        if not batch:
-            break
-        video_ids.extend(batch)
-
-    unique_video_ids = []
-    seen_video_ids = set()
-    for video_id in video_ids:
-        if video_id not in seen_video_ids:
-            unique_video_ids.append(video_id)
-            seen_video_ids.add(video_id)
-    return {
-        "playlist_id": playlist_id,
-        "url": canonical_url,
-        "title": title or playlist_id,
-        "description": description,
-        "video_ids": unique_video_ids,
-        "duplicate_count": len(video_ids) - len(unique_video_ids),
-    }
 
 
 def youtube_description_chapters(
@@ -381,42 +330,12 @@ def youtube_description_chapters(
 
 
 def youtube_metadata(video_id: str) -> dict[str, Any]:
-    canonical_url = f"https://www.youtube.com/watch?v={video_id}"
-    page = request_text(canonical_url)
-    player_response = youtube_initial_player_response(page)
-    playability = (
-        player_response.get("playabilityStatus", {})
-        if isinstance(player_response, dict)
-        else {}
-    )
-    if isinstance(playability, dict) and playability.get("playableInEmbed") is False:
-        raise YouTubeEmbeddingDisabled()
-    oembed_url = "https://www.youtube.com/oembed?" + urllib.parse.urlencode(
-        {"url": canonical_url, "format": "json"}
-    )
     try:
-        embed = json.loads(request_text(oembed_url))
-    except json.JSONDecodeError as error:
-        raise RuntimeError("YouTube returned invalid embed metadata") from error
-    duration = first_json_string(page, "lengthSeconds")
-    duration_seconds = int(duration) if duration.isdigit() else None
-    published_at = first_json_string(page, "publishDate") or first_json_string(
-        page, "uploadDate"
-    )
-    description = first_json_string(page, "shortDescription")
-    return {
-        "source_id": f"youtube:{video_id}",
-        "type": "youtube",
-        "video_id": video_id,
-        "url": canonical_url,
-        "title": str(embed.get("title") or video_id),
-        "publisher": str(embed.get("author_name") or ""),
-        "publisher_url": str(embed.get("author_url") or ""),
-        "thumbnail_url": str(embed.get("thumbnail_url") or ""),
-        "duration_seconds": duration_seconds,
-        "published_at": published_at,
-        "chapters": youtube_description_chapters(description, duration_seconds),
-    }
+        return discover_youtube_video(video_id, fetch_text=request_text)
+    except RuntimeError as error:
+        if "does not allow embedded playback" in str(error):
+            raise YouTubeEmbeddingDisabled() from error
+        raise
 
 
 def youtube_transcript_client() -> Any:

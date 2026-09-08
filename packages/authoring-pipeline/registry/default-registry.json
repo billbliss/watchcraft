@@ -1,7 +1,7 @@
 {
   "kind": "watchcraft.authoring-capability-registry",
   "schema_version": 1,
-  "registry_version": "2026-09-05.5",
+  "registry_version": "2026-09-08.1",
   "handlers": [
     {
       "id": "watchcraft.analysis.lexical",
@@ -62,6 +62,33 @@
           "analysis_provider_failed",
           "artifact_store_failed",
           "lease_expired"
+        ]
+      }
+    },
+    {
+      "id": "watchcraft.iterator.youtube-playlist",
+      "version": "1",
+      "operation": "generate",
+      "inputs": [],
+      "dependencies": [],
+      "output": {
+        "artifact_kind": "collection-iterator-snapshot",
+        "schema": {
+          "id": "watchcraft.collection-iterator-snapshot",
+          "version": 1
+        }
+      },
+      "execution_profile": {
+        "id": "python-portable",
+        "version": "1"
+      },
+      "lease_class": "short",
+      "retry_policy": {
+        "max_attempts": 3,
+        "retryable_classifications": [
+          "artifact_store_failed",
+          "lease_expired",
+          "source_discovery_failed"
         ]
       }
     },

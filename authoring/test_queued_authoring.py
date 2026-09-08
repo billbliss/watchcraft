@@ -22,10 +22,22 @@ def registry_snapshot(
     http_transcription=False,
     staged_transcription=False,
     staged_smoke=False,
+    playlist_iterator=False,
 ):
+    if playlist_iterator:
+        return {
+            "registry_version": "2026-09-08.1",
+            "registry_sha256": "c" * 64,
+            "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
+                queued_authoring.YOUTUBE_PLAYLIST_ITERATOR_HANDLER
+            ],
+            "execution_profile": queued_authoring.LOCAL_EXECUTION_PROFILES[
+                queued_authoring.PYTHON_EXECUTION_PROFILE
+            ],
+        }
     if educational_analysis:
         return {
-            "registry_version": "2026-09-05.5",
+            "registry_version": "2026-09-08.1",
             "registry_sha256": "c" * 64,
             "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
                 queued_authoring.EDUCATIONAL_VIDEO_ANALYSIS_HANDLER
@@ -49,7 +61,7 @@ def registry_snapshot(
             )
         )
         return {
-            "registry_version": "2026-09-05.5",
+            "registry_version": "2026-09-08.1",
             "registry_sha256": "c" * 64,
             "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[handler],
             "execution_profile": queued_authoring.LOCAL_EXECUTION_PROFILES[
@@ -57,7 +69,7 @@ def registry_snapshot(
             ],
         }
     return {
-        "registry_version": "2026-09-05.5",
+        "registry_version": "2026-09-08.1",
         "registry_sha256": "c" * 64,
         "handler": {
             "id": "watchcraft.analysis.lexical",
@@ -237,6 +249,13 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertEqual(pipeline.transcription_timeout_seconds, 3600)
         self.assertEqual(pipeline.analysis_timeout_seconds, 3600)
         self.assertEqual(pipeline.r2_staging_credentials_source, "auto")
+        iterator = build_parser().parse_args([
+            "queue", "iterate-project", "project.json",
+            "--operator-token-source", "keychain",
+            "--r2-credentials-source", "keychain",
+        ])
+        self.assertEqual(iterator.project_file, Path("project.json"))
+        self.assertEqual(iterator.timeout_seconds, 1800)
 
         cleanup = build_parser().parse_args([
             "queue", "cleanup-run", "run-1", "--confirm", "run-1",
@@ -1893,6 +1912,188 @@ class QueuedAuthoringTests(unittest.TestCase):
             "/jobs/succeed",
         ])
 
+    def test_playlist_iterator_reports_progress_and_completes_at_latest_revision(self):
+        project_path = (
+            queued_authoring.CATALOG_PROJECT_SCHEMA_PATH.parent
+            / "examples"
+            / "current-playlist.project.json"
+        )
+        project = json.loads(project_path.read_text(encoding="utf-8"))
+        spec = {
+            **queued_authoring.youtube_playlist_iterator_spec(
+                project,
+                observed_at="2026-09-08T12:00:00Z",
+            ),
+            "registry_snapshot": registry_snapshot(playlist_iterator=True),
+        }
+        base_job = {
+            "job_id": "job-playlist",
+            "run_id": "run-playlist",
+            "revision": 4,
+            "state": "dispatch_pending",
+            "spec_sha256": "a" * 64,
+            "spec": spec,
+            "dispatch": {"generation": 1},
+            "attempts": [],
+        }
+
+        class Control:
+            def __init__(self):
+                self.job = dict(base_job)
+                self.progress = []
+                self.success_revision = None
+
+            def transition(self, state, **changes):
+                self.job = {
+                    **self.job,
+                    **changes,
+                    "revision": self.job["revision"] + 1,
+                    "state": state,
+                }
+                return self.job
+
+            def post(self, path, payload):
+                self.assert_revision(payload)
+                if path == "/jobs/dispatch/record":
+                    return self.transition("dispatched")
+                if path == "/jobs/claim":
+                    attempt = {
+                        "attempt_id": payload["attempt_id"],
+                        "state": "claimed",
+                    }
+                    return self.transition("claimed", attempts=[attempt])
+                if path == "/jobs/start":
+                    self.job["attempts"][-1]["state"] = "running"
+                    return self.transition("running")
+                if path == "/jobs/heartbeat":
+                    self.progress.append(payload["progress"])
+                    self.job["attempts"][-1]["progress"] = payload["progress"]
+                    if "checkpoint" in payload:
+                        self.job["attempts"][-1]["checkpoint"] = payload["checkpoint"]
+                    return self.transition("running")
+                if path == "/jobs/succeed":
+                    self.success_revision = payload["expected_revision"]
+                    return self.transition("succeeded", result=payload["artifact"])
+                raise AssertionError(path)
+
+            def assert_revision(self, payload):
+                self_case.assertEqual(payload["expected_revision"], self.job["revision"])
+
+        class Artifacts:
+            def __init__(self):
+                self.objects = {}
+
+            def put_json(self, value, description):
+                payload = queued_authoring.canonical_json(value).encode("utf-8")
+                digest = queued_authoring.sha256_hex(payload)
+                reference = {
+                    "store": "r2",
+                    "algorithm": "sha256",
+                    "digest": digest,
+                    "byte_length": len(payload),
+                    "media_type": "application/json",
+                    "artifact_kind": description["artifact_kind"],
+                    "schema": description["schema"],
+                    "key": f"objects/sha256/{digest[:2]}/{digest[2:]}",
+                }
+                self.objects[reference["key"]] = payload
+                return reference
+
+            def get_bytes(self, reference):
+                return self.objects[reference["key"]]
+
+        self_case = self
+        control = Control()
+        artifacts = Artifacts()
+        video_ids = [f"video{index:06d}" for index in range(1, 11)] + ["video000001"]
+        playlist = {
+            "playlist_id": project["iterator"]["configuration"]["playlist_id"],
+            "url": project["iterator"]["configuration"]["canonical_url"],
+            "title": "Editing lessons",
+            "description": "Editing and color lessons.",
+            "entries": video_ids,
+            "video_ids": video_ids,
+            "duplicate_count": 1,
+        }
+
+        def metadata(video_id):
+            return {
+                "source_id": f"youtube:{video_id}",
+                "type": "youtube",
+                "video_id": video_id,
+                "url": f"https://www.youtube.com/watch?v={video_id}",
+                "title": f"Lesson {video_id}",
+                "publisher": "Editing School",
+                "publisher_url": "https://www.youtube.com/@editingschool",
+                "thumbnail_url": f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
+                "duration_seconds": 120,
+                "published_at": "2026-09-08",
+                "chapters": [],
+            }
+
+        with patch("queued_authoring.worker_client", return_value=control):
+            with patch.object(
+                queued_authoring.R2ArtifactStore,
+                "from_environment",
+                return_value=artifacts,
+            ):
+                with patch(
+                    "queued_authoring.discover_youtube_playlist",
+                    return_value=playlist,
+                ):
+                    with patch(
+                        "queued_authoring.discover_youtube_video",
+                        side_effect=metadata,
+                    ):
+                        result = queued_authoring.run_worker(
+                            job_id=base_job["job_id"],
+                            spec_sha256=base_job["spec_sha256"],
+                            dispatch_generation=1,
+                            expected_revision=4,
+                        )
+
+        self.assertEqual(result["state"], "succeeded")
+        self.assertEqual(result["result"]["artifact_kind"], "collection-iterator-snapshot")
+        self.assertGreater(control.success_revision, 7)
+        self.assertIn(
+            {
+                "phase": "enumerating",
+                "completed": 11,
+                "unit": "placements",
+                "total": 11,
+                "current": "Lesson video000001",
+            },
+            control.progress,
+        )
+        snapshot = json.loads(artifacts.get_bytes(result["result"]))
+        self.assertEqual(snapshot["coverage"], {
+            "basis": "source-entries",
+            "expected": 11,
+            "resolved": 11,
+            "unresolved": [],
+        })
+        self.assertEqual(len(snapshot["items"]), 10)
+        self.assertEqual(len(snapshot["placements"]), 11)
+        self.assertEqual(snapshot["placements"][-1]["item_id"], "youtube:video000001")
+        checkpoint = result["attempts"][-1]["checkpoint"]
+        self.assertEqual(checkpoint["sequence"], 1)
+        checkpoint_payload = json.loads(artifacts.get_bytes(checkpoint["artifact"]))
+        self.assertEqual(checkpoint_payload["next_index"], 10)
+        resumed = queued_authoring._playlist_checkpoint_state(
+            queued_authoring.WorkerContext(
+                control=control,
+                job=result,
+                attempt_id="replacement-attempt",
+                lease_duration_ms=300_000,
+                artifacts=artifacts,
+            ),
+            project=project,
+            playlist=playlist,
+            entries=video_ids,
+        )
+        self.assertEqual(resumed[0], 10)
+        self.assertEqual(len(resumed[1]), 10)
+
     def test_python_worker_preserves_classified_staged_input_failures(self):
         reference = staged_audio_reference()
         spec = {
@@ -1929,7 +2130,7 @@ class QueuedAuthoringTests(unittest.TestCase):
                     return {**job, "revision": 8, "state": "retryable_failed"}
                 raise AssertionError(path)
 
-        def fail_input(_job):
+        def fail_input(_job, _context):
             raise queued_authoring.StagedSourceError(
                 "Staged source is temporarily unavailable",
                 "source_input_unavailable",

@@ -18,6 +18,7 @@ import urllib.request
 import uuid
 from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -25,6 +26,11 @@ from youtube_audio import (
     canonical_youtube_url,
     download_youtube_audio,
     youtube_video_id,
+)
+from youtube_discovery import (
+    discover_youtube_playlist,
+    discover_youtube_video,
+    youtube_playlist_id,
 )
 
 
@@ -65,6 +71,10 @@ PRODUCTION_TRANSCRIPTION_HANDLER = (
     "watchcraft.transcript.mlx-whisper-large-v3-turbo-q4",
     "1",
 )
+YOUTUBE_PLAYLIST_ITERATOR_HANDLER = (
+    "watchcraft.iterator.youtube-playlist",
+    "1",
+)
 PYTHON_EXECUTION_PROFILE = ("python-portable", "1")
 PYTHON_EXECUTION_WORKFLOW = "authoring-worker.yml"
 OPENAI_EXECUTION_PROFILE = ("python-openai", "1")
@@ -101,6 +111,24 @@ YOUTUBE_TRANSCRIPTION_MAX_DURATION_SECONDS = 7_200
 YOUTUBE_TRANSCRIPTION_TIMEOUT_SECONDS = 900
 SOURCE_AUDIO_RETENTION_MILLISECONDS = 86_400_000
 SOURCE_AUDIO_SCHEMA = {"id": "watchcraft.source-audio", "version": 1}
+COLLECTION_ITERATOR_SNAPSHOT_SCHEMA = {
+    "id": "watchcraft.collection-iterator-snapshot",
+    "version": 1,
+}
+COLLECTION_ITERATOR_CHECKPOINT_SCHEMA = {
+    "id": "watchcraft.collection-iterator-checkpoint",
+    "version": 1,
+}
+CATALOG_PROJECT_SCHEMA_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "packages"
+    / "authoring-pipeline"
+    / "project"
+    / "catalog-project.schema.json"
+)
+ITERATOR_SNAPSHOT_SCHEMA_PATH = CATALOG_PROJECT_SCHEMA_PATH.with_name(
+    "collection-iterator-snapshot.schema.json"
+)
 WORD_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9'-]{2,}")
 STOP_WORDS = {
     "and", "are", "but", "for", "from", "has", "have", "into", "its", "not",
@@ -354,7 +382,9 @@ def worker_client() -> AuthoringHttpClient:
     return AuthoringHttpClient(deployment_url, token, "/authoring")
 
 
-def lexical_analysis(job: dict[str, Any]) -> dict[str, Any]:
+def lexical_analysis(
+    job: dict[str, Any], context: WorkerContext | None = None
+) -> dict[str, Any]:
     configuration = job["spec"]["configuration"]
     text = configuration.get("text")
     title = configuration.get("title")
@@ -515,7 +545,9 @@ def download_verified_https(
     }
 
 
-def mlx_transcription_smoke(job: dict[str, Any]) -> dict[str, Any]:
+def mlx_transcription_smoke(
+    job: dict[str, Any], context: WorkerContext | None = None
+) -> dict[str, Any]:
     configuration = job["spec"]["configuration"]
     phrase = configuration.get("fixture_text")
     language = configuration.get("language", "en")
@@ -558,7 +590,9 @@ def mlx_transcription_smoke(job: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def mlx_http_transcription_smoke(job: dict[str, Any]) -> dict[str, Any]:
+def mlx_http_transcription_smoke(
+    job: dict[str, Any], context: WorkerContext | None = None
+) -> dict[str, Any]:
     configuration = job["spec"]["configuration"]
     expected_configuration = {
         "url": HTTP_TRANSCRIPTION_SMOKE_URL,
@@ -659,7 +693,9 @@ class AnalysisProviderError(RuntimeError):
     retryable = True
 
 
-def educational_video_analysis(job: dict[str, Any]) -> dict[str, Any]:
+def educational_video_analysis(
+    job: dict[str, Any], context: WorkerContext | None = None
+) -> dict[str, Any]:
     handler_started_at = time.monotonic()
     spec = job["spec"]
     configuration = spec.get("configuration")
@@ -816,7 +852,9 @@ def educational_video_analysis(job: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def mlx_staged_transcription(job: dict[str, Any]) -> dict[str, Any]:
+def mlx_staged_transcription(
+    job: dict[str, Any], context: WorkerContext | None = None
+) -> dict[str, Any]:
     handler_started_at = time.monotonic()
     spec = job["spec"]
     handler_identity = (
@@ -937,7 +975,10 @@ def mlx_staged_transcription(job: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-HANDLERS: dict[tuple[str, str], Callable[[dict[str, Any]], dict[str, Any]]] = {
+HANDLERS: dict[
+    tuple[str, str],
+    Callable[[dict[str, Any], WorkerContext | None], dict[str, Any]],
+] = {
     ANALYSIS_HANDLER: lexical_analysis,
     EDUCATIONAL_VIDEO_ANALYSIS_HANDLER: educational_video_analysis,
     TRANSCRIPTION_SMOKE_HANDLER: mlx_transcription_smoke,
@@ -1095,6 +1136,30 @@ LOCAL_HANDLER_CONTRACTS: dict[tuple[str, str], dict[str, Any]] = {
                 "artifact_store_failed",
                 "lease_expired",
                 "source_input_unavailable",
+            ],
+        },
+    },
+    YOUTUBE_PLAYLIST_ITERATOR_HANDLER: {
+        "id": YOUTUBE_PLAYLIST_ITERATOR_HANDLER[0],
+        "version": YOUTUBE_PLAYLIST_ITERATOR_HANDLER[1],
+        "operation": "generate",
+        "inputs": [],
+        "dependencies": [],
+        "output": {
+            "artifact_kind": "collection-iterator-snapshot",
+            "schema": COLLECTION_ITERATOR_SNAPSHOT_SCHEMA,
+        },
+        "execution_profile": {
+            "id": PYTHON_EXECUTION_PROFILE[0],
+            "version": PYTHON_EXECUTION_PROFILE[1],
+        },
+        "lease_class": "short",
+        "retry_policy": {
+            "max_attempts": 3,
+            "retryable_classifications": [
+                "artifact_store_failed",
+                "lease_expired",
+                "source_discovery_failed",
             ],
         },
     },
@@ -1407,6 +1472,122 @@ class R2ArtifactStore:
         return payload
 
 
+class WorkerContext:
+    """Own worker-side lease revisions, progress reports, and checkpoints."""
+
+    def __init__(
+        self,
+        *,
+        control: AuthoringHttpClient,
+        job: dict[str, Any],
+        attempt_id: str,
+        lease_duration_ms: int,
+        artifacts: R2ArtifactStore | None = None,
+    ):
+        self.control = control
+        self.job = job
+        self.attempt_id = attempt_id
+        self.lease_duration_ms = lease_duration_ms
+        self._artifacts = artifacts
+        self._heartbeat_number = 0
+
+    def artifact_store(self) -> R2ArtifactStore:
+        if self._artifacts is None:
+            self._artifacts = R2ArtifactStore.from_environment()
+        return self._artifacts
+
+    def report_progress(
+        self,
+        *,
+        phase: str,
+        completed: int,
+        unit: str,
+        total: int | None = None,
+        current: str | None = None,
+        checkpoint: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self._heartbeat_number += 1
+        progress = {"phase": phase, "completed": completed, "unit": unit}
+        if total is not None:
+            progress["total"] = total
+        if current:
+            progress["current"] = current
+        payload = {
+            "job_id": self.job["job_id"],
+            "command_id": f"{self.attempt_id}:heartbeat:{self._heartbeat_number}",
+            "expected_revision": self.job["revision"],
+            "attempt_id": self.attempt_id,
+            "lease_duration_ms": self.lease_duration_ms,
+            "progress": progress,
+        }
+        if checkpoint is not None:
+            payload["checkpoint"] = checkpoint
+        self.job = self.control.post("/jobs/heartbeat", payload)
+        return self.job
+
+    def save_checkpoint(
+        self,
+        value: dict[str, Any],
+        *,
+        sequence: int,
+        phase: str,
+        completed: int,
+        total: int,
+        unit: str,
+        current: str | None = None,
+    ) -> dict[str, Any]:
+        artifact = self.artifact_store().put_json(
+            value,
+            {
+                "artifact_kind": "collection-iterator-checkpoint",
+                "schema": COLLECTION_ITERATOR_CHECKPOINT_SCHEMA,
+            },
+        )
+        self.report_progress(
+            phase=phase,
+            completed=completed,
+            total=total,
+            unit=unit,
+            current=current,
+            checkpoint={
+                "sequence": sequence,
+                "spec_sha256": self.job["spec_sha256"],
+                "artifact": artifact,
+            },
+        )
+        return artifact
+
+    def latest_checkpoint(self) -> tuple[int, dict[str, Any]] | None:
+        checkpoints = []
+        for attempt in self.job.get("attempts", []):
+            if not isinstance(attempt, dict):
+                continue
+            checkpoint = attempt.get("checkpoint")
+            if (
+                isinstance(checkpoint, dict)
+                and checkpoint.get("spec_sha256") == self.job.get("spec_sha256")
+                and type(checkpoint.get("sequence")) is int
+            ):
+                checkpoints.append(checkpoint)
+        if not checkpoints:
+            return None
+        checkpoint = max(checkpoints, key=lambda value: value["sequence"])
+        reference = validated_artifact_reference(checkpoint.get("artifact"))
+        if (
+            reference.get("artifact_kind") != "collection-iterator-checkpoint"
+            or reference.get("schema") != COLLECTION_ITERATOR_CHECKPOINT_SCHEMA
+        ):
+            raise RuntimeError("The latest iterator checkpoint has the wrong artifact contract")
+        payload = self.artifact_store().get_bytes(reference)
+        try:
+            value = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RuntimeError("The latest iterator checkpoint is not valid JSON") from error
+        if not isinstance(value, dict):
+            raise RuntimeError("The latest iterator checkpoint must be an object")
+        return checkpoint["sequence"], value
+
+
 def validated_artifact_reference(
     value: Any,
     *,
@@ -1478,6 +1659,491 @@ def r2_staging_writer(credential_source: str = "auto") -> R2ArtifactStore:
     )
 
 
+class IteratorExecutionError(RuntimeError):
+    def __init__(self, message: str, *, retryable: bool = False):
+        super().__init__(message)
+        self.classification = "source_discovery_failed"
+        self.retryable = retryable
+
+
+def validate_json_schema(value: Any, path: Path, label: str) -> None:
+    try:
+        from jsonschema import Draft202012Validator, FormatChecker
+    except ImportError as error:
+        raise RuntimeError("jsonschema is required by collection iterator workers") from error
+    try:
+        schema = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"Could not read {label} schema {path}") from error
+    errors = sorted(
+        Draft202012Validator(
+            schema,
+            format_checker=FormatChecker(),
+        ).iter_errors(value),
+        key=lambda error: list(error.absolute_path),
+    )
+    if errors:
+        error = errors[0]
+        location = ".".join(str(part) for part in error.absolute_path) or "<root>"
+        raise ValueError(f"{label} is invalid at {location}: {error.message}")
+
+
+def iterator_structure_sha256(snapshot: dict[str, Any]) -> str:
+    projection = {
+        "source": {
+            key: snapshot["source"][key]
+            for key in ("source_id", "source_type")
+        },
+        "nodes": [
+            {
+                key: node[key]
+                for key in ("node_id", "node_type", "parent_node_id", "position")
+            }
+            for node in snapshot["nodes"]
+        ],
+        "items": [
+            {
+                "item_id": item["item_id"],
+                "media": [
+                    {key: media[key] for key in ("type", "media_id")}
+                    for media in item["media"]
+                ],
+            }
+            for item in snapshot["items"]
+        ],
+        "placements": [
+            {
+                key: placement[key]
+                for key in (
+                    "placement_id",
+                    "item_id",
+                    "parent_node_id",
+                    "position",
+                )
+            }
+            for placement in snapshot["placements"]
+        ],
+    }
+    return sha256_hex(canonical_json(projection))
+
+
+def validate_iterator_snapshot(snapshot: dict[str, Any]) -> None:
+    validate_json_schema(
+        snapshot,
+        ITERATOR_SNAPSHOT_SCHEMA_PATH,
+        "Collection iterator snapshot",
+    )
+    if snapshot["coverage"]["expected"] != (
+        snapshot["coverage"]["resolved"]
+        + len(snapshot["coverage"]["unresolved"])
+    ):
+        raise ValueError("Collection iterator snapshot coverage is inconsistent")
+    nodes = {node["node_id"]: node for node in snapshot["nodes"]}
+    items = {item["item_id"]: item for item in snapshot["items"]}
+    if len(nodes) != len(snapshot["nodes"]):
+        raise ValueError("Collection iterator snapshot node identities are not unique")
+    if len(items) != len(snapshot["items"]):
+        raise ValueError("Collection iterator snapshot item identities are not unique")
+    if sum(node["parent_node_id"] is None for node in snapshot["nodes"]) != 1:
+        raise ValueError("Collection iterator snapshot must have exactly one root node")
+    node_positions = set()
+    for node in snapshot["nodes"]:
+        position_key = (node["parent_node_id"], node["position"])
+        if position_key in node_positions:
+            raise ValueError("Collection iterator snapshot node positions are not unique")
+        node_positions.add(position_key)
+        seen = {node["node_id"]}
+        parent_id = node["parent_node_id"]
+        while parent_id is not None:
+            if parent_id in seen or parent_id not in nodes:
+                raise ValueError("Collection iterator snapshot node graph is invalid")
+            seen.add(parent_id)
+            parent_id = nodes[parent_id]["parent_node_id"]
+    placement_ids = set()
+    placement_positions = set()
+    for placement in snapshot["placements"]:
+        if placement["placement_id"] in placement_ids:
+            raise ValueError("Collection iterator snapshot placement identities are not unique")
+        placement_ids.add(placement["placement_id"])
+        position_key = (placement["parent_node_id"], placement["position"])
+        if position_key in placement_positions:
+            raise ValueError("Collection iterator snapshot placement positions are not unique")
+        placement_positions.add(position_key)
+        if placement["item_id"] not in items or placement["parent_node_id"] not in nodes:
+            raise ValueError("Collection iterator snapshot placement graph is invalid")
+    if snapshot["structure_hash"] != iterator_structure_sha256(snapshot):
+        raise ValueError("Collection iterator snapshot structure hash is invalid")
+
+
+def youtube_playlist_iterator_spec(
+    project: dict[str, Any],
+    *,
+    observed_at: str | None = None,
+) -> dict[str, Any]:
+    validate_youtube_playlist_project(project)
+    iterator = project["iterator"]
+    configuration = iterator["configuration"]
+    playlist_id = configuration["playlist_id"]
+    observation_time = observed_at or datetime.now(timezone.utc).isoformat().replace(
+        "+00:00", "Z"
+    )
+    return {
+        "operation": "generate",
+        "artifact_kind": "collection-iterator-snapshot",
+        "output_schema": COLLECTION_ITERATOR_SNAPSHOT_SCHEMA,
+        "handler": {
+            "id": YOUTUBE_PLAYLIST_ITERATOR_HANDLER[0],
+            "version": YOUTUBE_PLAYLIST_ITERATOR_HANDLER[1],
+        },
+        "source": {"media_asset_id": f"youtube-playlist:{playlist_id}"},
+        "inputs": [],
+        "dependencies": [],
+        "configuration": {
+            "project": project,
+            "observed_at": observation_time,
+        },
+    }
+
+
+def validate_youtube_playlist_project(project: Any) -> dict[str, Any]:
+    validate_json_schema(project, CATALOG_PROJECT_SCHEMA_PATH, "Catalog project")
+    collection_type = project["collection_type"]
+    if (
+        collection_type.get("id") != "watchcraft.video-collection"
+        or collection_type.get("version") != "1"
+        or collection_type.get("configuration", {}).get("structure") != "ordered-list"
+    ):
+        raise ValueError(
+            "watchcraft.youtube-playlist@1 requires watchcraft.video-collection@1 "
+            "with ordered-list structure"
+        )
+    iterator = project["iterator"]
+    if (
+        iterator.get("id") != "watchcraft.youtube-playlist"
+        or iterator.get("version") != "1"
+    ):
+        raise ValueError("The first queued iterator supports watchcraft.youtube-playlist@1")
+    configuration = iterator["configuration"]
+    playlist_id = configuration.get("playlist_id")
+    canonical_url = configuration.get("canonical_url")
+    if (
+        not isinstance(playlist_id, str)
+        or not isinstance(canonical_url, str)
+        or youtube_playlist_id(canonical_url) != playlist_id
+    ):
+        raise ValueError("Catalog project has an invalid YouTube playlist identity")
+    selection = configuration.get("selection")
+    exclusions = selection.get("excluded_item_ids") if isinstance(selection, dict) else None
+    if (
+        iterator.get("access_profile") != "public-anonymous"
+        or not isinstance(selection, dict)
+        or selection.get("kind") != "published-order"
+        or not isinstance(exclusions, list)
+        or any(not isinstance(value, str) or not value for value in exclusions)
+        or len(exclusions) != len(set(exclusions))
+    ):
+        raise ValueError("Catalog project has an invalid YouTube playlist selection")
+    return project
+
+
+def _playlist_checkpoint_state(
+    context: WorkerContext,
+    *,
+    project: dict[str, Any],
+    playlist: dict[str, Any],
+    entries: list[str],
+) -> tuple[int, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    latest = context.latest_checkpoint()
+    if latest is None:
+        return 0, [], [], []
+    _, checkpoint = latest
+    expected = {
+        "kind": "watchcraft.youtube-playlist-iterator-checkpoint",
+        "schema_version": 1,
+        "handler": {
+            "id": YOUTUBE_PLAYLIST_ITERATOR_HANDLER[0],
+            "version": YOUTUBE_PLAYLIST_ITERATOR_HANDLER[1],
+        },
+        "spec_sha256": context.job["spec_sha256"],
+        "project": {
+            "project_id": project["project_id"],
+            "revision": project["revision"],
+        },
+        "playlist_id": playlist["playlist_id"],
+        "entries_sha256": sha256_hex(canonical_json(entries)),
+    }
+    for key, value in expected.items():
+        if checkpoint.get(key) != value:
+            raise RuntimeError(f"Iterator checkpoint does not match {key}")
+    next_index = checkpoint.get("next_index")
+    items = checkpoint.get("items")
+    placements = checkpoint.get("placements")
+    unresolved = checkpoint.get("unresolved")
+    if (
+        type(next_index) is not int
+        or not 0 <= next_index <= len(entries)
+        or not isinstance(items, list)
+        or not isinstance(placements, list)
+        or not isinstance(unresolved, list)
+        or len(placements) + len(unresolved) != next_index
+    ):
+        raise RuntimeError("Iterator checkpoint has inconsistent progress")
+    return next_index, items, placements, unresolved
+
+
+def youtube_playlist_iterator(
+    job: dict[str, Any], context: WorkerContext | None = None
+) -> dict[str, Any]:
+    if context is None:
+        raise RuntimeError("Queued iterator execution requires a worker context")
+    configuration = job["spec"].get("configuration", {})
+    project = configuration.get("project")
+    observed_at = configuration.get("observed_at")
+    validate_youtube_playlist_project(project)
+    if not isinstance(observed_at, str):
+        raise ValueError("Iterator observation time is required")
+    iterator = project["iterator"]
+    iterator_configuration = iterator["configuration"]
+    playlist_id = iterator_configuration["playlist_id"]
+    requested_url = iterator_configuration["canonical_url"]
+    if job["spec"]["source"].get("media_asset_id") != f"youtube-playlist:{playlist_id}":
+        raise ValueError("Iterator job source does not match its catalog project")
+
+    context.report_progress(
+        phase="resolving-source",
+        completed=0,
+        total=1,
+        unit="source",
+        current=requested_url,
+    )
+    try:
+        playlist = discover_youtube_playlist(requested_url)
+    except Exception as error:
+        raise IteratorExecutionError(str(error), retryable=True) from error
+    entries = playlist.get("entries") or playlist["video_ids"]
+    if not isinstance(entries, list) or not all(isinstance(item, str) for item in entries):
+        raise IteratorExecutionError("YouTube returned invalid playlist entries")
+    context.report_progress(
+        phase="resolving-source",
+        completed=1,
+        total=1,
+        unit="source",
+        current=playlist["title"][:500],
+    )
+
+    start, items, placements, unresolved = _playlist_checkpoint_state(
+        context,
+        project=project,
+        playlist=playlist,
+        entries=entries,
+    )
+    items_by_id = {item["item_id"]: item for item in items}
+    excluded = set(iterator_configuration["selection"].get("excluded_item_ids", []))
+    total = len(entries)
+    context.report_progress(
+        phase="enumerating",
+        completed=start,
+        total=total,
+        unit="placements",
+    )
+    for index, video_id in enumerate(entries[start:], start=start):
+        position = index + 1
+        item_id = f"youtube:{video_id}"
+        if video_id in excluded or item_id in excluded:
+            unresolved.append({
+                "source_ref": item_id,
+                "classification": "excluded-by-project",
+                "message": "The catalog project excludes this playlist entry.",
+            })
+            current = item_id
+        else:
+            item = items_by_id.get(item_id)
+            if item is not None:
+                current = str(item["title"])[:500]
+            else:
+                try:
+                    metadata = discover_youtube_video(video_id)
+                except Exception as error:
+                    unresolved.append({
+                        "source_ref": item_id,
+                        "classification": "source-metadata-unavailable",
+                        "message": str(error)[:500] or "YouTube metadata is unavailable.",
+                    })
+                    current = item_id
+                    metadata = None
+                if metadata is not None:
+                    current = str(metadata["title"])[:500]
+                    publisher = str(metadata.get("publisher") or "").strip()
+                    if not publisher:
+                        publisher = str(
+                            project.get("metadata", {})
+                            .get("publisher", {})
+                            .get("name")
+                            or "YouTube"
+                        )
+                    attribution = {"publisher": publisher}
+                    publisher_url = str(metadata.get("publisher_url") or "").strip()
+                    if publisher_url:
+                        attribution["publisher_url"] = publisher_url
+                    item = {
+                        "item_id": item_id,
+                        "title": str(metadata["title"]),
+                        "canonical_url": metadata["url"],
+                        "media": [{
+                            "type": "youtube",
+                            "media_id": video_id,
+                            "canonical_url": metadata["url"],
+                        }],
+                        "attribution": attribution,
+                        "source_provenance": {"playlist_id": playlist_id},
+                        "metadata": {
+                            "duration_seconds": metadata.get("duration_seconds"),
+                            "published_at": metadata.get("published_at"),
+                            "thumbnail_url": metadata.get("thumbnail_url"),
+                            "chapters": metadata.get("chapters", []),
+                        },
+                    }
+                    items.append(item)
+                    items_by_id[item_id] = item
+            if item is not None:
+                placements.append({
+                    "placement_id": f"playlist-entry:{position}",
+                    "item_id": item_id,
+                    "parent_node_id": "playlist-root",
+                    "position": position,
+                    "source_url": playlist["url"],
+                    "metadata": {},
+                })
+
+        completed = position
+        if completed % 10 == 0:
+            checkpoint = {
+                "kind": "watchcraft.youtube-playlist-iterator-checkpoint",
+                "schema_version": 1,
+                "handler": {
+                    "id": YOUTUBE_PLAYLIST_ITERATOR_HANDLER[0],
+                    "version": YOUTUBE_PLAYLIST_ITERATOR_HANDLER[1],
+                },
+                "spec_sha256": context.job["spec_sha256"],
+                "project": {
+                    "project_id": project["project_id"],
+                    "revision": project["revision"],
+                },
+                "playlist_id": playlist_id,
+                "entries_sha256": sha256_hex(canonical_json(entries)),
+                "next_index": completed,
+                "items": items,
+                "placements": placements,
+                "unresolved": unresolved,
+            }
+            context.save_checkpoint(
+                checkpoint,
+                sequence=completed // 10,
+                phase="enumerating",
+                completed=completed,
+                total=total,
+                unit="placements",
+                current=current,
+            )
+        else:
+            context.report_progress(
+                phase="enumerating",
+                completed=completed,
+                total=total,
+                unit="placements",
+                current=current,
+            )
+
+    publisher_names = sorted({item["attribution"]["publisher"] for item in items})
+    source_metadata: dict[str, Any] = {
+        "description": playlist.get("description", ""),
+        "duplicate_entries": playlist.get("duplicate_count", 0),
+    }
+    if len(publisher_names) == 1:
+        source_metadata["publisher"] = publisher_names[0]
+    warnings = []
+    if playlist.get("duplicate_count"):
+        warnings.append(
+            f"The playlist contains {playlist['duplicate_count']} duplicate placement(s)."
+        )
+    snapshot = {
+        "kind": "watchcraft.collection-iterator-snapshot",
+        "schema_version": 1,
+        "project": {
+            "project_id": project["project_id"],
+            "revision": project["revision"],
+        },
+        "iterator": {
+            "id": iterator["id"],
+            "version": iterator["version"],
+        },
+        "observed_at": observed_at,
+        "source": {
+            "source_id": f"youtube-playlist:{playlist_id}",
+            "source_type": "youtube-playlist",
+            "title": playlist["title"],
+            "canonical_url": playlist["url"],
+            "metadata": source_metadata,
+        },
+        "nodes": [{
+            "node_id": "playlist-root",
+            "node_type": "playlist",
+            "title": playlist["title"],
+            "canonical_url": playlist["url"],
+            "parent_node_id": None,
+            "position": 1,
+            "metadata": {},
+        }],
+        "items": items,
+        "placements": placements,
+        "coverage": {
+            "basis": "source-entries",
+            "expected": total,
+            "resolved": len(placements),
+            "unresolved": unresolved,
+        },
+        "metadata_proposals": [{
+            "field": "metadata.title",
+            "value": playlist["title"],
+            "basis": {"source_path": "source.title", "confidence": 1.0},
+        }],
+        "structure_hash": "",
+        "provenance": {
+            "access_profile": iterator["access_profile"],
+            "discovery_mode": "bounded-crawl",
+            "requested_url": requested_url,
+            "retrieved_urls": list(dict.fromkeys(
+                [playlist["url"]] + [item["canonical_url"] for item in items]
+            )),
+            "warnings": warnings,
+        },
+    }
+    if playlist.get("description"):
+        snapshot["metadata_proposals"].append({
+            "field": "metadata.description",
+            "value": playlist["description"],
+            "basis": {"source_path": "source.metadata.description", "confidence": 1.0},
+        })
+    snapshot["structure_hash"] = iterator_structure_sha256(snapshot)
+    context.report_progress(
+        phase="validating",
+        completed=0,
+        total=1,
+        unit="snapshot",
+    )
+    validate_iterator_snapshot(snapshot)
+    context.report_progress(
+        phase="validating",
+        completed=1,
+        total=1,
+        unit="snapshot",
+    )
+    return snapshot
+
+
+HANDLERS[YOUTUBE_PLAYLIST_ITERATOR_HANDLER] = youtube_playlist_iterator
+
+
 def run_worker(*, job_id: str, spec_sha256: str, dispatch_generation: int, expected_revision: int) -> dict[str, Any]:
     control = worker_client()
     run_id = os.environ.get("GITHUB_RUN_ID", "local-worker")
@@ -1532,10 +2198,17 @@ def run_worker(*, job_id: str, spec_sha256: str, dispatch_generation: int, expec
         "expected_revision": job["revision"],
         "attempt_id": attempt_id,
     })
+    context = WorkerContext(
+        control=control,
+        job=job,
+        attempt_id=attempt_id,
+        lease_duration_ms=lease_duration_ms,
+    )
     handler_key = (job["spec"]["handler"]["id"], job["spec"]["handler"]["version"])
     handler = HANDLERS[handler_key]
     try:
-        output = handler(job)
+        output = handler(job, context)
+        job = context.job
     except Exception as error:
         classification = getattr(error, "classification", "handler_failed")
         retryable = getattr(error, "retryable", False)
@@ -1546,7 +2219,7 @@ def run_worker(*, job_id: str, spec_sha256: str, dispatch_generation: int, expec
         control.post("/jobs/fail", {
             "job_id": job_id,
             "command_id": f"{attempt_id}:handler-fail",
-            "expected_revision": job["revision"],
+            "expected_revision": context.job["revision"],
             "attempt_id": attempt_id,
             "failure": {
                 "classification": classification,
@@ -1556,15 +2229,32 @@ def run_worker(*, job_id: str, spec_sha256: str, dispatch_generation: int, expec
         })
         raise
     try:
-        artifact = R2ArtifactStore.from_environment().put_json(output, {
+        iterator_output = job["spec"]["artifact_kind"] == "collection-iterator-snapshot"
+        if iterator_output:
+            context.report_progress(
+                phase="storing",
+                completed=0,
+                total=1,
+                unit="snapshot",
+            )
+            job = context.job
+        artifact = context.artifact_store().put_json(output, {
             "artifact_kind": job["spec"]["artifact_kind"],
             "schema": job["spec"]["output_schema"],
         })
+        if iterator_output:
+            context.report_progress(
+                phase="storing",
+                completed=1,
+                total=1,
+                unit="snapshot",
+            )
+            job = context.job
     except Exception as error:
         control.post("/jobs/fail", {
             "job_id": job_id,
             "command_id": f"{attempt_id}:storage-fail",
-            "expected_revision": job["revision"],
+            "expected_revision": context.job["revision"],
             "attempt_id": attempt_id,
             "failure": {
                 "classification": "artifact_store_failed",
@@ -1576,7 +2266,7 @@ def run_worker(*, job_id: str, spec_sha256: str, dispatch_generation: int, expec
     return control.post("/jobs/succeed", {
         "job_id": job_id,
         "command_id": f"{attempt_id}:succeed",
-        "expected_revision": job["revision"],
+        "expected_revision": context.job["revision"],
         "attempt_id": attempt_id,
         "artifact": artifact,
     })
@@ -2207,6 +2897,73 @@ def run_smoke_command(args: argparse.Namespace, kind: str) -> int:
         "artifact": completed["job"]["result"],
         "result": result,
     }, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def load_catalog_project(path: Path) -> dict[str, Any]:
+    try:
+        project = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"Could not read catalog project {path}: {error}") from error
+    validate_json_schema(project, CATALOG_PROJECT_SCHEMA_PATH, "Catalog project")
+    return project
+
+
+def run_iterate_project(args: argparse.Namespace) -> int:
+    control = operator_client(args.operator_token_source)
+    project = load_catalog_project(args.project_file)
+    spec = youtube_playlist_iterator_spec(project)
+    submitted = submit_spec(
+        control,
+        request={
+            "kind": "collection-iteration",
+            "project_id": project["project_id"],
+            "project_revision": project["revision"],
+            "iterator": project["iterator"]["id"],
+        },
+        spec=spec,
+    )
+    job = submitted["job"]
+    print(f"submitted {job['job_id']} ({job['spec']['handler']['id']})", flush=True)
+    approved = control.post("/submissions/approve", {
+        "job_id": job["job_id"],
+        "command_id": str(uuid.uuid4()),
+        "expected_revision": job["revision"],
+        "actor": "watchcraft-author-cli",
+        "spec_sha256": job["spec_sha256"],
+    })
+    pending = dispatch_submission(control, approved["job"])
+    print(
+        f"dispatched {pending['job_id']} via {dispatch_workflow(pending)} "
+        f"generation {pending['dispatch']['generation']}",
+        flush=True,
+    )
+    completed = wait_for_terminal_job(control, job["job_id"], args.timeout_seconds)
+    snapshot = verified_json_result(completed["job"], args.r2_credentials_source)
+    validate_iterator_snapshot(snapshot)
+    if snapshot.get("project") != {
+        "project_id": project["project_id"],
+        "revision": project["revision"],
+    }:
+        raise RuntimeError("Iterator result belongs to a different catalog project revision")
+    print(json.dumps({
+        "job_id": completed["job"]["job_id"],
+        "run_id": completed["run"]["run_id"],
+        "state": completed["job"]["state"],
+        "artifact": completed["job"]["result"],
+        "iterator": snapshot["iterator"],
+        "source": snapshot["source"],
+        "coverage": snapshot["coverage"],
+        "items": len(snapshot["items"]),
+        "placements": len(snapshot["placements"]),
+        "structure_hash": snapshot["structure_hash"],
+    }, ensure_ascii=False, indent=2, sort_keys=True))
+    print(
+        "Full snapshot: ./authoring/watchcraft-author queue result "
+        "--operator-token-source keychain --r2-credentials-source keychain "
+        f"{completed['job']['job_id']}",
+        flush=True,
+    )
     return 0
 
 
@@ -2912,6 +3669,28 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         default="auto",
         help="Temporary source-media uploader credential source (default: auto)",
     )
+    iterate_project = commands.add_parser(
+        "iterate-project",
+        parents=[credentials],
+        help="Discover a catalog project's members into an immutable snapshot",
+        description=(
+            "Validate a CatalogProject, run its registered collection iterator, "
+            "report member progress, and retrieve the verified candidate snapshot. "
+            "The first executable iterator is watchcraft.youtube-playlist@1."
+        ),
+    )
+    iterate_project.add_argument(
+        "project_file",
+        type=Path,
+        help="CatalogProject JSON document",
+    )
+    iterate_project.add_argument("--timeout-seconds", type=int, default=1800)
+    iterate_project.add_argument(
+        "--r2-credentials-source",
+        choices=("auto", "keychain", "environment"),
+        default="auto",
+        help="Read-only result credential source (default: auto)",
+    )
     queued_analysis = commands.add_parser(
         "analyze-transcript",
         parents=[credentials],
@@ -3167,6 +3946,8 @@ def run_queue_command(args: argparse.Namespace) -> int:
         return run_local_youtube_transcription(args, smoke=False)
     if args.queue_command == "process-youtube":
         return run_youtube_video_pipeline(args)
+    if args.queue_command == "iterate-project":
+        return run_iterate_project(args)
     if args.queue_command == "analyze-transcript":
         return run_queued_video_analysis(args)
 
