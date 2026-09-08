@@ -104,6 +104,26 @@ The initial iterator families are:
 
 The first schema permits one iterator per project. Multiple or composed iterators are deferred until a concrete project requires them.
 
+### Iterator execution, progress, and resumption
+
+One iterator invocation is one ordinary authoring job. The state machine does not create a durable state for every member and does not expand `running` into `processing_1`, `processing_2`, and so on. Instead, the active attempt may attach a bounded progress report to its lease heartbeat:
+
+```json
+{
+  "phase": "enumerating",
+  "completed": 12,
+  "total": 42,
+  "unit": "placements",
+  "current": "Lesson 13: Color spaces"
+}
+```
+
+The total may be absent while the iterator is still discovering the source. Within one phase and attempt, `completed` is monotonic and a known total is stable. Phase names and units are handler-defined, versioned behavior; likely phases include resolving the source, enumerating members, validating coverage, and storing the candidate snapshot. These reports exist for operator visibility and scheduling heuristics. They are not completion evidence and do not alter the job's lifecycle state.
+
+At a safe boundary, such as after a page of provider results or a complete course unit, the iterator may upload a content-addressed `*-checkpoint` artifact and attach its reference and a monotonic sequence number to the same heartbeat. The checkpoint is bound to the exact job-specification hash. A replacement attempt may load the latest matching checkpoint, verify its bytes, and resume with the next stable provider cursor or placement rather than starting over. Repeating a checkpoint or enumerated member is idempotent because stable item and placement identities are deduplicated by the iterator.
+
+Progress and checkpointing do not weaken fail-closed publication. A partial checkpoint is never an iterator snapshot, never satisfies the job's output contract, and never changes the project's accepted snapshot. Only after enumeration and coverage validation finish does the job publish one complete immutable candidate snapshot and enter `succeeded`. Cancellation, terminal failure, or exhausted retry leaves the previously accepted project revision untouched.
+
 ## Iterator snapshots
 
 The output of an iterator is stored as an immutable, content-addressed `watchcraft.collection-iterator-snapshot`. This is pipeline bookkeeping and evidence, not a third author-facing abstraction.

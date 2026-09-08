@@ -2075,6 +2075,7 @@ def wait_for_terminal_job(
     deadline = started_at + timeout_seconds
     next_progress_at = started_at + progress_seconds
     last_state = None
+    last_progress = None
     while True:
         submission = control.post("/submissions/get", {"job_id": job_id})
         job = submission["job"]
@@ -2083,6 +2084,11 @@ def wait_for_terminal_job(
         if state_changed:
             print(f"{job_id}: {state}", flush=True)
             last_state = state
+        progress = formatted_job_progress(job)
+        progress_changed = progress is not None and progress != last_progress
+        if progress_changed:
+            print(f"{job_id}: {progress}", flush=True)
+            last_progress = progress
         if state == "succeeded":
             return submission
         if state in {"retryable_failed", "terminal_failed", "cancelled"}:
@@ -2094,7 +2100,7 @@ def wait_for_terminal_job(
         now = time.monotonic()
         if now >= deadline:
             raise RuntimeError(f"Timed out after {timeout_seconds}s waiting for job {job_id}")
-        if not state_changed and now >= next_progress_at:
+        if not state_changed and not progress_changed and now >= next_progress_at:
             elapsed_seconds = int(now - started_at)
             print(
                 f"{job_id}: still waiting ({state}, {elapsed_seconds}s elapsed)",
@@ -2103,6 +2109,27 @@ def wait_for_terminal_job(
             while next_progress_at <= now:
                 next_progress_at += progress_seconds
         time.sleep(poll_seconds)
+
+
+def formatted_job_progress(job: dict[str, Any]) -> str | None:
+    attempts = job.get("attempts")
+    if not isinstance(attempts, list) or not attempts or not isinstance(attempts[-1], dict):
+        return None
+    progress = attempts[-1].get("progress")
+    if not isinstance(progress, dict):
+        return None
+    phase = progress.get("phase")
+    completed = progress.get("completed")
+    total = progress.get("total")
+    unit = progress.get("unit")
+    if not isinstance(phase, str) or not isinstance(completed, int) or not isinstance(unit, str):
+        return None
+    count = f"{completed} of {total}" if isinstance(total, int) else str(completed)
+    message = f"{phase}: {count} {unit}"
+    current = progress.get("current")
+    if isinstance(current, str) and current:
+        message += f" — {current}"
+    return message
 
 
 def run_smoke_command(args: argparse.Namespace, kind: str) -> int:

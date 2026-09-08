@@ -118,6 +118,12 @@ invented by a worker. In particular:
   unique attempt ID;
 - the claim mutation grants a time-bounded lease to exactly one attempt;
 - a running worker heartbeats to extend that lease within configured limits;
+- a heartbeat may report bounded structured progress as a phase, completed count,
+  optional total, unit, and current item;
+- progress is operational detail within an attempt, not a proliferation of durable
+  job states;
+- a heartbeat may attach a monotonically sequenced, content-addressed checkpoint
+  artifact bound to the immutable job-specification hash;
 - a completion mutation must match the active attempt and lease;
 - a late or duplicate completion cannot overwrite a newer accepted result; and
 - retry policy and backoff are control-plane decisions, not ad hoc worker behavior.
@@ -125,6 +131,21 @@ invented by a worker. In particular:
 Cancellation is cooperative. It prevents new claims immediately and causes a worker
 to stop at its next safe boundary. Artifacts uploaded by a cancelled, expired, or
 superseded attempt are not authoritative merely because they exist.
+
+Progress answers questions such as "enumerating: 12 of 42 placements" without
+changing the meaning of `running`. A worker may omit the total until discovery makes
+it knowable. Once reported within a phase, the completed count cannot move backward
+and the total cannot change. A new phase may establish a different unit and total.
+
+Checkpoints are optional immutable R2 artifacts whose artifact kind ends in
+`-checkpoint`. They contain enough handler-specific state to resume at a safe
+boundary, but they are not successful results and never satisfy a dependency or
+publication gate. A retry may inspect the latest checkpoint with the same job
+specification hash and resume from it; otherwise it starts cleanly. Checkpoint
+sequences cannot move backward, and a sequence number cannot be rebound to different
+bytes. Candidate source snapshots remain fail-closed: partial iteration may be
+checkpointed, but only a complete, validated snapshot becomes an authoritative job
+result.
 
 ### Dispatch and reconciliation
 

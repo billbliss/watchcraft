@@ -1638,6 +1638,47 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertIn("job-1: succeeded", output.getvalue())
         self.assertEqual(sleep.call_count, 2)
 
+    def test_waiting_for_a_remote_job_reports_structured_progress_changes(self):
+        client = Mock()
+        client.post.side_effect = [
+            {"job": {"job_id": "job-1", "state": "running", "attempts": [{
+                "progress": {
+                    "phase": "enumerating",
+                    "completed": 1,
+                    "total": 3,
+                    "unit": "placements",
+                    "current": "Lesson one",
+                },
+            }]}},
+            {"job": {"job_id": "job-1", "state": "running", "attempts": [{
+                "progress": {
+                    "phase": "enumerating",
+                    "completed": 2,
+                    "total": 3,
+                    "unit": "placements",
+                    "current": "Lesson two",
+                },
+            }]}},
+            {"job": {"job_id": "job-1", "state": "succeeded", "attempts": []}},
+        ]
+        output = io.StringIO()
+        with patch("queued_authoring.time.monotonic", side_effect=[0.0, 0.0, 1.0, 2.0]):
+            with patch("queued_authoring.time.sleep"):
+                with redirect_stdout(output):
+                    queued_authoring.wait_for_terminal_job(
+                        client,
+                        "job-1",
+                        timeout_seconds=60,
+                    )
+        self.assertIn(
+            "job-1: enumerating: 1 of 3 placements — Lesson one",
+            output.getvalue(),
+        )
+        self.assertIn(
+            "job-1: enumerating: 2 of 3 placements — Lesson two",
+            output.getvalue(),
+        )
+
     def test_mlx_registry_snapshot_is_accepted_only_by_the_macos_profile(self):
         job = {
             "job_id": "job-mlx",

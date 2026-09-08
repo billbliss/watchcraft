@@ -162,7 +162,14 @@ A late, duplicate, expired, cancelled, or superseded worker may leave an orphane
 
 Each phase and domain output has an explicit completeness condition. Structural file existence is not enough. A result must belong to the expected source, validate against the expected schema, cover the planned input set, and satisfy any cross-artifact invariants.
 
-Completed artifacts are checkpoints and may be reused. Incomplete work is a normal recoverable state, but it never crosses the publication boundary. A previous valid publication may remain active while a replacement run is incomplete.
+Completed artifacts are checkpoints and may be reused. A long-running job may also
+publish an immutable, specification-bound checkpoint at a safe boundary and expose
+bounded progress such as `enumerating: 12 of 42 placements`. These progress reports
+remain details of the current attempt rather than additional job states. A retry may
+resume from the latest valid checkpoint, but partial work is never treated as a
+successful result. Incomplete work is a normal recoverable state, but it never crosses
+the publication boundary. A previous valid publication may remain active while a
+replacement run is incomplete.
 
 ## What is reusable and what is incidental
 

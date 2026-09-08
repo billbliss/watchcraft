@@ -802,6 +802,8 @@ export const heartbeatJob = internalMutation({
     expected_revision: v.number(),
     attempt_id: v.string(),
     lease_duration_ms: v.number(),
+    progress: v.optional(v.any()),
+    checkpoint: v.optional(v.any()),
   },
   returns: v.any(),
   handler: (ctx, args) => applyStoredCommand(ctx, args.job_id, {
@@ -810,6 +812,8 @@ export const heartbeatJob = internalMutation({
     expected_revision: args.expected_revision,
     attempt_id: args.attempt_id,
     lease_duration_ms: args.lease_duration_ms,
+    progress: args.progress,
+    checkpoint: args.checkpoint,
   }, Date.now()),
 });
 

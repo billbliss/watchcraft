@@ -117,13 +117,9 @@ class InMemoryControlPlane implements AuthoringControlPlane {
     return this.apply({ type: "start", ...input });
   }
 
-  async heartbeatJob(input: {
-    job_id: string;
-    command_id: string;
-    expected_revision: number;
-    attempt_id: string;
-    lease_duration_ms: number;
-  }) {
+  async heartbeatJob(
+    input: Parameters<AuthoringControlPlane["heartbeatJob"]>[0],
+  ) {
     return this.apply({ type: "heartbeat", ...input });
   }
 

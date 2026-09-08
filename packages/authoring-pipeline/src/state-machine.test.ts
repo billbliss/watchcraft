@@ -7,6 +7,8 @@ import {
   artifactKey,
   createAuthoringJob,
   jobSpecSha256,
+  latestJobCheckpoint,
+  parseAuthoringJob,
   syntheticTranscriptJobSpec,
 } from "./index.ts";
 
@@ -50,6 +52,20 @@ function transcriptArtifact(): ArtifactReference {
     media_type: "application/json",
     artifact_kind: "transcript",
     schema: { id: "watchcraft.transcript", version: 1 },
+    key: artifactKey(digest),
+  };
+}
+
+function checkpointArtifact(): ArtifactReference {
+  const digest = "b".repeat(64);
+  return {
+    store: "r2",
+    algorithm: "sha256",
+    digest,
+    byte_length: 250,
+    media_type: "application/json",
+    artifact_kind: "collection-iterator-checkpoint",
+    schema: { id: "watchcraft.collection-iterator-checkpoint", version: 1 },
     key: artifactKey(digest),
   };
 }
@@ -98,6 +114,102 @@ test("a dispatched job can be claimed, run, and completed exactly against its le
   assert.equal(job.result?.digest, "a".repeat(64));
   assert.equal(job.lease, null);
   assert.equal(job.attempts[0]?.state, "succeeded");
+});
+
+test("heartbeats record bounded progress and immutable resumable checkpoints", () => {
+  let job = dispatchedJob();
+  job = applyJobCommand(job, {
+    type: "claim",
+    command_id: "claim",
+    expected_revision: job.revision,
+    attempt_id: "attempt-1",
+    owner: "worker",
+    spec_sha256: job.spec_sha256,
+    generation: 1,
+    lease_duration_ms: 1_000,
+  }, 200);
+  job = applyJobCommand(job, {
+    type: "start",
+    command_id: "start",
+    expected_revision: job.revision,
+    attempt_id: "attempt-1",
+  }, 201);
+  job = applyJobCommand(job, {
+    type: "heartbeat",
+    command_id: "progress-1",
+    expected_revision: job.revision,
+    attempt_id: "attempt-1",
+    lease_duration_ms: 1_000,
+    progress: {
+      phase: "enumerating",
+      completed: 1,
+      total: 3,
+      unit: "placements",
+      current: "Lesson one",
+    },
+    checkpoint: {
+      sequence: 1,
+      spec_sha256: job.spec_sha256,
+      artifact: checkpointArtifact(),
+    },
+  }, 202);
+
+  assert.deepEqual(job.attempts[0]?.progress, {
+    phase: "enumerating",
+    completed: 1,
+    total: 3,
+    unit: "placements",
+    current: "Lesson one",
+    updated_at: 202,
+  });
+  assert.equal(latestJobCheckpoint(job)?.artifact.digest, "b".repeat(64));
+  assert.equal(parseAuthoringJob(job).attempts[0]?.progress?.total, 3);
+
+  assert.throws(() => applyJobCommand(job, {
+    type: "heartbeat",
+    command_id: "backwards-progress",
+    expected_revision: job.revision,
+    attempt_id: "attempt-1",
+    lease_duration_ms: 1_000,
+    progress: {
+      phase: "enumerating",
+      completed: 0,
+      total: 3,
+      unit: "placements",
+    },
+  }, 203), /cannot move backwards/);
+
+  assert.throws(() => applyJobCommand(job, {
+    type: "heartbeat",
+    command_id: "wrong-checkpoint",
+    expected_revision: job.revision,
+    attempt_id: "attempt-1",
+    lease_duration_ms: 1_000,
+    checkpoint: {
+      sequence: 2,
+      spec_sha256: "0".repeat(64),
+      artifact: checkpointArtifact(),
+    },
+  }, 203), /does not match the immutable job specification/);
+
+  job = applyJobCommand(job, {
+    type: "fail",
+    command_id: "retryable-failure",
+    expected_revision: job.revision,
+    attempt_id: "attempt-1",
+    failure: {
+      classification: "lease_expired",
+      message: "Resume from the last durable checkpoint.",
+      retryable: true,
+    },
+  }, 203);
+  job = applyJobCommand(job, {
+    type: "retry",
+    command_id: "retry",
+    expected_revision: job.revision,
+  }, 204);
+  assert.equal(job.state, "ready");
+  assert.equal(latestJobCheckpoint(job)?.sequence, 1);
 });
 
 test("approval and worker claims bind the immutable specification hash", () => {

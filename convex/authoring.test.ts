@@ -262,10 +262,49 @@ test("generic control mutations persist a retryable failure, retry, and cancella
     dispatch_generation: 1,
     lease_duration_ms: 60_000,
   }) as any;
+  const running = await t.mutation(internal.authoringInternal.startJob, {
+    job_id: created.job_id,
+    command_id: "attempt-1:start",
+    expected_revision: claimed.revision,
+    attempt_id: "attempt-1",
+  }) as any;
+  const checkpointDigest = "b".repeat(64);
+  const heartbeat = await t.mutation(internal.authoringInternal.heartbeatJob, {
+    job_id: created.job_id,
+    command_id: "attempt-1:heartbeat",
+    expected_revision: running.revision,
+    attempt_id: "attempt-1",
+    lease_duration_ms: 60_000,
+    progress: {
+      phase: "enumerating",
+      completed: 1,
+      total: 3,
+      unit: "placements",
+      current: "Lesson one",
+    },
+    checkpoint: {
+      sequence: 1,
+      spec_sha256: created.spec_sha256,
+      artifact: {
+        algorithm: "sha256",
+        digest: checkpointDigest,
+        byte_length: 512,
+        media_type: "application/json",
+        key: artifactKey(checkpointDigest),
+        store: "r2",
+        artifact_kind: "collection-iterator-checkpoint",
+        schema: { id: "watchcraft.collection-iterator-checkpoint", version: 1 },
+      },
+    },
+  }) as any;
+  expect(heartbeat.attempts[0]).toMatchObject({
+    progress: { phase: "enumerating", completed: 1, total: 3, unit: "placements" },
+    checkpoint: { sequence: 1, spec_sha256: created.spec_sha256 },
+  });
   const failed = await t.mutation(internal.authoringInternal.failJob, {
     job_id: created.job_id,
     command_id: "attempt-1:fail",
-    expected_revision: claimed.revision,
+    expected_revision: heartbeat.revision,
     attempt_id: "attempt-1",
     failure: {
       classification: "temporary_upstream_failure",
@@ -273,27 +312,28 @@ test("generic control mutations persist a retryable failure, retry, and cancella
       retryable: true,
     },
   }) as any;
-  expect(failed).toMatchObject({ state: "retryable_failed", revision: 7 });
+  expect(failed).toMatchObject({ state: "retryable_failed", revision: 9 });
 
   const retried = await t.mutation(internal.authoringInternal.retryJob, {
     job_id: created.job_id,
     command_id: "retry",
     expected_revision: failed.revision,
   }) as any;
-  expect(retried).toMatchObject({ state: "ready", revision: 8, failure: null });
+  expect(retried).toMatchObject({ state: "ready", revision: 10, failure: null });
+  expect(retried.attempts[0].checkpoint.sequence).toBe(1);
   const cancelled = await t.mutation(internal.authoringInternal.cancelJob, {
     job_id: created.job_id,
     command_id: "cancel",
     expected_revision: retried.revision,
   }) as any;
-  expect(cancelled).toMatchObject({ state: "cancelled", revision: 9 });
+  expect(cancelled).toMatchObject({ state: "cancelled", revision: 11 });
 
   const snapshot = await t.run(async (ctx) => ({
     jobs: await ctx.db.query("authoring_jobs").collect(),
     events: await ctx.db.query("authoring_job_events").collect(),
   }));
   expect(snapshot.jobs).toHaveLength(1);
-  expect(snapshot.events).toHaveLength(9);
+  expect(snapshot.events).toHaveLength(11);
   expect(snapshot.jobs[0]?.aggregate).toEqual(cancelled);
 });
 

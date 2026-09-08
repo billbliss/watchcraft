@@ -1,4 +1,9 @@
-import type { ArtifactReference, AuthoringJob } from "./contracts.ts";
+import type {
+  ArtifactReference,
+  AuthoringJob,
+  JobCheckpoint,
+  JobProgressReport,
+} from "./contracts.ts";
 
 export interface SmokeJobPreparation {
   job_id: string;
@@ -46,6 +51,8 @@ export interface AuthoringControlPlane {
     expected_revision: number;
     attempt_id: string;
     lease_duration_ms: number;
+    progress?: JobProgressReport;
+    checkpoint?: JobCheckpoint;
   }): Promise<AuthoringJob>;
   succeedJob(input: {
     job_id: string;

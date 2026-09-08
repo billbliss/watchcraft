@@ -162,6 +162,24 @@ export interface JobFailure {
   occurred_at: number;
 }
 
+export interface JobProgressReport {
+  phase: string;
+  completed: number;
+  total?: number;
+  unit: string;
+  current?: string;
+}
+
+export interface JobProgress extends JobProgressReport {
+  updated_at: number;
+}
+
+export interface JobCheckpoint {
+  sequence: number;
+  spec_sha256: string;
+  artifact: ArtifactReference;
+}
+
 export interface JobAttemptSummary {
   attempt_id: string;
   owner: string;
@@ -169,6 +187,8 @@ export interface JobAttemptSummary {
   started_at: number;
   updated_at: number;
   github_run_id?: string;
+  progress?: JobProgress;
+  checkpoint?: JobCheckpoint;
   artifact?: ArtifactReference;
   failure?: JobFailure;
 }
@@ -644,6 +664,55 @@ function parseFailure(value: unknown): JobFailure {
   };
 }
 
+function boundedString(value: unknown, label: string, maximumLength: number): string {
+  const parsed = stringValue(value, label);
+  if (parsed.length > maximumLength) {
+    throw new TypeError(`${label} must not exceed ${maximumLength} characters.`);
+  }
+  return parsed;
+}
+
+export function parseJobProgressReport(value: unknown): JobProgressReport {
+  const candidate = objectValue(value, "Job progress");
+  const completed = integerValue(candidate.completed, "Job progress completed count");
+  const total = candidate.total === undefined
+    ? undefined
+    : integerValue(candidate.total, "Job progress total count");
+  if (total !== undefined && completed > total) {
+    throw new TypeError("Job progress completed count must not exceed its total.");
+  }
+  return {
+    phase: boundedString(candidate.phase, "Job progress phase", 100),
+    completed,
+    ...(total === undefined ? {} : { total }),
+    unit: boundedString(candidate.unit, "Job progress unit", 100),
+    ...(candidate.current === undefined
+      ? {}
+      : { current: boundedString(candidate.current, "Job progress current item", 500) }),
+  };
+}
+
+export function parseJobProgress(value: unknown): JobProgress {
+  const candidate = objectValue(value, "Job progress");
+  return {
+    ...parseJobProgressReport(candidate),
+    updated_at: integerValue(candidate.updated_at, "Job progress update time"),
+  };
+}
+
+export function parseJobCheckpoint(value: unknown): JobCheckpoint {
+  const candidate = objectValue(value, "Job checkpoint");
+  const artifact = parseArtifactReference(candidate.artifact);
+  if (!artifact.artifact_kind.endsWith("-checkpoint")) {
+    throw new TypeError("Job checkpoint artifact kind must end in -checkpoint.");
+  }
+  return {
+    sequence: integerValue(candidate.sequence, "Job checkpoint sequence", 1),
+    spec_sha256: sha256Value(candidate.spec_sha256, "Job checkpoint specification digest"),
+    artifact,
+  };
+}
+
 function parseAttempt(value: unknown): JobAttemptSummary {
   const candidate = objectValue(value, "Job attempt");
   const state = stringValue(candidate.state, "Attempt state");
@@ -661,6 +730,8 @@ function parseAttempt(value: unknown): JobAttemptSummary {
     started_at: startedAt,
     updated_at: updatedAt,
     ...(githubRunId === undefined ? {} : { github_run_id: githubRunId }),
+    ...(candidate.progress === undefined ? {} : { progress: parseJobProgress(candidate.progress) }),
+    ...(candidate.checkpoint === undefined ? {} : { checkpoint: parseJobCheckpoint(candidate.checkpoint) }),
     ...(candidate.artifact === undefined ? {} : { artifact: parseArtifactReference(candidate.artifact) }),
     ...(candidate.failure === undefined ? {} : { failure: parseFailure(candidate.failure) }),
   };
@@ -688,6 +759,19 @@ export function parseAuthoringJob(value: unknown): AuthoringJob {
   const createdAt = integerValue(candidate.created_at, "Job creation time");
   const updatedAt = integerValue(candidate.updated_at, "Job update time");
   if (updatedAt < createdAt) throw new TypeError("Job timestamps are inconsistent.");
+  const attempts = candidate.attempts.map(parseAttempt);
+  for (const attempt of attempts) {
+    if (
+      attempt.progress
+      && (attempt.progress.updated_at < attempt.started_at
+        || attempt.progress.updated_at > attempt.updated_at)
+    ) {
+      throw new TypeError("Job progress timestamp is outside its attempt.");
+    }
+    if (attempt.checkpoint && attempt.checkpoint.spec_sha256 !== expectedHash) {
+      throw new TypeError("Job checkpoint does not match the immutable job specification.");
+    }
+  }
   return {
     kind: "watchcraft.authoring-job",
     schema_version: 1,
@@ -701,7 +785,7 @@ export function parseAuthoringJob(value: unknown): AuthoringJob {
     approval: nullableObject(candidate.approval, "Job approval", parseApproval),
     dispatch: nullableObject(candidate.dispatch, "Job dispatch", parseDispatch),
     lease: nullableObject(candidate.lease, "Job lease", parseLease),
-    attempts: candidate.attempts.map(parseAttempt),
+    attempts,
     result: nullableObject(candidate.result, "Job result", parseArtifactReference),
     failure: nullableObject(candidate.failure, "Job failure", parseFailure),
     created_at: createdAt,

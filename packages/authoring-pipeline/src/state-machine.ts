@@ -2,9 +2,13 @@ import {
   type ArtifactReference,
   type AuthoringJob,
   type AuthoringJobSpec,
+  type JobCheckpoint,
   type JobFailure,
+  type JobProgressReport,
   jobSpecSha256,
   parseArtifactReference,
+  parseJobCheckpoint,
+  parseJobProgressReport,
 } from "./contracts.ts";
 
 export class JobTransitionError extends Error {}
@@ -38,6 +42,8 @@ export type JobCommand =
       type: "heartbeat";
       attempt_id: string;
       lease_duration_ms: number;
+      progress?: JobProgressReport;
+      checkpoint?: JobCheckpoint;
     })
   | (CommandBase & { type: "succeed"; attempt_id: string; artifact: ArtifactReference })
   | (CommandBase & { type: "fail"; attempt_id: string; failure: Omit<JobFailure, "occurred_at"> })
@@ -64,6 +70,15 @@ function activeAttempt(job: AuthoringJob, attemptId: string) {
   const attempt = job.attempts.find((candidate) => candidate.attempt_id === attemptId);
   if (!attempt) throw new JobTransitionError(`Attempt ${attemptId} is not recorded.`);
   return attempt;
+}
+
+export function latestJobCheckpoint(job: AuthoringJob): JobCheckpoint | undefined {
+  return job.attempts.reduce<JobCheckpoint | undefined>((latest, attempt) => {
+    if (!attempt.checkpoint || (latest && attempt.checkpoint.sequence <= latest.sequence)) {
+      return latest;
+    }
+    return attempt.checkpoint;
+  }, undefined);
 }
 
 export function createAuthoringJob(
@@ -189,6 +204,41 @@ export function applyJobCommand(job: AuthoringJob, command: JobCommand, now: num
       }
       next.lease!.heartbeat_at = now;
       next.lease!.expires_at = now + command.lease_duration_ms;
+      if (command.progress) {
+        const progress = parseJobProgressReport(command.progress);
+        if (
+          attempt.progress?.phase === progress.phase
+          && progress.completed < attempt.progress.completed
+        ) {
+          throw new JobTransitionError("Job progress cannot move backwards within a phase.");
+        }
+        if (
+          attempt.progress?.phase === progress.phase
+          && attempt.progress.total !== undefined
+          && progress.total !== attempt.progress.total
+        ) {
+          throw new JobTransitionError("Job progress total cannot change after it is known within a phase.");
+        }
+        attempt.progress = { ...progress, updated_at: now };
+      }
+      if (command.checkpoint) {
+        const checkpoint = parseJobCheckpoint(command.checkpoint);
+        if (checkpoint.spec_sha256 !== next.spec_sha256) {
+          throw new JobTransitionError("Job checkpoint does not match the immutable job specification.");
+        }
+        const latestCheckpoint = latestJobCheckpoint(next);
+        if (latestCheckpoint && checkpoint.sequence < latestCheckpoint.sequence) {
+          throw new JobTransitionError("Job checkpoint sequence cannot move backwards.");
+        }
+        if (
+          latestCheckpoint
+          && checkpoint.sequence === latestCheckpoint.sequence
+          && checkpoint.artifact.digest !== latestCheckpoint.artifact.digest
+        ) {
+          throw new JobTransitionError("A job checkpoint sequence cannot identify different content.");
+        }
+        attempt.checkpoint = checkpoint;
+      }
       attempt.updated_at = now;
       break;
     }
