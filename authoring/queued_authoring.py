@@ -5096,13 +5096,25 @@ def run_compile_project(args: argparse.Namespace) -> int:
     )
     project_item_id = f"catalog-project:{project['project_id']}"
     run_id = stable_project_execution_id(
-        plan_reference["digest"], project_item_id, "collection-compilation-run"
+        plan_reference["digest"],
+        project_item_id,
+        versioned_handler_execution_role(
+            "collection-compilation-run", COLLECTION_COMPILATION_HANDLER
+        ),
     )
     job_id = stable_project_execution_id(
-        plan_reference["digest"], project_item_id, "collection-compilation"
+        plan_reference["digest"],
+        project_item_id,
+        versioned_handler_execution_role(
+            "collection-compilation", COLLECTION_COMPILATION_HANDLER
+        ),
     )
     command_prefix = stable_project_execution_id(
-        plan_reference["digest"], project_item_id, "collection-compilation-commands"
+        plan_reference["digest"],
+        project_item_id,
+        versioned_handler_execution_role(
+            "collection-compilation-commands", COLLECTION_COMPILATION_HANDLER
+        ),
     )
     request = {
         "kind": "project-collection-compilation",
@@ -5112,6 +5124,10 @@ def run_compile_project(args: argparse.Namespace) -> int:
         "project_id": project["project_id"],
         "project_revision": project["revision"],
         "logical_task_id": plan["collection_tasks"][1]["task_id"],
+        "handler": {
+            "id": COLLECTION_COMPILATION_HANDLER[0],
+            "version": COLLECTION_COMPILATION_HANDLER[1],
+        },
     }
     existing = control.post("/pipelines/get", {"run_id": run_id})
     if existing.get("run") is None:
@@ -5522,6 +5538,12 @@ def stable_project_execution_id(
         uuid.NAMESPACE_URL,
         f"https://watchcraft.dev/authoring/{plan_artifact_sha256}/{item_id}/{role}",
     ))
+
+
+def versioned_handler_execution_role(
+    role: str, handler: tuple[str, str]
+) -> str:
+    return f"{role}:{handler[0]}@{handler[1]}"
 
 
 def _resume_pipeline_job(

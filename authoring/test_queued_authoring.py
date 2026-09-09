@@ -2890,6 +2890,30 @@ class QueuedAuthoringTests(unittest.TestCase):
             analysis_reference,
             normalization_reference,
         ])
+        self.assertEqual(captured["request"]["handler"], {
+            "id": queued_authoring.COLLECTION_COMPILATION_HANDLER[0],
+            "version": queued_authoring.COLLECTION_COMPILATION_HANDLER[1],
+        })
+        project_item_id = f"catalog-project:{project['project_id']}"
+        current_role = queued_authoring.versioned_handler_execution_role(
+            "collection-compilation", queued_authoring.COLLECTION_COMPILATION_HANDLER
+        )
+        prior_role = queued_authoring.versioned_handler_execution_role(
+            "collection-compilation",
+            (queued_authoring.COLLECTION_COMPILATION_HANDLER[0], "1"),
+        )
+        self.assertEqual(
+            captured["job_id"],
+            queued_authoring.stable_project_execution_id(
+                plan_reference["digest"], project_item_id, current_role
+            ),
+        )
+        self.assertNotEqual(
+            captured["job_id"],
+            queued_authoring.stable_project_execution_id(
+                plan_reference["digest"], project_item_id, prior_role
+            ),
+        )
 
     def test_materialize_project_creates_a_new_revision_package_and_diff(self):
         from build_collection import build_collection_manifest, render_csv
