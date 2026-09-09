@@ -1,7 +1,7 @@
 {
   "kind": "watchcraft.authoring-capability-registry",
   "schema_version": 1,
-  "registry_version": "2026-09-08.4",
+  "registry_version": "2026-09-09.1",
   "handlers": [
     {
       "id": "watchcraft.analysis.lexical",
@@ -107,7 +107,7 @@
     },
     {
       "id": "watchcraft.compile.video-collection",
-      "version": "1",
+      "version": "2",
       "operation": "compile",
       "inputs": [
         {

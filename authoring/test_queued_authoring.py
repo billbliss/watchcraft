@@ -29,7 +29,7 @@ def registry_snapshot(
 ):
     if collection_compilation:
         return {
-            "registry_version": "2026-09-08.4",
+            "registry_version": "2026-09-09.1",
             "registry_sha256": "c" * 64,
             "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
                 queued_authoring.COLLECTION_COMPILATION_HANDLER
@@ -2613,7 +2613,7 @@ class QueuedAuthoringTests(unittest.TestCase):
             analysis = {
                 "schema_version": 2,
                 "video": video,
-                "title": item["title"],
+                "title": f"Generated rewrite of {item['title']}",
                 "summary": "A visual linear algebra lesson.",
                 "topics": ["vectors"],
                 "sections": [],
@@ -2701,6 +2701,10 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertEqual(len(result["manifest"]["items"]), len(plan["items"]))
         self.assertEqual(len(result["resources"]), len(plan["items"]))
         self.assertEqual(result["manifest"]["stats"]["topic_family_count"], 1)
+        self.assertEqual(
+            {item["title"] for item in result["manifest"]["items"].values()},
+            {item["title"] for item in snapshot["items"]},
+        )
         self.assertEqual(context.report_progress.call_count, len(plan["items"]) + 1)
 
     def test_collection_comparison_reports_revision_and_identity_drift(self):
@@ -2886,6 +2890,129 @@ class QueuedAuthoringTests(unittest.TestCase):
             analysis_reference,
             normalization_reference,
         ])
+
+    def test_materialize_project_creates_a_new_revision_package_and_diff(self):
+        from build_collection import build_collection_manifest, render_csv
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            authoring_root = root / "authoring-source"
+            published_root = root / "published"
+            authoring_root.mkdir()
+            published_root.mkdir()
+            (authoring_root / "watchcraft-authoring.json").write_text(
+                json.dumps({"collection": {
+                    "collection_id": "example-collection",
+                    "title": "Example Collection",
+                }}),
+                encoding="utf-8",
+            )
+            old_analysis = {
+                "schema_version": 2,
+                "video": "lesson.mp4",
+                "title": "Old lesson title",
+                "summary": "Old summary.",
+                "topics": ["vectors"],
+                "sections": [],
+                "locations": [],
+                "analysis_model": "gpt-5-nano",
+            }
+            new_analysis = {
+                **old_analysis,
+                "title": "New lesson title",
+                "summary": "New summary.",
+            }
+            published = build_collection_manifest(
+                authoring_root, [old_analysis], {}, previous=None, normalization=None
+            )
+            candidate = build_collection_manifest(
+                authoring_root, [new_analysis], {}, previous=None, normalization=None
+            )
+            (published_root / "collection.json").write_text(
+                json.dumps(published, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            (published_root / "catalog.csv").write_text(
+                render_csv([old_analysis], published), encoding="utf-8"
+            )
+            (published_root / "analysis").mkdir()
+            (published_root / "analysis/lesson.analysis.json").write_text(
+                json.dumps(old_analysis), encoding="utf-8"
+            )
+            analysis_payload = queued_authoring.canonical_json(new_analysis).encode("utf-8")
+            digest = queued_authoring.sha256_hex(analysis_payload)
+            analysis_reference = {
+                "store": "r2",
+                "algorithm": "sha256",
+                "digest": digest,
+                "byte_length": len(analysis_payload),
+                "media_type": "application/json",
+                "artifact_kind": "analysis",
+                "schema": queued_authoring.VIDEO_ANALYSIS_SCHEMA,
+                "key": f"objects/sha256/{digest[:2]}/{digest[2:]}",
+            }
+            job = {
+                "job_id": "compile-job-1",
+                "state": "succeeded",
+                "spec": {"handler": {
+                    "id": queued_authoring.COLLECTION_COMPILATION_HANDLER[0],
+                    "version": queued_authoring.COLLECTION_COMPILATION_HANDLER[1],
+                }},
+            }
+            bundle = {
+                "kind": "watchcraft.collection-compilation",
+                "schema_version": 1,
+                "manifest": candidate,
+                "resources": [{
+                    "path": "analysis/lesson.analysis.json",
+                    "artifact": analysis_reference,
+                }],
+                "provenance": {
+                    "handler_id": queued_authoring.COLLECTION_COMPILATION_HANDLER[0],
+                    "job_id": job["job_id"],
+                },
+            }
+            control = Mock()
+            control.post.return_value = {"job": job}
+            store = Mock()
+            store.get_bytes.return_value = analysis_payload
+            destination = root / "review"
+            args = build_parser().parse_args([
+                "queue", "materialize-project", job["job_id"],
+                "--published-collection", str(published_root / "collection.json"),
+                "--output-directory", str(destination),
+            ])
+            with patch("queued_authoring.operator_client", return_value=control), patch(
+                "queued_authoring.verified_json_result", return_value=bundle
+            ), patch(
+                "queued_authoring.r2_artifact_reader", return_value=store
+            ):
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(queued_authoring.run_materialize_project(args), 0)
+
+            materialized = json.loads(
+                (destination / "collection.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(materialized["revision"], 2)
+            self.assertEqual(materialized["content_hash"], candidate["content_hash"])
+            self.assertEqual(
+                (destination / "analysis/lesson.analysis.json").read_bytes(),
+                (
+                    json.dumps(
+                        json.loads(analysis_payload.decode("utf-8")),
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                    + "\n"
+                ).encode("utf-8"),
+            )
+            self.assertTrue((destination / "catalog.csv").is_file())
+            self.assertIn(
+                "New lesson title",
+                Path(f"{destination}.diff").read_text(encoding="utf-8"),
+            )
+            with self.assertRaisesRegex(RuntimeError, "already exists"):
+                queued_authoring.run_materialize_project(args)
 
     def test_waiting_for_a_remote_job_reports_periodic_progress(self):
         client = Mock()

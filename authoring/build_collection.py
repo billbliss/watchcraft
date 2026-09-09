@@ -525,6 +525,7 @@ def build_collection_manifest(
     for analysis in sorted(analyses, key=lambda item: item.get("video", "").casefold()):
         video = analysis.get("video", "")
         source = sources.get(video, {}) if isinstance(sources, dict) else {}
+        item_title = source.get("title") or analysis.get("title") or Path(video).stem
         item_id = previous_items_by_path.get(video) or stable_id(
             "video", f"{collection_id}:{video}"
         )
@@ -532,9 +533,9 @@ def build_collection_manifest(
         relative = Path(video)
         position = source.get("position")
         item_sort_keys[item_id] = (
-            (0, position, str(analysis.get("title") or relative.stem).casefold())
+            (0, position, str(item_title).casefold())
             if isinstance(position, int) and position > 0
-            else (1, str(analysis.get("title") or relative.stem).casefold())
+            else (1, str(item_title).casefold())
         )
         ordered_topics = []
         ordered_families = []
@@ -575,7 +576,7 @@ def build_collection_manifest(
             }]
         items[item_id] = {
             "item_id": item_id,
-            "title": analysis.get("title") or relative.stem,
+            "title": item_title,
             "media": media,
             "analysis": {
                 "path": (

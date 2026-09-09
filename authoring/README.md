@@ -608,7 +608,9 @@ candidate collection bundle:
 The portable compiler binds the exact plan and accepted iterator snapshot, every
 successful transcript and analysis, and the completed topic-normalization result. It
 uses the existing schema-v4 collection compiler and transcript-assisted topic-to-chapter
-mapping. Its output contains a validated `watchcraft.collection` manifest plus one
+mapping. Source-observed titles from the iterator remain the collection item titles;
+analysis-generated titles are only a fallback for older inputs without a source title.
+Its output contains a validated `watchcraft.collection` manifest plus one
 immutable analysis-resource reference for every item. Transcripts remain authoritative
 compilation inputs but are not copied into the reader package.
 
@@ -618,9 +620,29 @@ against an existing `collection.json`. Compilation never changes that file or pu
 the candidate. The manifest's revision is only a candidate placeholder; the later
 publication transition owns revision advancement against the reviewed current package.
 
-Compilation adds capability registry `2026-09-08.4`. Commit and push the worker code,
+Compilation adds capability registry `2026-09-09.1`. Commit and push the worker code,
 then publish and activate that registry before running the command. It requires no new
 Convex deployment.
+
+Materialize a successful compilation into a separate review package:
+
+```bash
+./authoring/watchcraft-author queue materialize-project COMPILATION_JOB_ID \
+  --published-collection /path/to/current/collection.json \
+  --output-directory /path/to/new-review-directory \
+  --operator-token-source keychain \
+  --r2-credentials-source keychain
+```
+
+Materialization is operator-local and never changes the published collection. Both the
+destination and its default sibling `OUTPUT_DIRECTORY.diff` must not already exist. The
+command verifies the compilation job and bundle, rechecks both collection content hashes,
+assigns the unchanged revision or the next revision as appropriate, downloads and verifies
+every immutable analysis artifact, writes readable JSON plus `catalog.csv`, validates all
+manifest resource paths, and atomically exposes the completed directory. The diff includes
+only `collection.json`, `catalog.csv`, and analysis resources, so authoring-only files in the
+published workspace do not appear as deletions. Use `--diff-output` to choose another new
+patch path. This command needs neither a Convex deployment nor a registry update.
 
 `queue result` resolves the artifact reference from the authoritative completed job,
 downloads the object from private R2, and verifies its declared byte length and SHA-256

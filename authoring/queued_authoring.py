@@ -9,6 +9,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -86,7 +87,7 @@ TOPIC_NORMALIZATION_HANDLER = (
 )
 COLLECTION_COMPILATION_HANDLER = (
     "watchcraft.compile.video-collection",
-    "1",
+    "2",
 )
 PYTHON_EXECUTION_PROFILE = ("python-portable", "1")
 PYTHON_EXECUTION_WORKFLOW = "authoring-worker.yml"
@@ -1269,6 +1270,7 @@ def compile_video_collection(
             "type": "youtube",
             "video_id": media["media_id"],
             "url": media["canonical_url"],
+            "title": item["title"],
             "position": positions.get(binding["item_id"]),
         }
 
@@ -4809,6 +4811,232 @@ def collection_comparison(candidate: dict[str, Any], published: dict[str, Any]) 
     }
 
 
+def collection_manifest_content_hash(manifest: dict[str, Any]) -> str:
+    body = {
+        key: value
+        for key, value in manifest.items()
+        if key not in {"revision", "content_hash"}
+    }
+    return sha256_hex(
+        json.dumps(body, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    )
+
+
+def git_no_index_diff(old_path: Path, new_path: Path) -> str:
+    completed = subprocess.run(
+        ["git", "diff", "--no-index", "--no-ext-diff", "--", str(old_path), str(new_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode not in {0, 1}:
+        raise RuntimeError(
+            f"Could not create review diff: {completed.stderr.strip() or 'git diff failed'}"
+        )
+    return completed.stdout
+
+
+def materialization_diff(
+    published_root: Path,
+    candidate_root: Path,
+    resource_paths: set[str],
+) -> str:
+    paths = {"collection.json", "catalog.csv", *resource_paths}
+    old_analysis = published_root / "analysis"
+    if old_analysis.is_dir():
+        paths.update(
+            path.relative_to(published_root).as_posix()
+            for path in old_analysis.rglob("*.analysis.json")
+        )
+    chunks = []
+    for relative in sorted(paths):
+        old_path = published_root / relative
+        new_path = candidate_root / relative
+        if old_path.is_file() and new_path.is_file():
+            chunks.append(git_no_index_diff(old_path, new_path))
+        elif old_path.is_file():
+            chunks.append(git_no_index_diff(old_path, Path("/dev/null")))
+        elif new_path.is_file():
+            chunks.append(git_no_index_diff(Path("/dev/null"), new_path))
+    return "".join(chunks)
+
+
+def run_materialize_project(args: argparse.Namespace) -> int:
+    destination = args.output_directory.resolve()
+    published_collection_path = args.published_collection.resolve()
+    published_root = published_collection_path.parent
+    diff_path = (
+        args.diff_output.resolve()
+        if args.diff_output is not None
+        else Path(f"{destination}.diff")
+    )
+    if destination.exists():
+        raise RuntimeError(f"Materialization destination already exists: {destination}")
+    if diff_path.exists():
+        raise RuntimeError(f"Materialization diff already exists: {diff_path}")
+    if not destination.parent.is_dir():
+        raise RuntimeError(
+            f"Materialization destination parent does not exist: {destination.parent}"
+        )
+    try:
+        published = json.loads(published_collection_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(
+            f"Could not read published collection {published_collection_path}"
+        ) from error
+    from build_collection import render_csv, validate_collection_manifest
+    validate_collection_manifest(published)
+    if published.get("content_hash") != collection_manifest_content_hash(published):
+        raise RuntimeError("Published collection content_hash does not match its content")
+
+    control = operator_client(args.operator_token_source)
+    submission = control.post(
+        "/submissions/get", {"job_id": args.compilation_job_id}
+    )
+    job = submission.get("job")
+    if (
+        not isinstance(job, dict)
+        or job.get("state") != "succeeded"
+        or job.get("spec", {}).get("handler") != {
+            "id": COLLECTION_COMPILATION_HANDLER[0],
+            "version": COLLECTION_COMPILATION_HANDLER[1],
+        }
+    ):
+        raise RuntimeError(
+            f"Job {args.compilation_job_id} is not a successful collection compilation"
+        )
+    bundle = verified_json_result(job, args.r2_credentials_source)
+    manifest = bundle.get("manifest") if isinstance(bundle, dict) else None
+    resources = bundle.get("resources") if isinstance(bundle, dict) else None
+    provenance = bundle.get("provenance") if isinstance(bundle, dict) else None
+    if (
+        not isinstance(bundle, dict)
+        or bundle.get("kind") != "watchcraft.collection-compilation"
+        or bundle.get("schema_version") != COLLECTION_COMPILATION_SCHEMA["version"]
+        or not isinstance(manifest, dict)
+        or not isinstance(resources, list)
+        or not isinstance(provenance, dict)
+        or provenance.get("handler_id") != COLLECTION_COMPILATION_HANDLER[0]
+        or provenance.get("job_id") != job["job_id"]
+    ):
+        raise RuntimeError("The compilation artifact is invalid")
+    validate_collection_manifest(manifest)
+    if manifest.get("content_hash") != collection_manifest_content_hash(manifest):
+        raise RuntimeError("Candidate collection content_hash does not match its content")
+    if manifest["collection_id"] != published["collection_id"]:
+        raise RuntimeError("Candidate and published collection IDs do not match")
+
+    candidate = json.loads(json.dumps(manifest, ensure_ascii=False))
+    content_changed = candidate["content_hash"] != published["content_hash"]
+    candidate["revision"] = (
+        published["revision"] + 1 if content_changed else published["revision"]
+    )
+    validate_collection_manifest(candidate)
+
+    expected_paths = {
+        item["analysis"]["path"]
+        for item in candidate["items"].values()
+    }
+    references_by_path = {}
+    for resource in resources:
+        path_value = resource.get("path") if isinstance(resource, dict) else None
+        path = Path(path_value) if isinstance(path_value, str) else None
+        reference = validated_artifact_reference(
+            resource.get("artifact") if isinstance(resource, dict) else None
+        )
+        if (
+            path is None
+            or path.is_absolute()
+            or ".." in path.parts
+            or len(path.parts) < 2
+            or path.parts[0] != "analysis"
+            or not path.name.endswith(".analysis.json")
+            or reference.get("artifact_kind") != "analysis"
+            or reference.get("schema") != VIDEO_ANALYSIS_SCHEMA
+            or reference.get("media_type") != "application/json"
+            or path.as_posix() in references_by_path
+        ):
+            raise RuntimeError("The compilation artifact has an invalid resource binding")
+        references_by_path[path.as_posix()] = reference
+    if set(references_by_path) != expected_paths:
+        raise RuntimeError("Compilation resources do not exactly cover manifest analyses")
+
+    store = r2_artifact_reader(args.r2_credentials_source)
+    analyses = []
+    resource_payloads = {}
+    for relative, reference in sorted(references_by_path.items()):
+        payload = store.get_bytes(reference)
+        try:
+            analysis = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RuntimeError(f"Analysis resource is invalid JSON: {relative}") from error
+        if (
+            not isinstance(analysis, dict)
+            or analysis.get("schema_version") != VIDEO_ANALYSIS_SCHEMA["version"]
+            or f"analysis/{Path(analysis.get('video', '')).stem}.analysis.json" != relative
+        ):
+            raise RuntimeError(f"Analysis resource does not match its path: {relative}")
+        analyses.append(analysis)
+        resource_payloads[relative] = (
+            json.dumps(analysis, ensure_ascii=False, indent=2) + "\n"
+        ).encode("utf-8")
+
+    temporary = Path(tempfile.mkdtemp(
+        prefix=f".{destination.name}.materializing-",
+        dir=destination.parent,
+    ))
+    try:
+        (temporary / "collection.json").write_text(
+            json.dumps(candidate, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        (temporary / "catalog.csv").write_text(
+            render_csv(analyses, candidate), encoding="utf-8"
+        )
+        for relative, payload in resource_payloads.items():
+            target = temporary / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
+        validate_collection_manifest(json.loads(
+            (temporary / "collection.json").read_text(encoding="utf-8")
+        ))
+        for relative in expected_paths:
+            if not (temporary / relative).is_file():
+                raise RuntimeError(f"Materialized package is missing {relative}")
+        diff = materialization_diff(published_root, temporary, expected_paths)
+        diff = diff.replace(str(temporary), str(destination))
+        os.replace(temporary, destination)
+        try:
+            with diff_path.open("x", encoding="utf-8") as handle:
+                handle.write(diff)
+        except Exception:
+            raise RuntimeError(
+                f"Materialized {destination}, but could not write review diff {diff_path}"
+            )
+    except Exception:
+        if temporary.exists():
+            shutil.rmtree(temporary)
+        raise
+
+    print(json.dumps({
+        "state": "materialized",
+        "compilation_job_id": job["job_id"],
+        "destination": str(destination),
+        "diff": str(diff_path),
+        "collection_id": candidate["collection_id"],
+        "revision": candidate["revision"],
+        "content_hash": candidate["content_hash"],
+        "content_changed": content_changed,
+        "resources": len(resource_payloads),
+        "comparison": collection_comparison(candidate, published),
+    }, ensure_ascii=False, indent=2, sort_keys=True))
+    print(
+        f"Review with: git apply --stat {diff_path}",
+        flush=True,
+    )
+    return 0
+
+
 def run_compile_project(args: argparse.Namespace) -> int:
     command_started_at = time.monotonic()
     control = operator_client(args.operator_token_source)
@@ -5999,6 +6227,41 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         type=Path,
         help="Published collection.json to compare with the candidate",
     )
+    materialize_project = commands.add_parser(
+        "materialize-project",
+        parents=[credentials],
+        help="Materialize a successful compilation into a new review directory",
+        description=(
+            "Retrieve and verify one immutable collection-compilation result and all "
+            "of its analysis resources, assign the next revision relative to an "
+            "existing published collection, and write a new validated review package "
+            "plus a Git-readable diff. Existing paths are never overwritten."
+        ),
+    )
+    materialize_project.add_argument("compilation_job_id")
+    materialize_project.add_argument(
+        "--published-collection",
+        required=True,
+        type=Path,
+        help="Current published collection.json used as the revision and diff baseline",
+    )
+    materialize_project.add_argument(
+        "--output-directory",
+        required=True,
+        type=Path,
+        help="New directory to create for the materialized candidate",
+    )
+    materialize_project.add_argument(
+        "--diff-output",
+        type=Path,
+        help="New patch path; defaults to OUTPUT_DIRECTORY.diff",
+    )
+    materialize_project.add_argument(
+        "--r2-credentials-source",
+        choices=("auto", "keychain", "environment"),
+        default="auto",
+        help="Read-only compilation and resource credential source (default: auto)",
+    )
     queued_analysis = commands.add_parser(
         "analyze-transcript",
         parents=[credentials],
@@ -6268,6 +6531,8 @@ def run_queue_command(args: argparse.Namespace) -> int:
         return run_normalize_project(args)
     if args.queue_command == "compile-project":
         return run_compile_project(args)
+    if args.queue_command == "materialize-project":
+        return run_materialize_project(args)
     if args.queue_command == "analyze-transcript":
         return run_queued_video_analysis(args)
 

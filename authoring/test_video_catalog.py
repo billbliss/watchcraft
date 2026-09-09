@@ -1837,6 +1837,36 @@ class FormattingTests(unittest.TestCase):
             ]
             self.assertEqual(ordered_titles, ["Alphabetically Last", "Alphabetically First"])
 
+    def test_source_title_takes_precedence_over_analysis_generated_title(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "watchcraft-authoring.json").write_text(
+                json.dumps({
+                    "collection": {"title": "Linear Algebra"},
+                    "sources": {
+                        "lesson.youtube": {
+                            "type": "youtube",
+                            "video_id": "lesson",
+                            "title": "Eigenvectors and eigenvalues | Chapter 14",
+                        },
+                    },
+                }),
+                encoding="utf-8",
+            )
+            analyses = [{
+                "video": "lesson.youtube",
+                "title": "Generated eigenvector explanation (Publisher, Chapter 14)",
+                "topics": [],
+                "sections": [],
+            }]
+
+            manifest = build_collection_manifest(root, analyses, {})
+
+            self.assertEqual(
+                next(iter(manifest["items"].values()))["title"],
+                "Eigenvectors and eigenvalues | Chapter 14",
+            )
+
     def test_srt_timestamp(self):
         self.assertEqual(video_catalog.format_clock(3661.234, srt=True), "01:01:01,234")
 
