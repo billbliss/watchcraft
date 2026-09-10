@@ -1,7 +1,7 @@
 {
   "kind": "watchcraft.authoring-capability-registry",
   "schema_version": 1,
-  "registry_version": "2026-09-09.1",
+  "registry_version": "2026-09-09.2",
   "handlers": [
     {
       "id": "watchcraft.analysis.lexical",
@@ -60,6 +60,57 @@
         "retryable_classifications": [
           "analysis_dependency_unavailable",
           "analysis_provider_failed",
+          "artifact_store_failed",
+          "lease_expired"
+        ]
+      }
+    },
+    {
+      "id": "watchcraft.resolve.collection-terminology",
+      "version": "1",
+      "operation": "generate",
+      "inputs": [],
+      "dependencies": [
+        {
+          "artifact_kind": "transcript",
+          "schema": {
+            "id": "watchcraft.transcript",
+            "version": 1
+          },
+          "cardinality": {
+            "minimum": 1,
+            "maximum": 10000
+          }
+        },
+        {
+          "artifact_kind": "analysis",
+          "schema": {
+            "id": "watchcraft.video-analysis",
+            "version": 2
+          },
+          "cardinality": {
+            "minimum": 1,
+            "maximum": 10000
+          }
+        }
+      ],
+      "output": {
+        "artifact_kind": "terminology-resolution",
+        "schema": {
+          "id": "watchcraft.terminology-resolution",
+          "version": 1
+        }
+      },
+      "execution_profile": {
+        "id": "python-openai",
+        "version": "1"
+      },
+      "lease_class": "model-api",
+      "retry_policy": {
+        "max_attempts": 2,
+        "retryable_classifications": [
+          "terminology_dependency_unavailable",
+          "terminology_provider_failed",
           "artifact_store_failed",
           "lease_expired"
         ]

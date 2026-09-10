@@ -211,6 +211,21 @@ const normalizationArtifact = {
   schema: { id: "watchcraft.topic-normalization", version: 1 },
   key: `objects/sha256/${normalizationDigest.slice(0, 2)}/${normalizationDigest.slice(2)}`,
 };
+const terminologyResolutionSpec = {
+  operation: "generate" as const,
+  artifact_kind: "terminology-resolution",
+  output_schema: { id: "watchcraft.terminology-resolution", version: 1 },
+  handler: { id: "watchcraft.resolve.collection-terminology", version: "1" },
+  source: { media_asset_id: "catalog-project:essence-of-linear-algebra" },
+  inputs: [],
+  dependencies: [
+    transcriptArtifact,
+    { ...transcriptArtifact, digest: "7".repeat(64), key: `objects/sha256/77/${"7".repeat(62)}` },
+    firstAnalysisArtifact,
+    secondAnalysisArtifact,
+  ],
+  configuration: { project: { project_id: "essence-of-linear-algebra" } },
+};
 const collectionCompilationSpec = {
   operation: "compile" as const,
   artifact_kind: "collection-compilation",
@@ -232,7 +247,7 @@ test("the checked-in registry is valid, stable, and fully resolves an approved j
   const registry = parseCapabilityRegistry(DEFAULT_CAPABILITY_REGISTRY);
   const spec = resolveJobSpecAgainstRegistry(lexicalSpec, registry);
 
-  assert.equal(spec.registry_snapshot?.registry_version, "2026-09-09.1");
+  assert.equal(spec.registry_snapshot?.registry_version, "2026-09-09.2");
   assert.equal(spec.registry_snapshot?.registry_sha256, capabilityRegistrySha256(registry));
   assert.equal(spec.registry_snapshot?.execution_profile.id, "python-portable");
   assert.equal(spec.registry_snapshot?.execution_profile.dispatcher.workflow, "authoring-worker.yml");
@@ -253,6 +268,32 @@ test("collection compilation binds complete typed project resources", () => {
       {
         ...collectionCompilationSpec,
         dependencies: [transcriptArtifact, normalizationArtifact],
+      },
+      DEFAULT_CAPABILITY_REGISTRY,
+    ),
+    /requires between 1 and 10000 matching artifacts/,
+  );
+});
+
+test("terminology resolution binds the complete transcript and draft-analysis corpus", () => {
+  const spec = resolveJobSpecAgainstRegistry(
+    terminologyResolutionSpec,
+    DEFAULT_CAPABILITY_REGISTRY,
+  );
+  assert.equal(
+    spec.registry_snapshot?.handler.id,
+    "watchcraft.resolve.collection-terminology",
+  );
+  assert.equal(spec.registry_snapshot?.execution_profile.id, "python-openai");
+  assert.equal(spec.dependencies.length, 4);
+  assert.throws(
+    () => resolveJobSpecAgainstRegistry(
+      {
+        ...terminologyResolutionSpec,
+        dependencies: [
+          transcriptArtifact,
+          { ...transcriptArtifact, digest: "7".repeat(64), key: `objects/sha256/77/${"7".repeat(62)}` },
+        ],
       },
       DEFAULT_CAPABILITY_REGISTRY,
     ),

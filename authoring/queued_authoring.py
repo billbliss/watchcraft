@@ -60,6 +60,10 @@ EDUCATIONAL_VIDEO_ANALYSIS_HANDLER = (
     "watchcraft.analysis.educational-video",
     "1",
 )
+TERMINOLOGY_RESOLUTION_HANDLER = (
+    "watchcraft.resolve.collection-terminology",
+    "1",
+)
 TRANSCRIPTION_SMOKE_HANDLER = ("watchcraft.transcript.mlx-whisper-smoke", "1")
 HTTP_TRANSCRIPTION_SMOKE_HANDLER = (
     "watchcraft.transcript.mlx-whisper-http-smoke",
@@ -108,7 +112,15 @@ TOPIC_DISPLAY_LABEL_PROMPT_VERSION = 1
 TOPIC_NORMALIZATION_BATCH_SIZE = 40
 TOPIC_NORMALIZATION_RETRIES = 5
 TOPIC_NORMALIZATION_TIMEOUT_SECONDS = 300
+TERMINOLOGY_RESOLUTION_MODEL = "gpt-5.4-mini"
+TERMINOLOGY_RESOLUTION_PROMPT_VERSION = 1
+TERMINOLOGY_RESOLUTION_RETRIES = 5
+TERMINOLOGY_RESOLUTION_TIMEOUT_SECONDS = 300
 VIDEO_ANALYSIS_SCHEMA = {"id": "watchcraft.video-analysis", "version": 2}
+TERMINOLOGY_RESOLUTION_SCHEMA = {
+    "id": "watchcraft.terminology-resolution",
+    "version": 1,
+}
 TOPIC_NORMALIZATION_SCHEMA = {"id": "watchcraft.topic-normalization", "version": 1}
 COLLECTION_COMPILATION_SCHEMA = {
     "id": "watchcraft.collection-compilation",
@@ -160,6 +172,9 @@ ITERATOR_SNAPSHOT_SCHEMA_PATH = CATALOG_PROJECT_SCHEMA_PATH.with_name(
 )
 PROJECT_PROCESSING_PLAN_SCHEMA_PATH = CATALOG_PROJECT_SCHEMA_PATH.with_name(
     "project-processing-plan.schema.json"
+)
+TERMINOLOGY_RESOLUTION_SCHEMA_PATH = CATALOG_PROJECT_SCHEMA_PATH.with_name(
+    "terminology-resolution.schema.json"
 )
 WORD_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9'-]{2,}")
 STOP_WORDS = {
@@ -725,6 +740,20 @@ class AnalysisProviderError(RuntimeError):
     retryable = True
 
 
+class TerminologyDependencyError(RuntimeError):
+    """A bound draft corpus cannot be resolved."""
+
+    classification = "terminology_dependency_invalid"
+    retryable = False
+
+
+class TerminologyProviderError(RuntimeError):
+    """The terminology model did not produce a resolution."""
+
+    classification = "terminology_provider_failed"
+    retryable = True
+
+
 class NormalizationDependencyError(RuntimeError):
     """An authoritative analysis set cannot be normalized."""
 
@@ -902,6 +931,194 @@ def educational_video_analysis(
             "handler_ms": elapsed_milliseconds(handler_started_at),
         },
     }
+    return result
+
+
+def collection_terminology_resolution(
+    job: dict[str, Any], context: WorkerContext | None = None
+) -> dict[str, Any]:
+    handler_started_at = time.monotonic()
+    if context is None:
+        raise RuntimeError("Collection terminology resolution requires a worker context")
+    spec = job["spec"]
+    configuration = spec.get("configuration")
+    expected_keys = {
+        "items",
+        "logical_task_id",
+        "model",
+        "plan_artifact_sha256",
+        "plan_hash",
+        "plan_job_id",
+        "project",
+        "prompt_version",
+        "retries",
+        "timeout_seconds",
+    }
+    if not isinstance(configuration, dict) or set(configuration) != expected_keys:
+        raise ValueError("the collection terminology-resolution configuration is invalid")
+    project = configuration["project"]
+    bindings = configuration["items"]
+    dependencies = spec.get("dependencies")
+    if (
+        configuration["model"] != TERMINOLOGY_RESOLUTION_MODEL
+        or configuration["prompt_version"] != TERMINOLOGY_RESOLUTION_PROMPT_VERSION
+        or configuration["retries"] != TERMINOLOGY_RESOLUTION_RETRIES
+        or configuration["timeout_seconds"] != TERMINOLOGY_RESOLUTION_TIMEOUT_SECONDS
+        or not isinstance(project, dict)
+        or not isinstance(project.get("project_id"), str)
+        or type(project.get("revision")) is not int
+        or spec.get("source", {}).get("media_asset_id")
+        != f"catalog-project:{project['project_id']}"
+        or spec.get("inputs") != []
+        or not isinstance(bindings, list)
+        or not bindings
+        or not isinstance(dependencies, list)
+        or len(dependencies) != len(bindings) * 2
+    ):
+        raise ValueError("the collection terminology-resolution policy is unsupported")
+
+    transcript_references = dependencies[:len(bindings)]
+    analysis_references = dependencies[len(bindings):]
+    store = context.artifact_store()
+    records = []
+    fetch_started_at = time.monotonic()
+    for index, binding in enumerate(bindings):
+        transcript_reference = validated_artifact_reference(transcript_references[index])
+        analysis_reference = validated_artifact_reference(analysis_references[index])
+        if (
+            not isinstance(binding, dict)
+            or set(binding) != {
+                "analysis_digest",
+                "item_id",
+                "source_title",
+                "transcript_digest",
+                "video",
+            }
+            or binding["transcript_digest"] != transcript_reference.get("digest")
+            or binding["analysis_digest"] != analysis_reference.get("digest")
+            or transcript_reference.get("artifact_kind") != "transcript"
+            or transcript_reference.get("schema")
+            != {"id": "watchcraft.transcript", "version": 1}
+            or analysis_reference.get("artifact_kind") != "analysis"
+            or analysis_reference.get("schema") != VIDEO_ANALYSIS_SCHEMA
+        ):
+            raise TerminologyDependencyError(
+                f"Terminology binding {index + 1} is invalid"
+            )
+        context.report_progress(
+            phase="fetching-corpus",
+            completed=index,
+            total=len(bindings),
+            unit="items",
+            current=binding["item_id"],
+        )
+        try:
+            transcript = json.loads(store.get_bytes(transcript_reference).decode("utf-8"))
+            analysis = json.loads(store.get_bytes(analysis_reference).decode("utf-8"))
+        except Exception as error:
+            failure = TerminologyDependencyError(
+                f"Could not retrieve terminology evidence for {binding['item_id']}"
+            )
+            failure.classification = "terminology_dependency_unavailable"
+            failure.retryable = True
+            raise failure from error
+        if (
+            transcript.get("kind") != "watchcraft.transcript"
+            or transcript.get("source", {}).get("media_asset_id") != binding["item_id"]
+            or analysis.get("schema_version") != VIDEO_ANALYSIS_SCHEMA["version"]
+            or analysis.get("video") != binding["video"]
+            or analysis.get("provenance", {}).get("transcript") != transcript_reference
+        ):
+            raise TerminologyDependencyError(
+                f"Terminology evidence for {binding['item_id']} is inconsistent"
+            )
+        records.append({
+            "item_id": binding["item_id"],
+            "source_title": binding["source_title"],
+            "transcript": transcript,
+            "analysis": analysis,
+        })
+    dependency_fetch_ms = elapsed_milliseconds(fetch_started_at)
+    context.report_progress(
+        phase="resolving-terminology",
+        completed=0,
+        total=1,
+        unit="collection",
+        current=project["project_id"],
+    )
+    try:
+        from analyze_catalog import create_openai_client
+        from resolve_terminology import infer_terminology_resolution
+
+        resolution_started_at = time.monotonic()
+        inferred = infer_terminology_resolution(
+            project=project,
+            records=records,
+            client=create_openai_client(configuration["timeout_seconds"]),
+            model=configuration["model"],
+            retries=configuration["retries"],
+        )
+        resolution_ms = elapsed_milliseconds(resolution_started_at)
+    except (TerminologyDependencyError, ValueError):
+        raise
+    except Exception as error:
+        raise TerminologyProviderError(str(error)) from error
+
+    resolutions = inferred["resolutions"]
+    result = {
+        "kind": "watchcraft.terminology-resolution",
+        "schema_version": TERMINOLOGY_RESOLUTION_SCHEMA["version"],
+        "project": project,
+        "model": configuration["model"],
+        "prompt_version": configuration["prompt_version"],
+        "source_hash": inferred["source_hash"],
+        "resolutions": resolutions,
+        "stats": {
+            "observed_terms": inferred["observed_terms"],
+            "proposed_changes": len(resolutions),
+            "automatic_safe": sum(
+                item["disposition"] == "automatic-safe" for item in resolutions
+            ),
+            "needs_review": sum(
+                item["disposition"] == "needs-review" for item in resolutions
+            ),
+        },
+        "provenance": {
+            "handler_id": TERMINOLOGY_RESOLUTION_HANDLER[0],
+            "handler_version": TERMINOLOGY_RESOLUTION_HANDLER[1],
+            "job_id": job["job_id"],
+            "spec_sha256": job["spec_sha256"],
+            "plan_job_id": configuration["plan_job_id"],
+            "plan_artifact_sha256": configuration["plan_artifact_sha256"],
+            "plan_hash": configuration["plan_hash"],
+            "logical_task_id": configuration["logical_task_id"],
+            "items": [
+                {
+                    **binding,
+                    "transcript": transcript_reference,
+                    "analysis": analysis_reference,
+                }
+                for binding, transcript_reference, analysis_reference in zip(
+                    bindings, transcript_references, analysis_references
+                )
+            ],
+            "timing": {
+                "dependency_fetch_ms": dependency_fetch_ms,
+                "resolution_ms": resolution_ms,
+                "handler_ms": elapsed_milliseconds(handler_started_at),
+            },
+        },
+    }
+    validate_json_schema(
+        result, TERMINOLOGY_RESOLUTION_SCHEMA_PATH, "Terminology resolution"
+    )
+    context.report_progress(
+        phase="resolving-terminology",
+        completed=1,
+        total=1,
+        unit="collection",
+        current=project["project_id"],
+    )
     return result
 
 
@@ -1486,6 +1703,7 @@ HANDLERS: dict[
 ] = {
     ANALYSIS_HANDLER: lexical_analysis,
     EDUCATIONAL_VIDEO_ANALYSIS_HANDLER: educational_video_analysis,
+    TERMINOLOGY_RESOLUTION_HANDLER: collection_terminology_resolution,
     TOPIC_NORMALIZATION_HANDLER: collection_topic_normalization,
     COLLECTION_COMPILATION_HANDLER: compile_video_collection,
     TRANSCRIPTION_SMOKE_HANDLER: mlx_transcription_smoke,
@@ -1539,6 +1757,42 @@ LOCAL_HANDLER_CONTRACTS: dict[tuple[str, str], dict[str, Any]] = {
             "retryable_classifications": [
                 "analysis_dependency_unavailable",
                 "analysis_provider_failed",
+                "artifact_store_failed",
+                "lease_expired",
+            ],
+        },
+    },
+    TERMINOLOGY_RESOLUTION_HANDLER: {
+        "id": TERMINOLOGY_RESOLUTION_HANDLER[0],
+        "version": TERMINOLOGY_RESOLUTION_HANDLER[1],
+        "operation": "generate",
+        "inputs": [],
+        "dependencies": [
+            {
+                "artifact_kind": "transcript",
+                "schema": {"id": "watchcraft.transcript", "version": 1},
+                "cardinality": {"minimum": 1, "maximum": 10_000},
+            },
+            {
+                "artifact_kind": "analysis",
+                "schema": VIDEO_ANALYSIS_SCHEMA,
+                "cardinality": {"minimum": 1, "maximum": 10_000},
+            },
+        ],
+        "output": {
+            "artifact_kind": "terminology-resolution",
+            "schema": TERMINOLOGY_RESOLUTION_SCHEMA,
+        },
+        "execution_profile": {
+            "id": OPENAI_EXECUTION_PROFILE[0],
+            "version": OPENAI_EXECUTION_PROFILE[1],
+        },
+        "lease_class": "model-api",
+        "retry_policy": {
+            "max_attempts": 2,
+            "retryable_classifications": [
+                "terminology_dependency_unavailable",
+                "terminology_provider_failed",
                 "artifact_store_failed",
                 "lease_expired",
             ],
@@ -4252,6 +4506,56 @@ def project_topic_normalization_spec(
     }
 
 
+def project_terminology_resolution_spec(
+    *,
+    project: dict[str, Any],
+    plan_job_id: str,
+    plan_reference: dict[str, Any],
+    plan: dict[str, Any],
+    transcript_references: list[dict[str, Any]],
+    analysis_references: list[dict[str, Any]],
+    bindings: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if (
+        not bindings
+        or len(bindings) != len(transcript_references)
+        or len(bindings) != len(analysis_references)
+    ):
+        raise ValueError("Terminology resolution requires a complete draft corpus")
+    return {
+        "operation": "generate",
+        "artifact_kind": "terminology-resolution",
+        "output_schema": TERMINOLOGY_RESOLUTION_SCHEMA,
+        "handler": {
+            "id": TERMINOLOGY_RESOLUTION_HANDLER[0],
+            "version": TERMINOLOGY_RESOLUTION_HANDLER[1],
+        },
+        "source": {"media_asset_id": f"catalog-project:{project['project_id']}"},
+        "inputs": [],
+        "dependencies": [*transcript_references, *analysis_references],
+        "configuration": {
+            "project": {
+                "project_id": project["project_id"],
+                "revision": project["revision"],
+                "metadata": project.get("metadata", {}),
+            },
+            "plan_job_id": plan_job_id,
+            "plan_artifact_sha256": plan_reference["digest"],
+            "plan_hash": plan["plan_hash"],
+            "logical_task_id": stable_project_execution_id(
+                plan_reference["digest"],
+                f"catalog-project:{project['project_id']}",
+                "terminology-resolution-task",
+            ),
+            "model": TERMINOLOGY_RESOLUTION_MODEL,
+            "prompt_version": TERMINOLOGY_RESOLUTION_PROMPT_VERSION,
+            "retries": TERMINOLOGY_RESOLUTION_RETRIES,
+            "timeout_seconds": TERMINOLOGY_RESOLUTION_TIMEOUT_SECONDS,
+            "items": bindings,
+        },
+    }
+
+
 def completed_project_analysis_set(
     control: AuthoringHttpClient,
     *,
@@ -4306,6 +4610,72 @@ def completed_project_analysis_set(
         })
         job_ids.append(analysis_job_id)
     return dependencies, bindings, job_ids
+
+
+def completed_project_draft_corpus(
+    control: AuthoringHttpClient,
+    *,
+    plan_job_id: str,
+    plan: dict[str, Any],
+    plan_reference: dict[str, Any],
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
+    analysis_references, analysis_bindings, _ = completed_project_analysis_set(
+        control,
+        plan_job_id=plan_job_id,
+        plan=plan,
+        plan_reference=plan_reference,
+    )
+    transcript_references = []
+    bindings = []
+    for item, analysis_reference, analysis_binding in zip(
+        executable_project_plan_items(plan, process_all=True),
+        analysis_references,
+        analysis_bindings,
+    ):
+        transcript_job_id = stable_project_execution_id(
+            plan_reference["digest"], item["item_id"], "transcription"
+        )
+        submission = control.post("/submissions/get", {"job_id": transcript_job_id})
+        job = submission.get("job")
+        run = submission.get("run")
+        request = run.get("request") if isinstance(run, dict) else None
+        if (
+            not isinstance(job, dict)
+            or job.get("state") != "succeeded"
+            or job.get("spec", {}).get("handler") != {
+                "id": PRODUCTION_TRANSCRIPTION_HANDLER[0],
+                "version": PRODUCTION_TRANSCRIPTION_HANDLER[1],
+            }
+            or not isinstance(request, dict)
+            or request.get("plan_job_id") != plan_job_id
+            or request.get("plan_artifact_sha256") != plan_reference["digest"]
+            or request.get("item_id") != item["item_id"]
+        ):
+            raise RuntimeError(
+                f"Planned item {item['item_id']} has no successful bound transcript job"
+            )
+        transcript_reference = validated_artifact_reference(job.get("result"))
+        if (
+            transcript_reference.get("artifact_kind") != "transcript"
+            or transcript_reference.get("schema")
+            != {"id": "watchcraft.transcript", "version": 1}
+        ):
+            raise RuntimeError(
+                f"Planned item {item['item_id']} has an invalid transcript artifact"
+            )
+        transcript_references.append(transcript_reference)
+        bindings.append({
+            "item_id": item["item_id"],
+            "source_title": item["title"],
+            "video": analysis_binding["video"],
+            "transcript_digest": transcript_reference["digest"],
+            "analysis_digest": analysis_reference["digest"],
+        })
+    return transcript_references, analysis_references, bindings
 
 
 def completed_project_compilation_inputs(
@@ -4607,6 +4977,202 @@ def run_process_project(args: argparse.Namespace) -> int:
             f"Project processing completed with {len(failures)} failed item(s); "
             "rerun after addressing the reported failures"
         )
+    return 0
+
+
+def run_resolve_project_terminology(args: argparse.Namespace) -> int:
+    command_started_at = time.monotonic()
+    control = operator_client(args.operator_token_source)
+    plan_submission = control.post(
+        "/submissions/get", {"job_id": args.plan_job_id}
+    )
+    plan_job = plan_submission.get("job")
+    if (
+        not isinstance(plan_job, dict)
+        or plan_job.get("state") != "succeeded"
+        or plan_job.get("spec", {}).get("handler") != {
+            "id": PROJECT_PROCESSING_PLANNER_HANDLER[0],
+            "version": PROJECT_PROCESSING_PLANNER_HANDLER[1],
+        }
+    ):
+        raise RuntimeError(
+            f"Job {args.plan_job_id} is not a successful project processing plan"
+        )
+    plan_reference = validated_artifact_reference(plan_job.get("result"))
+    if (
+        plan_reference.get("artifact_kind") != "project-processing-plan"
+        or plan_reference.get("schema") != PROJECT_PROCESSING_PLAN_SCHEMA
+    ):
+        raise RuntimeError(
+            f"Job {args.plan_job_id} is not a successful project processing plan"
+        )
+    plan = verified_json_result(plan_job, args.r2_credentials_source)
+    validate_project_processing_plan(plan)
+    current = control.post(
+        "/projects/get", {"project_id": plan["project"]["project_id"]}
+    )
+    project = current.get("project")
+    validate_json_schema(project, CATALOG_PROJECT_SCHEMA_PATH, "Catalog project")
+    if (
+        project["revision"] != plan["project"]["revision"]
+        or project["iterator"].get("accepted_snapshot") != plan["source_snapshot"]
+    ):
+        raise RuntimeError(
+            "Processing plan is stale relative to the authoritative catalog project"
+        )
+    transcript_references, analysis_references, bindings = (
+        completed_project_draft_corpus(
+            control,
+            plan_job_id=args.plan_job_id,
+            plan=plan,
+            plan_reference=plan_reference,
+        )
+    )
+    spec = project_terminology_resolution_spec(
+        project=project,
+        plan_job_id=args.plan_job_id,
+        plan_reference=plan_reference,
+        plan=plan,
+        transcript_references=transcript_references,
+        analysis_references=analysis_references,
+        bindings=bindings,
+    )
+    project_item_id = f"catalog-project:{project['project_id']}"
+    run_id = stable_project_execution_id(
+        plan_reference["digest"],
+        project_item_id,
+        versioned_handler_execution_role(
+            "terminology-resolution-run", TERMINOLOGY_RESOLUTION_HANDLER
+        ),
+    )
+    job_id = stable_project_execution_id(
+        plan_reference["digest"],
+        project_item_id,
+        versioned_handler_execution_role(
+            "terminology-resolution", TERMINOLOGY_RESOLUTION_HANDLER
+        ),
+    )
+    command_prefix = stable_project_execution_id(
+        plan_reference["digest"],
+        project_item_id,
+        versioned_handler_execution_role(
+            "terminology-resolution-commands", TERMINOLOGY_RESOLUTION_HANDLER
+        ),
+    )
+    request = {
+        "kind": "project-terminology-resolution",
+        "plan_job_id": args.plan_job_id,
+        "plan_artifact_sha256": plan_reference["digest"],
+        "plan_hash": plan["plan_hash"],
+        "project_id": project["project_id"],
+        "project_revision": project["revision"],
+        "handler": {
+            "id": TERMINOLOGY_RESOLUTION_HANDLER[0],
+            "version": TERMINOLOGY_RESOLUTION_HANDLER[1],
+        },
+        "logical_task_id": spec["configuration"]["logical_task_id"],
+    }
+    existing = control.post("/pipelines/get", {"run_id": run_id})
+    if existing.get("run") is None:
+        submitted = submit_spec(
+            control,
+            job_id=job_id,
+            run_id=run_id,
+            command_prefix=command_prefix,
+            request=request,
+            spec=spec,
+        )
+        print(
+            f"submitted terminology resolution {job_id} for {len(bindings)} items",
+            flush=True,
+        )
+    else:
+        submitted = existing
+        jobs = submitted.get("jobs")
+        if (
+            submitted.get("run", {}).get("request") != request
+            or not isinstance(jobs, list)
+            or len(jobs) != 1
+            or jobs[0].get("job_id") != job_id
+            or {
+                key: value
+                for key, value in jobs[0].get("spec", {}).items()
+                if key != "registry_snapshot"
+            } != spec
+        ):
+            raise RuntimeError("Existing terminology resolution does not match its corpus")
+        print(f"resuming terminology resolution {job_id}", flush=True)
+    job = submitted.get("job")
+    if not isinstance(job, dict):
+        job = submitted["jobs"][0]
+    if job["state"] == "awaiting_approval":
+        job = control.post("/submissions/approve", {
+            "job_id": job_id,
+            "command_id": str(uuid.uuid4()),
+            "expected_revision": job["revision"],
+            "actor": "watchcraft-author-cli",
+            "spec_sha256": job["spec_sha256"],
+        })["job"]
+    _resume_pipeline_job(control, job, "terminology resolution")
+    completed = wait_for_terminal_job(control, job_id, args.timeout_seconds)
+    result = verified_json_result(completed["job"], args.r2_credentials_source)
+    validate_json_schema(
+        result, TERMINOLOGY_RESOLUTION_SCHEMA_PATH, "Terminology resolution"
+    )
+    provenance = result.get("provenance")
+    if (
+        result.get("project") != {
+            "project_id": project["project_id"],
+            "revision": project["revision"],
+            "metadata": project.get("metadata", {}),
+        }
+        or not isinstance(provenance, dict)
+        or provenance.get("handler_id") != TERMINOLOGY_RESOLUTION_HANDLER[0]
+        or provenance.get("plan_artifact_sha256") != plan_reference["digest"]
+    ):
+        raise RuntimeError("Terminology resolution returned an invalid project binding")
+    timing = completed_timing(completed["job"], completed.get("run"))
+    summary = {
+        "job_id": job_id,
+        "run_id": completed["run"]["run_id"],
+        "state": completed["job"]["state"],
+        "artifact": completed["job"]["result"],
+        "project": result["project"],
+        "stats": result["stats"],
+        "automatic_safe": [
+            {
+                "observed_forms": item["observed_forms"],
+                "canonical_term": item["canonical_term"],
+                "display_label": item["display_label"],
+                "confidence": item["confidence"],
+            }
+            for item in result["resolutions"]
+            if item["disposition"] == "automatic-safe"
+        ],
+        "needs_review": [
+            {
+                "observed_forms": item["observed_forms"],
+                "canonical_term": item["canonical_term"],
+                "alternatives": item["alternatives"],
+                "affected_items": item["affected_items"],
+                "confidence": item["confidence"],
+                "rationale": item["rationale"],
+            }
+            for item in result["resolutions"]
+            if item["disposition"] == "needs-review"
+        ],
+        "timing": {
+            **timing,
+            "local": {"command_total_ms": elapsed_milliseconds(command_started_at)},
+        },
+    }
+    print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
+    print(
+        "Full resolution: ./authoring/watchcraft-author queue result "
+        "--operator-token-source keychain --r2-credentials-source keychain "
+        f"{job_id}",
+        flush=True,
+    )
     return 0
 
 
@@ -6208,6 +6774,24 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         default="auto",
         help="Temporary source-media uploader credential source (default: auto)",
     )
+    resolve_terminology = commands.add_parser(
+        "resolve-project-terminology",
+        parents=[credentials],
+        help="Infer reviewable terminology resolutions from a completed draft corpus",
+        description=(
+            "Bind every completed transcript and draft analysis from an immutable "
+            "project plan, infer domain-aware terminology corrections across the "
+            "whole corpus, and preserve ambiguous semantic changes for review."
+        ),
+    )
+    resolve_terminology.add_argument("--plan-job-id", required=True)
+    resolve_terminology.add_argument("--timeout-seconds", type=int, default=3600)
+    resolve_terminology.add_argument(
+        "--r2-credentials-source",
+        choices=("auto", "keychain", "environment"),
+        default="auto",
+        help="Read-only transcript, analysis, and result credential source (default: auto)",
+    )
     normalize_project = commands.add_parser(
         "normalize-project-topics",
         parents=[credentials],
@@ -6549,6 +7133,8 @@ def run_queue_command(args: argparse.Namespace) -> int:
         return run_plan_project(args)
     if args.queue_command == "process-project":
         return run_process_project(args)
+    if args.queue_command == "resolve-project-terminology":
+        return run_resolve_project_terminology(args)
     if args.queue_command == "normalize-project-topics":
         return run_normalize_project(args)
     if args.queue_command == "compile-project":

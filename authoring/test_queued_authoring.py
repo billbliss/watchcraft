@@ -24,12 +24,24 @@ def registry_snapshot(
     staged_smoke=False,
     playlist_iterator=False,
     project_planner=False,
+    terminology_resolution=False,
     topic_normalization=False,
     collection_compilation=False,
 ):
+    if terminology_resolution:
+        return {
+            "registry_version": "2026-09-09.2",
+            "registry_sha256": "c" * 64,
+            "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
+                queued_authoring.TERMINOLOGY_RESOLUTION_HANDLER
+            ],
+            "execution_profile": queued_authoring.LOCAL_EXECUTION_PROFILES[
+                queued_authoring.OPENAI_EXECUTION_PROFILE
+            ],
+        }
     if collection_compilation:
         return {
-            "registry_version": "2026-09-09.1",
+            "registry_version": "2026-09-09.2",
             "registry_sha256": "c" * 64,
             "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
                 queued_authoring.COLLECTION_COMPILATION_HANDLER
@@ -320,6 +332,14 @@ class QueuedAuthoringTests(unittest.TestCase):
         ])
         self.assertTrue(all_project_processing.process_all)
         self.assertEqual(all_project_processing.concurrency, 3)
+        terminology = build_parser().parse_args([
+            "queue", "resolve-project-terminology",
+            "--plan-job-id", "plan-job-1",
+            "--operator-token-source", "keychain",
+            "--r2-credentials-source", "keychain",
+        ])
+        self.assertEqual(terminology.plan_job_id, "plan-job-1")
+        self.assertEqual(terminology.timeout_seconds, 3600)
         normalization = build_parser().parse_args([
             "queue", "normalize-project-topics",
             "--plan-job-id", "plan-job-1",
@@ -1038,6 +1058,108 @@ class QueuedAuthoringTests(unittest.TestCase):
             dependency["job_id"],
         )
         self.assertEqual(result["provenance"]["transcript"], reference)
+
+    def test_collection_terminology_resolution_binds_raw_and_draft_evidence(self):
+        transcript_artifact = transcript_reference()
+        analysis_artifact = {
+            **transcript_artifact,
+            "digest": "e" * 64,
+            "artifact_kind": "analysis",
+            "schema": queued_authoring.VIDEO_ANALYSIS_SCHEMA,
+            "key": "objects/sha256/ee/" + "e" * 62,
+        }
+        project = {
+            "project_id": "linear-algebra",
+            "revision": 2,
+            "metadata": {"title": "Essence of linear algebra"},
+        }
+        plan_reference = {
+            **transcript_artifact,
+            "digest": "f" * 64,
+            "artifact_kind": "project-processing-plan",
+            "schema": queued_authoring.PROJECT_PROCESSING_PLAN_SCHEMA,
+            "key": "objects/sha256/ff/" + "f" * 62,
+        }
+        binding = {
+            "item_id": "youtube:lesson",
+            "source_title": "Linear combinations and basis vectors",
+            "video": "lesson.youtube",
+            "transcript_digest": transcript_artifact["digest"],
+            "analysis_digest": analysis_artifact["digest"],
+        }
+        spec = queued_authoring.project_terminology_resolution_spec(
+            project=project,
+            plan_job_id="plan-job",
+            plan_reference=plan_reference,
+            plan={"plan_hash": "a" * 64},
+            transcript_references=[transcript_artifact],
+            analysis_references=[analysis_artifact],
+            bindings=[binding],
+        )
+        transcript = {
+            "kind": "watchcraft.transcript",
+            "schema_version": 1,
+            "source": {"media_asset_id": "youtube:lesson"},
+            "text": "The basis vectors are i hat and j hat.",
+            "segments": [{"start": 0.0, "end": 2.0, "text": "The basis vectors."}],
+        }
+        analysis = {
+            "schema_version": 2,
+            "video": "lesson.youtube",
+            "title": "Basis vectors",
+            "summary": "The basis vectors are i_hat and j_hat.",
+            "topics": ["i_hat", "j_hat"],
+            "sections": [{"concepts": ["basis vectors"]}],
+            "provenance": {"transcript": transcript_artifact},
+        }
+        payloads = {
+            transcript_artifact["key"]: json.dumps(transcript).encode(),
+            analysis_artifact["key"]: json.dumps(analysis).encode(),
+        }
+        store = Mock()
+        store.get_bytes.side_effect = lambda reference: payloads[reference["key"]]
+        context = Mock()
+        context.artifact_store.return_value = store
+        inferred = {
+            "source_hash": "b" * 64,
+            "observed_terms": 3,
+            "resolutions": [{
+                "resolution_id": "term-123456789abc",
+                "observed_forms": ["i_hat"],
+                "canonical_term": "i-hat",
+                "display_label": "i-hat",
+                "classification": "orthographic-normalization",
+                "confidence": 0.99,
+                "rationale": "Normalize mathematical notation.",
+                "affected_items": ["youtube:lesson"],
+                "evidence": ["topic:i_hat"],
+                "alternatives": [],
+                "disposition": "automatic-safe",
+            }],
+        }
+        job = {
+            "job_id": "terminology-job",
+            "spec_sha256": "c" * 64,
+            "spec": spec,
+        }
+        with patch("analyze_catalog.create_openai_client", return_value=Mock()), patch(
+            "resolve_terminology.infer_terminology_resolution",
+            return_value=inferred,
+        ) as resolve:
+            result = queued_authoring.collection_terminology_resolution(job, context)
+
+        resolve.assert_called_once()
+        self.assertEqual(result["kind"], "watchcraft.terminology-resolution")
+        self.assertEqual(result["stats"], {
+            "observed_terms": 3,
+            "proposed_changes": 1,
+            "automatic_safe": 1,
+            "needs_review": 0,
+        })
+        self.assertEqual(
+            result["provenance"]["items"][0]["transcript"], transcript_artifact
+        )
+        self.assertEqual(context.report_progress.call_count, 3)
 
     def test_mlx_smoke_transcribes_a_temporary_generated_audio_fixture(self):
         transcription_smoke_spec = queued_authoring.transcription_smoke_spec(

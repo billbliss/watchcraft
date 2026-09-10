@@ -568,6 +568,28 @@ After every planned item has a successful analysis, normalize the complete colle
 topic set:
 
 ```bash
+./authoring/watchcraft-author queue resolve-project-terminology \
+  --plan-job-id PLAN_JOB_ID \
+  --operator-token-source keychain \
+  --r2-credentials-source keychain
+```
+
+This corpus-level OpenAI job binds every raw transcript and draft analysis from the exact
+plan. It uses project metadata, source titles, repeated topics and section concepts, and
+selected timed transcript excerpts to propose an immutable
+`watchcraft.terminology-resolution@1` artifact. High-confidence spelling and presentation
+changes without alternatives are marked `automatic-safe`; semantic corrections and
+possible acoustic confusions are reported as `needs-review`. It never mutates a transcript
+or analysis. Applying accepted resolutions and selectively refining affected analyses is
+a separate later transition.
+
+Terminology resolution adds capability registry `2026-09-09.2`. Commit and push the OpenAI
+worker code, then publish and activate the checked-in registry before running the command.
+It requires no Convex deployment.
+
+After inspecting terminology resolution, normalize the complete collection topic set:
+
+```bash
 ./authoring/watchcraft-author queue normalize-project-topics \
   --plan-job-id PLAN_JOB_ID \
   --operator-token-source keychain \
