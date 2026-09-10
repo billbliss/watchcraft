@@ -593,7 +593,7 @@ exact specification rather than retrying them as transient provider failures. Ba
 character bounds are material job configuration and therefore participate in approval and
 idempotency.
 
-Terminology resolution adds capability registry `2026-09-09.3`. Commit and push the OpenAI
+Terminology resolution adds capability registry `2026-09-09.4`. Commit and push the OpenAI
 worker code, then publish and activate the checked-in registry before running the command.
 It requires no Convex deployment.
 

@@ -116,6 +116,48 @@ class TerminologyResolutionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no observed corpus form"):
             resolve_terminology.normalize_resolutions(generated, payload)
 
+    def test_mapper_output_is_restricted_to_forms_owned_by_its_batch(self):
+        payload = {
+            "observed_terms": [
+                {"term": "i_hat", "item_ids": ["youtube:lesson"]},
+                {"term": "j_hat", "item_ids": ["youtube:lesson"]},
+            ],
+            "items": [{"item_id": "youtube:lesson"}],
+        }
+        generated = resolve_terminology.GeneratedTerminologyResolution(
+            resolutions=[
+                {
+                    "observed_forms": ["i_hat", "j_hat"],
+                    "canonical_term": "i-hat",
+                    "display_label": "i-hat",
+                    "classification": "orthographic-normalization",
+                    "confidence": 0.99,
+                    "rationale": "Normalize mathematical notation.",
+                    "evidence": ["linear algebra context"],
+                    "alternatives": [],
+                },
+                {
+                    "observed_forms": ["j_hat"],
+                    "canonical_term": "j-hat",
+                    "display_label": "j-hat",
+                    "classification": "orthographic-normalization",
+                    "confidence": 0.99,
+                    "rationale": "Normalize mathematical notation.",
+                    "evidence": ["linear algebra context"],
+                    "alternatives": [],
+                },
+            ]
+        )
+
+        resolutions = resolve_terminology.normalize_resolutions(
+            generated,
+            payload,
+            allowed_forms={"i_hat"},
+        )
+
+        self.assertEqual(len(resolutions), 1)
+        self.assertEqual(resolutions[0]["observed_forms"], ["i_hat"])
+
     def test_resolution_batches_are_deterministic_and_bounded(self):
         payload = {
             "project": {"project_id": "example", "revision": 1, "metadata": {}},

@@ -320,13 +320,16 @@ def normalize_resolutions(
     seen = set()
     for proposed in generated.resolutions:
         forms = _clean_strings(proposed.observed_forms)
-        matched = [form for form in forms if form.casefold() in observed]
-        if not matched:
+        observed_forms = [form for form in forms if form.casefold() in observed]
+        if not observed_forms:
             raise ValueError("Terminology resolution cites no observed corpus form")
-        if allowed_forms is not None and any(
-            form.casefold() not in allowed_forms for form in matched
-        ):
-            raise ValueError("Terminology resolution cites a form outside its batch")
+        matched = (
+            observed_forms
+            if allowed_forms is None
+            else [form for form in observed_forms if form.casefold() in allowed_forms]
+        )
+        if not matched:
+            continue
         expected_items = {
             item_id
             for form in matched
