@@ -322,7 +322,9 @@ def normalize_resolutions(
         forms = _clean_strings(proposed.observed_forms)
         observed_forms = [form for form in forms if form.casefold() in observed]
         if not observed_forms:
-            raise ValueError("Terminology resolution cites no observed corpus form")
+            if allowed_forms is None:
+                raise ValueError("Terminology resolution cites no observed corpus form")
+            continue
         matched = (
             observed_forms
             if allowed_forms is None
@@ -341,7 +343,9 @@ def normalize_resolutions(
         canonical = " ".join(proposed.canonical_term.split())
         display = " ".join(proposed.display_label.split())
         if not canonical or not display:
-            raise ValueError("Terminology resolution has an empty canonical term")
+            if allowed_forms is None:
+                raise ValueError("Terminology resolution has an empty canonical term")
+            continue
         identity = json.dumps(
             [sorted(form.casefold() for form in matched), canonical.casefold()],
             ensure_ascii=False,
@@ -354,7 +358,9 @@ def normalize_resolutions(
         confidence = round(max(0.0, min(1.0, float(proposed.confidence))), 3)
         rationale = " ".join(proposed.rationale.split())
         if not rationale:
-            raise ValueError("Terminology resolution has an empty rationale")
+            if allowed_forms is None:
+                raise ValueError("Terminology resolution has an empty rationale")
+            continue
         automatic = (
             proposed.classification == "orthographic-normalization"
             and confidence >= 0.9

@@ -146,6 +146,16 @@ class TerminologyResolutionTests(unittest.TestCase):
                     "evidence": ["linear algebra context"],
                     "alternatives": [],
                 },
+                {
+                    "observed_forms": ["invented notation"],
+                    "canonical_term": "invented-notation",
+                    "display_label": "invented notation",
+                    "classification": "domain-correction",
+                    "confidence": 0.8,
+                    "rationale": "Not grounded in a candidate.",
+                    "evidence": [],
+                    "alternatives": [],
+                },
             ]
         )
 
@@ -157,6 +167,34 @@ class TerminologyResolutionTests(unittest.TestCase):
 
         self.assertEqual(len(resolutions), 1)
         self.assertEqual(resolutions[0]["observed_forms"], ["i_hat"])
+
+    def test_batched_mapper_discards_an_empty_proposal(self):
+        payload = {
+            "observed_terms": [
+                {"term": "i_hat", "item_ids": ["youtube:lesson"]},
+            ],
+            "items": [{"item_id": "youtube:lesson"}],
+        }
+        generated = resolve_terminology.GeneratedTerminologyResolution(
+            resolutions=[{
+                "observed_forms": ["i_hat"],
+                "canonical_term": " ",
+                "display_label": " ",
+                "classification": "orthographic-normalization",
+                "confidence": 0.99,
+                "rationale": " ",
+                "evidence": [],
+                "alternatives": [],
+            }]
+        )
+
+        resolutions = resolve_terminology.normalize_resolutions(
+            generated,
+            payload,
+            allowed_forms={"i_hat"},
+        )
+
+        self.assertEqual(resolutions, [])
 
     def test_resolution_batches_are_deterministic_and_bounded(self):
         payload = {
