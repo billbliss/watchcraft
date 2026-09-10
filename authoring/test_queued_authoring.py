@@ -30,7 +30,7 @@ def registry_snapshot(
 ):
     if terminology_resolution:
         return {
-            "registry_version": "2026-09-09.2",
+            "registry_version": "2026-09-09.3",
             "registry_sha256": "c" * 64,
             "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
                 queued_authoring.TERMINOLOGY_RESOLUTION_HANDLER
@@ -1120,6 +1120,7 @@ class QueuedAuthoringTests(unittest.TestCase):
         store.get_bytes.side_effect = lambda reference: payloads[reference["key"]]
         context = Mock()
         context.artifact_store.return_value = store
+        context.latest_checkpoint.return_value = None
         inferred = {
             "source_hash": "b" * 64,
             "observed_terms": 3,
@@ -1142,9 +1143,14 @@ class QueuedAuthoringTests(unittest.TestCase):
             "spec_sha256": "c" * 64,
             "spec": spec,
         }
+        def infer_with_progress(**kwargs):
+            kwargs["report_progress"](0, 1, "batch 1")
+            kwargs["report_progress"](1, 1, "complete")
+            return inferred
+
         with patch("analyze_catalog.create_openai_client", return_value=Mock()), patch(
             "resolve_terminology.infer_terminology_resolution",
-            return_value=inferred,
+            side_effect=infer_with_progress,
         ) as resolve:
             result = queued_authoring.collection_terminology_resolution(job, context)
 

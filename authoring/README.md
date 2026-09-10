@@ -575,15 +575,25 @@ topic set:
 ```
 
 This corpus-level OpenAI job binds every raw transcript and draft analysis from the exact
-plan. It uses project metadata, source titles, repeated topics and section concepts, and
-selected timed transcript excerpts to propose an immutable
+plan. It creates a deterministic inventory, partitions candidate terms into bounded batches,
+and supplies each batch with compact collection context and only its relevant timed transcript
+evidence. Batches currently execute sequentially inside one leased worker and are shaped so
+they can become independently scheduled map jobs later. Each completed batch is persisted as
+an immutable specification-bound checkpoint, so a replacement attempt resumes without paying
+for successful model calls again. Their validated proposals are
+deterministically reduced into one immutable
 `watchcraft.terminology-resolution@1` artifact. High-confidence spelling and presentation
 changes without alternatives are marked `automatic-safe`; semantic corrections and
 possible acoustic confusions are reported as `needs-review`. It never mutates a transcript
 or analysis. Applying accepted resolutions and selectively refining affected analyses is
 a separate later transition.
 
-Terminology resolution adds capability registry `2026-09-09.2`. Commit and push the OpenAI
+The handler treats invalid requests such as a model context-limit response as terminal for the
+exact specification rather than retrying them as transient provider failures. Batch term and
+character bounds are material job configuration and therefore participate in approval and
+idempotency.
+
+Terminology resolution adds capability registry `2026-09-09.3`. Commit and push the OpenAI
 worker code, then publish and activate the checked-in registry before running the command.
 It requires no Convex deployment.
 

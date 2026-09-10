@@ -62,7 +62,7 @@ EDUCATIONAL_VIDEO_ANALYSIS_HANDLER = (
 )
 TERMINOLOGY_RESOLUTION_HANDLER = (
     "watchcraft.resolve.collection-terminology",
-    "1",
+    "2",
 )
 TRANSCRIPTION_SMOKE_HANDLER = ("watchcraft.transcript.mlx-whisper-smoke", "1")
 HTTP_TRANSCRIPTION_SMOKE_HANDLER = (
@@ -113,12 +113,18 @@ TOPIC_NORMALIZATION_BATCH_SIZE = 40
 TOPIC_NORMALIZATION_RETRIES = 5
 TOPIC_NORMALIZATION_TIMEOUT_SECONDS = 300
 TERMINOLOGY_RESOLUTION_MODEL = "gpt-5.4-mini"
-TERMINOLOGY_RESOLUTION_PROMPT_VERSION = 1
+TERMINOLOGY_RESOLUTION_PROMPT_VERSION = 2
 TERMINOLOGY_RESOLUTION_RETRIES = 5
 TERMINOLOGY_RESOLUTION_TIMEOUT_SECONDS = 300
+TERMINOLOGY_RESOLUTION_BATCH_MAX_TERMS = 24
+TERMINOLOGY_RESOLUTION_BATCH_MAX_CHARS = 60_000
 VIDEO_ANALYSIS_SCHEMA = {"id": "watchcraft.video-analysis", "version": 2}
 TERMINOLOGY_RESOLUTION_SCHEMA = {
     "id": "watchcraft.terminology-resolution",
+    "version": 1,
+}
+TERMINOLOGY_RESOLUTION_CHECKPOINT_SCHEMA = {
+    "id": "watchcraft.terminology-resolution-checkpoint",
     "version": 1,
 }
 TOPIC_NORMALIZATION_SCHEMA = {"id": "watchcraft.topic-normalization", "version": 1}
@@ -943,6 +949,8 @@ def collection_terminology_resolution(
     spec = job["spec"]
     configuration = spec.get("configuration")
     expected_keys = {
+        "batch_max_chars",
+        "batch_max_terms",
         "items",
         "logical_task_id",
         "model",
@@ -964,6 +972,10 @@ def collection_terminology_resolution(
         or configuration["prompt_version"] != TERMINOLOGY_RESOLUTION_PROMPT_VERSION
         or configuration["retries"] != TERMINOLOGY_RESOLUTION_RETRIES
         or configuration["timeout_seconds"] != TERMINOLOGY_RESOLUTION_TIMEOUT_SECONDS
+        or configuration["batch_max_terms"]
+        != TERMINOLOGY_RESOLUTION_BATCH_MAX_TERMS
+        or configuration["batch_max_chars"]
+        != TERMINOLOGY_RESOLUTION_BATCH_MAX_CHARS
         or not isinstance(project, dict)
         or not isinstance(project.get("project_id"), str)
         or type(project.get("revision")) is not int
@@ -1039,13 +1051,11 @@ def collection_terminology_resolution(
             "analysis": analysis,
         })
     dependency_fetch_ms = elapsed_milliseconds(fetch_started_at)
-    context.report_progress(
-        phase="resolving-terminology",
-        completed=0,
-        total=1,
-        unit="collection",
-        current=project["project_id"],
+    latest_checkpoint = context.latest_checkpoint(
+        artifact_kind="terminology-resolution-checkpoint",
+        schema=TERMINOLOGY_RESOLUTION_CHECKPOINT_SCHEMA,
     )
+    resume_checkpoint = latest_checkpoint[1] if latest_checkpoint is not None else None
     try:
         from analyze_catalog import create_openai_client
         from resolve_terminology import infer_terminology_resolution
@@ -1057,12 +1067,39 @@ def collection_terminology_resolution(
             client=create_openai_client(configuration["timeout_seconds"]),
             model=configuration["model"],
             retries=configuration["retries"],
+            batch_max_terms=configuration["batch_max_terms"],
+            batch_max_chars=configuration["batch_max_chars"],
+            resume_checkpoint=resume_checkpoint,
+            report_progress=lambda completed, total, current: context.report_progress(
+                phase="resolving-terminology",
+                completed=completed,
+                total=total,
+                unit="batches",
+                current=current,
+            ),
+            save_checkpoint=lambda value, sequence, completed, total, current: (
+                context.save_checkpoint(
+                    value,
+                    sequence=sequence,
+                    phase="resolving-terminology",
+                    completed=completed,
+                    total=total,
+                    unit="batches",
+                    current=current,
+                    artifact_kind="terminology-resolution-checkpoint",
+                    schema=TERMINOLOGY_RESOLUTION_CHECKPOINT_SCHEMA,
+                )
+            ),
         )
         resolution_ms = elapsed_milliseconds(resolution_started_at)
     except (TerminologyDependencyError, ValueError):
         raise
     except Exception as error:
-        raise TerminologyProviderError(str(error)) from error
+        failure = TerminologyProviderError(str(error))
+        if getattr(error, "retryable", True) is False:
+            failure.classification = "terminology_request_invalid"
+            failure.retryable = False
+        raise failure from error
 
     resolutions = inferred["resolutions"]
     result = {
@@ -1111,13 +1148,6 @@ def collection_terminology_resolution(
     }
     validate_json_schema(
         result, TERMINOLOGY_RESOLUTION_SCHEMA_PATH, "Terminology resolution"
-    )
-    context.report_progress(
-        phase="resolving-terminology",
-        completed=1,
-        total=1,
-        unit="collection",
-        current=project["project_id"],
     )
     return result
 
@@ -2421,12 +2451,16 @@ class WorkerContext:
         total: int,
         unit: str,
         current: str | None = None,
+        artifact_kind: str = "collection-iterator-checkpoint",
+        schema: dict[str, Any] = COLLECTION_ITERATOR_CHECKPOINT_SCHEMA,
     ) -> dict[str, Any]:
+        if not artifact_kind.endswith("-checkpoint"):
+            raise ValueError("Checkpoint artifact kind must end in -checkpoint")
         artifact = self.artifact_store().put_json(
             value,
             {
-                "artifact_kind": "collection-iterator-checkpoint",
-                "schema": COLLECTION_ITERATOR_CHECKPOINT_SCHEMA,
+                "artifact_kind": artifact_kind,
+                "schema": schema,
             },
         )
         self.report_progress(
@@ -2443,7 +2477,12 @@ class WorkerContext:
         )
         return artifact
 
-    def latest_checkpoint(self) -> tuple[int, dict[str, Any]] | None:
+    def latest_checkpoint(
+        self,
+        *,
+        artifact_kind: str = "collection-iterator-checkpoint",
+        schema: dict[str, Any] = COLLECTION_ITERATOR_CHECKPOINT_SCHEMA,
+    ) -> tuple[int, dict[str, Any]] | None:
         checkpoints = []
         for attempt in self.job.get("attempts", []):
             if not isinstance(attempt, dict):
@@ -2460,17 +2499,17 @@ class WorkerContext:
         checkpoint = max(checkpoints, key=lambda value: value["sequence"])
         reference = validated_artifact_reference(checkpoint.get("artifact"))
         if (
-            reference.get("artifact_kind") != "collection-iterator-checkpoint"
-            or reference.get("schema") != COLLECTION_ITERATOR_CHECKPOINT_SCHEMA
+            reference.get("artifact_kind") != artifact_kind
+            or reference.get("schema") != schema
         ):
-            raise RuntimeError("The latest iterator checkpoint has the wrong artifact contract")
+            raise RuntimeError("The latest checkpoint has the wrong artifact contract")
         payload = self.artifact_store().get_bytes(reference)
         try:
             value = json.loads(payload.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise RuntimeError("The latest iterator checkpoint is not valid JSON") from error
+            raise RuntimeError("The latest checkpoint is not valid JSON") from error
         if not isinstance(value, dict):
-            raise RuntimeError("The latest iterator checkpoint must be an object")
+            raise RuntimeError("The latest checkpoint must be an object")
         return checkpoint["sequence"], value
 
 
@@ -4551,6 +4590,8 @@ def project_terminology_resolution_spec(
             "prompt_version": TERMINOLOGY_RESOLUTION_PROMPT_VERSION,
             "retries": TERMINOLOGY_RESOLUTION_RETRIES,
             "timeout_seconds": TERMINOLOGY_RESOLUTION_TIMEOUT_SECONDS,
+            "batch_max_terms": TERMINOLOGY_RESOLUTION_BATCH_MAX_TERMS,
+            "batch_max_chars": TERMINOLOGY_RESOLUTION_BATCH_MAX_CHARS,
             "items": bindings,
         },
     }
