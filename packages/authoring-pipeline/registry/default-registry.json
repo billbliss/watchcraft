@@ -1,7 +1,7 @@
 {
   "kind": "watchcraft.authoring-capability-registry",
   "schema_version": 1,
-  "registry_version": "2026-09-10.4",
+  "registry_version": "2026-09-10.5",
   "handlers": [
     {
       "id": "watchcraft.analysis.lexical",
@@ -131,7 +131,7 @@
     },
     {
       "id": "watchcraft.normalize.collection-topics",
-      "version": "1",
+      "version": "2",
       "operation": "generate",
       "inputs": [],
       "dependencies": [
@@ -144,6 +144,13 @@
           "cardinality": {
             "minimum": 1,
             "maximum": 10000
+          }
+        },
+        {
+          "artifact_kind": "terminology-resolution",
+          "schema": {
+            "id": "watchcraft.terminology-resolution",
+            "version": 1
           }
         }
       ],
@@ -171,7 +178,7 @@
     },
     {
       "id": "watchcraft.compile.video-collection",
-      "version": "2",
+      "version": "3",
       "operation": "compile",
       "inputs": [
         {
@@ -210,6 +217,13 @@
           "cardinality": {
             "minimum": 1,
             "maximum": 10000
+          }
+        },
+        {
+          "artifact_kind": "terminology-resolution",
+          "schema": {
+            "id": "watchcraft.terminology-resolution",
+            "version": 1
           }
         },
         {

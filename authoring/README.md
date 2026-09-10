@@ -588,8 +588,9 @@ discarded. High-confidence spelling and presentation changes without alternative
 Spelling-equivalent alternatives such as `i hat`, `i_hat`, and `i-hat` are collapsed before
 assigning that disposition.
 Semantic corrections and possible acoustic confusions are reported as `needs-review`. It never
-mutates a transcript or analysis. Applying accepted resolutions and selectively refining
-affected analyses is a separate later transition.
+mutates a transcript or analysis. Downstream handlers automatically apply only the
+`automatic-safe` presentation changes to derived analysis content; review-required proposals
+remain unapplied.
 
 The handler treats invalid requests such as a model context-limit response as terminal for the
 exact specification rather than retrying them as transient provider failures. Batch term and
@@ -602,9 +603,7 @@ explicit content-addressed input. The new job validates its source and batch-pla
 reuse and rebinds the validated checkpoint to its own attempt so another compatible handler
 revision can inherit it. An incompatible checkpoint fails closed.
 
-Terminology resolution adds capability registry `2026-09-10.4`. Commit and push the OpenAI
-worker code, then publish and activate the checked-in registry before running the command.
-It requires no Convex deployment.
+Terminology resolution was introduced in capability registry `2026-09-10.4`.
 
 After inspecting terminology resolution, normalize the complete collection topic set:
 
@@ -615,17 +614,20 @@ After inspecting terminology resolution, normalize the complete collection topic
   --r2-credentials-source keychain
 ```
 
-The command derives every analysis-job identity from the exact plan artifact and
-rejects missing, failed, foreign, or stale item executions. The normalization job binds
-the immutable R2 reference for every analysis as a typed dependency, then runs the
-existing topic-family, assignment, compact-label, and related-topic logic on the OpenAI
-worker. Its deterministic run and job IDs make the command safe to resume. The compact
-result reports the raw and canonical topic counts, families, labels, related pairs, and
-timing; the printed `queue result` command retrieves the complete normalization artifact.
+The command derives every analysis-job identity from the exact plan artifact and rejects
+missing, failed, foreign, or stale item executions. It also requires the successful terminology
+resolution bound to that plan. The normalization worker derives an in-memory copy of each
+analysis, applies only `automatic-safe` terminology changes to human-facing generated fields,
+and runs the existing topic-family, assignment, compact-label, and related-topic logic over
+those corrected copies. Original transcript and analysis artifacts remain immutable. Its
+deterministic, handler-versioned run and job IDs make the command safe to resume while allowing
+this revised normalization to coexist with earlier results. The compact result reports the raw
+and canonical topic counts, families, labels, related pairs, and timing; the printed
+`queue result` command retrieves the complete normalization artifact.
 
-This adds a variable-cardinality dependency contract and capability registry
-`2026-09-08.3`. After committing and pushing, deploy Convex with `npx convex deploy`,
-then publish and activate the checked-in registry before running the command:
+Terminology application, revised normalization, and revised compilation are registered in
+capability registry `2026-09-10.5`. After committing and pushing, publish and activate the
+checked-in registry before running either downstream command:
 
 ```bash
 ./authoring/watchcraft-author queue registry-publish \
@@ -646,14 +648,16 @@ candidate collection bundle:
   --compare-to /path/to/published/collection.json
 ```
 
-The portable compiler binds the exact plan and accepted iterator snapshot, every
-successful transcript and analysis, and the completed topic-normalization result. It
-uses the existing schema-v4 collection compiler and transcript-assisted topic-to-chapter
-mapping. Source-observed titles from the iterator remain the collection item titles;
-analysis-generated titles are only a fallback for older inputs without a source title.
-Its output contains a validated `watchcraft.collection` manifest plus one
-immutable analysis-resource reference for every item. Transcripts remain authoritative
-compilation inputs but are not copied into the reader package.
+The portable compiler binds the exact plan and accepted iterator snapshot, every successful
+transcript and original analysis, the terminology resolution, and the corrected
+topic-normalization result. It deterministically applies the same `automatic-safe` terminology
+changes, stores a new content-addressed derived analysis for each item, and uses those derived
+analyses with the existing schema-v4 collection compiler and transcript-assisted
+topic-to-chapter mapping. Each resource records both its derived artifact and its immutable
+source-analysis artifact, along with the applied resolution IDs. Source-observed titles from
+the iterator remain the collection item titles; analysis-generated titles are only a fallback
+for older inputs without a source title. Transcripts remain authoritative compilation inputs
+but are not copied into the reader package.
 
 `--compare-to` is optional and read-only. When supplied, the command reports item-ID,
 canonical-topic, family, content-hash, and proposed publication-revision differences
@@ -661,9 +665,7 @@ against an existing `collection.json`. Compilation never changes that file or pu
 the candidate. The manifest's revision is only a candidate placeholder; the later
 publication transition owns revision advancement against the reviewed current package.
 
-Compilation adds capability registry `2026-09-09.1`. Commit and push the worker code,
-then publish and activate that registry before running the command. It requires no new
-Convex deployment.
+These handler and registry changes require no Convex deployment.
 
 Materialize a successful compilation into a separate review package:
 

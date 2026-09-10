@@ -30,7 +30,7 @@ def registry_snapshot(
 ):
     if terminology_resolution:
         return {
-            "registry_version": "2026-09-10.4",
+            "registry_version": "2026-09-10.5",
             "registry_sha256": "c" * 64,
             "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
                 queued_authoring.TERMINOLOGY_RESOLUTION_HANDLER
@@ -41,7 +41,7 @@ def registry_snapshot(
         }
     if collection_compilation:
         return {
-            "registry_version": "2026-09-09.2",
+            "registry_version": "2026-09-10.5",
             "registry_sha256": "c" * 64,
             "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
                 queued_authoring.COLLECTION_COMPILATION_HANDLER
@@ -52,7 +52,7 @@ def registry_snapshot(
         }
     if topic_normalization:
         return {
-            "registry_version": "2026-09-08.3",
+            "registry_version": "2026-09-10.5",
             "registry_sha256": "c" * 64,
             "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
                 queued_authoring.TOPIC_NORMALIZATION_HANDLER
@@ -2547,6 +2547,66 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertIn('"analysis_ms": 2000', output.getvalue())
         self.assertIn("Full analysis:", output.getvalue())
 
+    def test_automatic_terminology_changes_only_derived_human_facing_content(self):
+        analysis = {
+            "schema_version": 2,
+            "video": "lesson.youtube",
+            "title": "Source title containing i_hat",
+            "summary": "Compare i_hat and j_hat basis vectors.",
+            "topics": ["basis vectors i_hat and j_hat", "matrix"],
+            "sections": [{
+                "title": "Using i_hat",
+                "description": "The i_hat direction.",
+                "concepts": ["i_hat", "j_hat"],
+            }],
+            "featured_techniques": [{"technique": "Draw i_hat"}],
+            "provenance": {"handler_id": "source-handler"},
+        }
+        resolution = {
+            "source_hash": "a" * 64,
+            "resolutions": [
+                {
+                    "resolution_id": "term-i-hat",
+                    "observed_forms": ["i_hat"],
+                    "display_label": "i-hat",
+                    "disposition": "automatic-safe",
+                },
+                {
+                    "resolution_id": "term-j-hat",
+                    "observed_forms": ["j_hat"],
+                    "display_label": "j-hat",
+                    "disposition": "needs-review",
+                },
+                {
+                    "resolution_id": "term-no-cascade",
+                    "observed_forms": ["i-hat"],
+                    "display_label": "should-not-cascade",
+                    "disposition": "automatic-safe",
+                },
+            ],
+            "provenance": {"job_id": "terminology-job-1"},
+        }
+
+        derived, applied = queued_authoring.apply_automatic_terminology(
+            analysis, resolution
+        )
+
+        self.assertEqual(analysis["summary"], "Compare i_hat and j_hat basis vectors.")
+        self.assertEqual(derived["title"], "Source title containing i_hat")
+        self.assertEqual(derived["summary"], "Compare i-hat and j_hat basis vectors.")
+        self.assertEqual(derived["topics"][0], "basis vectors i-hat and j_hat")
+        self.assertEqual(derived["sections"][0]["title"], "Using i-hat")
+        self.assertEqual(derived["featured_techniques"][0]["technique"], "Draw i-hat")
+        self.assertEqual(applied, ["term-i-hat"])
+        self.assertEqual(
+            derived["provenance"]["terminology_resolution"],
+            {
+                "job_id": "terminology-job-1",
+                "source_hash": "a" * 64,
+                "resolution_ids": ["term-i-hat"],
+            },
+        )
+
     def test_collection_topic_normalizer_uses_the_existing_normalization_core(self):
         references = []
         analyses = []
@@ -2566,7 +2626,8 @@ class QueuedAuthoringTests(unittest.TestCase):
                 "schema_version": 2,
                 "video": f"{video_id}.youtube",
                 "title": f"Lesson {index + 1}",
-                "topics": ["vectors", "linear algebra"],
+                "summary": "The i_hat basis vector.",
+                "topics": ["i_hat", "linear algebra"],
                 "sections": [{
                     "start": "00:00:00",
                     "end": "00:01:00",
@@ -2586,6 +2647,27 @@ class QueuedAuthoringTests(unittest.TestCase):
             }
             for analysis, reference in zip(analyses, references)
         ]
+        terminology_reference = {
+            **references[0],
+            "digest": "f" * 64,
+            "artifact_kind": "terminology-resolution",
+            "schema": queued_authoring.TERMINOLOGY_RESOLUTION_SCHEMA,
+            "key": "objects/sha256/ff/" + "f" * 62,
+        }
+        terminology = {
+            "project": {"project_id": "linear-algebra", "revision": 2},
+            "source_hash": "b" * 64,
+            "resolutions": [{
+                "resolution_id": "term-i-hat",
+                "observed_forms": ["i_hat"],
+                "display_label": "i-hat",
+                "disposition": "automatic-safe",
+            }],
+            "provenance": {
+                "job_id": "terminology-job-1",
+                "plan_artifact_sha256": "d" * 64,
+            },
+        }
         spec = queued_authoring.project_topic_normalization_spec(
             plan_job_id="plan-job-1",
             plan_reference={"digest": "d" * 64},
@@ -2596,16 +2678,27 @@ class QueuedAuthoringTests(unittest.TestCase):
             },
             dependencies=references,
             bindings=bindings,
+            terminology_reference=terminology_reference,
         )
         job = {"job_id": "normalization-job-1", "spec_sha256": "a" * 64, "spec": spec}
         store = Mock()
         store.get_bytes.side_effect = [
+            json.dumps(terminology).encode("utf-8"),
+            *[
             json.dumps(analysis).encode("utf-8") for analysis in analyses
+            ],
         ]
         context = Mock()
         context.artifact_store.return_value = store
+        normalized_analyses = []
 
         def normalize(args):
+            normalized_analyses.extend(
+                json.loads(path.read_text(encoding="utf-8"))
+                for path in sorted(
+                    (args.root / "Video Catalog" / "analysis").glob("*.json")
+                )
+            )
             output = args.root / "Video Catalog" / "topic-normalization.json"
             output.write_text(json.dumps({
                 "schema_version": 1,
@@ -2627,14 +2720,22 @@ class QueuedAuthoringTests(unittest.TestCase):
             }), encoding="utf-8")
             return 0
 
-        with patch("normalize_topics.run", side_effect=normalize):
+        with patch("normalize_topics.run", side_effect=normalize), patch(
+            "queued_authoring.validate_json_schema"
+        ):
             result = queued_authoring.collection_topic_normalization(job, context)
         self.assertEqual(result["kind"], "watchcraft.topic-normalization")
         self.assertEqual(result["status"], "complete")
         self.assertEqual(result["provenance"]["plan_job_id"], "plan-job-1")
+        self.assertEqual(result["provenance"]["terminology"], terminology_reference)
         self.assertEqual(len(result["provenance"]["analyses"]), 2)
-        self.assertEqual(store.get_bytes.call_count, 2)
+        self.assertEqual(store.get_bytes.call_count, 3)
         self.assertEqual(context.report_progress.call_count, 4)
+        self.assertTrue(all(
+            analysis["summary"] == "The i-hat basis vector."
+            and analysis["topics"][0] == "i-hat"
+            for analysis in normalized_analyses
+        ))
 
     def test_normalize_project_submits_the_complete_analysis_set_deterministically(self):
         snapshot = {
@@ -2678,6 +2779,13 @@ class QueuedAuthoringTests(unittest.TestCase):
             "artifact_kind": "analysis",
             "schema": queued_authoring.VIDEO_ANALYSIS_SCHEMA,
             "key": "objects/sha256/ee/" + "e" * 62,
+        }
+        terminology_reference = {
+            **plan_reference,
+            "digest": "7" * 64,
+            "artifact_kind": "terminology-resolution",
+            "schema": queued_authoring.TERMINOLOGY_RESOLUTION_SCHEMA,
+            "key": "objects/sha256/77/" + "7" * 62,
         }
         plan_job = {
             "job_id": "plan-job-1",
@@ -2753,6 +2861,7 @@ class QueuedAuthoringTests(unittest.TestCase):
             "provenance": {
                 "handler_id": queued_authoring.TOPIC_NORMALIZATION_HANDLER[0],
                 "plan_artifact_sha256": plan_reference["digest"],
+                "terminology": terminology_reference,
                 "analyses": [{"artifact": analysis_reference}],
                 "timing": {"normalization_ms": 1_000},
             },
@@ -2774,6 +2883,9 @@ class QueuedAuthoringTests(unittest.TestCase):
                 "digest": analysis_reference["digest"],
             }], ["analysis-job-1"]),
         ), patch(
+            "queued_authoring.completed_project_terminology_resolution",
+            return_value=terminology_reference,
+        ), patch(
             "queued_authoring.submit_spec", side_effect=submit
         ), patch(
             "queued_authoring._resume_pipeline_job"
@@ -2784,7 +2896,10 @@ class QueuedAuthoringTests(unittest.TestCase):
             with redirect_stdout(output):
                 self.assertEqual(queued_authoring.run_normalize_project(args), 0)
         self.assertEqual(captured["request"]["analysis_job_ids"], ["analysis-job-1"])
-        self.assertEqual(captured["spec"]["dependencies"], [analysis_reference])
+        self.assertEqual(captured["spec"]["dependencies"], [
+            analysis_reference,
+            terminology_reference,
+        ])
         self.assertEqual(captured["spec"]["handler"]["id"], (
             queued_authoring.TOPIC_NORMALIZATION_HANDLER[0]
         ))
@@ -2916,12 +3031,37 @@ class QueuedAuthoringTests(unittest.TestCase):
             "related": {"vectors": []},
             "provenance": {"plan_artifact_sha256": plan_reference["digest"]},
         }
+        terminology = {
+            "project": {
+                "project_id": project["project_id"],
+                "revision": project["revision"],
+                "metadata": project.get("metadata", {}),
+            },
+            "source_hash": "7" * 64,
+            "resolutions": [{
+                "resolution_id": "term-vectors-display",
+                "observed_forms": ["vectors"],
+                "display_label": "Vectors",
+                "disposition": "automatic-safe",
+            }],
+            "provenance": {
+                "job_id": "terminology-job-1",
+                "plan_artifact_sha256": plan_reference["digest"],
+            },
+        }
+        terminology_reference, terminology_payload = reference(
+            terminology,
+            "terminology-resolution",
+            queued_authoring.TERMINOLOGY_RESOLUTION_SCHEMA,
+        )
+        normalization["provenance"]["terminology"] = terminology_reference
         normalization_reference, normalization_payload = reference(
             normalization,
             "topic-normalization",
             queued_authoring.TOPIC_NORMALIZATION_SCHEMA,
         )
         payloads[normalization_reference["key"]] = normalization_payload
+        payloads[terminology_reference["key"]] = terminology_payload
         spec = {
             **queued_authoring.project_collection_compilation_spec(
                 project=project,
@@ -2931,25 +3071,46 @@ class QueuedAuthoringTests(unittest.TestCase):
                 transcript_references=transcript_references,
                 analysis_references=analysis_references,
                 bindings=bindings,
+                terminology_reference=terminology_reference,
                 normalization_reference=normalization_reference,
             ),
             "registry_snapshot": registry_snapshot(collection_compilation=True),
         }
         store = Mock()
         store.get_bytes.side_effect = lambda value: payloads[value["key"]]
+        derived_analyses = []
+
+        def put_derived(value, description):
+            derived_analyses.append(value)
+            return reference(
+                value, description["artifact_kind"], description["schema"]
+            )[0]
+
+        store.put_json.side_effect = put_derived
         context = Mock()
         context.artifact_store.return_value = store
-        result = queued_authoring.compile_video_collection({
-            "job_id": "compile-job-1",
-            "spec_sha256": "c" * 64,
-            "spec": spec,
-        }, context)
+        with patch("queued_authoring.validate_json_schema"):
+            result = queued_authoring.compile_video_collection({
+                "job_id": "compile-job-1",
+                "spec_sha256": "c" * 64,
+                "spec": spec,
+            }, context)
 
         self.assertEqual(result["kind"], "watchcraft.collection-compilation")
         self.assertEqual(result["manifest"]["kind"], "watchcraft.collection")
         self.assertEqual(result["manifest"]["collection_id"], project["project_id"])
         self.assertEqual(len(result["manifest"]["items"]), len(plan["items"]))
         self.assertEqual(len(result["resources"]), len(plan["items"]))
+        self.assertEqual(len(derived_analyses), len(plan["items"]))
+        self.assertTrue(all(
+            analysis["topics"] == ["Vectors"] for analysis in derived_analyses
+        ))
+        self.assertTrue(all(
+            resource["source_artifact"] == source
+            and resource["applied_resolution_ids"] == ["term-vectors-display"]
+            for resource, source in zip(result["resources"], analysis_references)
+        ))
+        self.assertEqual(result["provenance"]["terminology"], terminology_reference)
         self.assertEqual(result["manifest"]["stats"]["topic_family_count"], 1)
         self.assertEqual(
             {item["title"] for item in result["manifest"]["items"].values()},
@@ -3020,6 +3181,13 @@ class QueuedAuthoringTests(unittest.TestCase):
             "artifact_kind": "topic-normalization",
             "schema": queued_authoring.TOPIC_NORMALIZATION_SCHEMA,
             "key": "objects/sha256/ff/" + "f" * 62,
+        }
+        terminology_reference = {
+            **transcript_artifact,
+            "digest": "7" * 64,
+            "artifact_kind": "terminology-resolution",
+            "schema": queued_authoring.TERMINOLOGY_RESOLUTION_SCHEMA,
+            "key": "objects/sha256/77/" + "7" * 62,
         }
         bindings = [{
             "item_id": "youtube:fNk_zzaMoSs",
@@ -3102,6 +3270,7 @@ class QueuedAuthoringTests(unittest.TestCase):
             "provenance": {
                 "handler_id": queued_authoring.COLLECTION_COMPILATION_HANDLER[0],
                 "plan": plan_reference,
+                "terminology": terminology_reference,
                 "normalization": normalization_reference,
                 "timing": {},
             },
@@ -3119,6 +3288,7 @@ class QueuedAuthoringTests(unittest.TestCase):
                 [transcript_artifact],
                 [analysis_reference],
                 bindings,
+                terminology_reference,
                 normalization_reference,
             ),
         ), patch(
@@ -3138,6 +3308,7 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertEqual(captured["spec"]["dependencies"], [
             transcript_artifact,
             analysis_reference,
+            terminology_reference,
             normalization_reference,
         ])
         self.assertEqual(captured["request"]["handler"], {
@@ -3447,12 +3618,20 @@ class QueuedAuthoringTests(unittest.TestCase):
                 },
                 "source": {"media_asset_id": "catalog-project:example"},
                 "inputs": [],
-                "dependencies": [transcript_reference(), transcript_reference()],
+                "dependencies": [
+                    transcript_reference(),
+                    transcript_reference(),
+                    {
+                        **transcript_reference(),
+                        "artifact_kind": "terminology-resolution",
+                        "schema": queued_authoring.TERMINOLOGY_RESOLUTION_SCHEMA,
+                    },
+                ],
                 "configuration": {},
                 "registry_snapshot": registry_snapshot(topic_normalization=True),
             },
         }
-        for dependency in normalization_job["spec"]["dependencies"]:
+        for dependency in normalization_job["spec"]["dependencies"][:-1]:
             dependency["artifact_kind"] = "analysis"
             dependency["schema"] = queued_authoring.VIDEO_ANALYSIS_SCHEMA
         with patch.dict(os.environ, analysis_environment, clear=True):

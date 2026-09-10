@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import concurrent.futures
 import hashlib
 import json
@@ -91,11 +92,11 @@ PROJECT_PROCESSING_PLANNER_HANDLER = (
 )
 TOPIC_NORMALIZATION_HANDLER = (
     "watchcraft.normalize.collection-topics",
-    "1",
+    "2",
 )
 COLLECTION_COMPILATION_HANDLER = (
     "watchcraft.compile.video-collection",
-    "2",
+    "3",
 )
 PYTHON_EXECUTION_PROFILE = ("python-portable", "1")
 PYTHON_EXECUTION_WORKFLOW = "authoring-worker.yml"
@@ -1190,6 +1191,94 @@ def collection_terminology_resolution(
     return result
 
 
+def automatic_terminology_replacements(
+    resolution: dict[str, Any],
+) -> list[dict[str, str]]:
+    replacements: dict[str, dict[str, str]] = {}
+    for item in resolution.get("resolutions", []):
+        if not isinstance(item, dict) or item.get("disposition") != "automatic-safe":
+            continue
+        replacement = item.get("display_label")
+        resolution_id = item.get("resolution_id")
+        if not isinstance(replacement, str) or not isinstance(resolution_id, str):
+            raise ValueError("Automatic terminology resolution is invalid")
+        for observed in item.get("observed_forms", []):
+            if not isinstance(observed, str) or not observed:
+                raise ValueError("Automatic terminology resolution has an invalid form")
+            existing = replacements.get(observed)
+            candidate = {
+                "observed_form": observed,
+                "replacement": replacement,
+                "resolution_id": resolution_id,
+            }
+            if existing is not None and existing != candidate:
+                raise ValueError(
+                    f"Conflicting automatic terminology resolutions for {observed!r}"
+                )
+            replacements[observed] = candidate
+    return sorted(
+        replacements.values(),
+        key=lambda item: (-len(item["observed_form"]), item["observed_form"]),
+    )
+
+
+def apply_automatic_terminology(
+    analysis: dict[str, Any], resolution: dict[str, Any]
+) -> tuple[dict[str, Any], list[str]]:
+    replacements = automatic_terminology_replacements(resolution)
+    applied: set[str] = set()
+    replacement_by_form = {
+        replacement["observed_form"]: replacement for replacement in replacements
+    }
+    pattern = (
+        re.compile(
+            r"(?<![A-Za-z0-9])(?:"
+            + "|".join(
+                re.escape(replacement["observed_form"])
+                for replacement in replacements
+            )
+            + r")(?![A-Za-z0-9])"
+        )
+        if replacements
+        else None
+    )
+
+    def replace_text(value: str) -> str:
+        if pattern is None:
+            return value
+
+        def replace_match(match: re.Match[str]) -> str:
+            replacement = replacement_by_form[match.group(0)]
+            applied.add(replacement["resolution_id"])
+            return replacement["replacement"]
+
+        return pattern.sub(replace_match, value)
+
+    def replace_value(value: Any) -> Any:
+        if isinstance(value, str):
+            return replace_text(value)
+        if isinstance(value, list):
+            return [replace_value(item) for item in value]
+        if isinstance(value, dict):
+            return {key: replace_value(item) for key, item in value.items()}
+        return value
+
+    derived = copy.deepcopy(analysis)
+    for field in ("summary", "topics", "sections", "featured_techniques"):
+        if field in derived:
+            derived[field] = replace_value(derived[field])
+    if applied:
+        provenance = derived.get("provenance")
+        if not isinstance(provenance, dict):
+            raise ValueError("Analysis provenance is invalid")
+        provenance["terminology_resolution"] = {
+            "job_id": resolution["provenance"]["job_id"],
+            "source_hash": resolution["source_hash"],
+            "resolution_ids": sorted(applied),
+        }
+    return derived, sorted(applied)
+
+
 def collection_topic_normalization(
     job: dict[str, Any], context: WorkerContext | None = None
 ) -> dict[str, Any]:
@@ -1211,6 +1300,7 @@ def collection_topic_normalization(
         "project_revision",
         "prompt_version",
         "retries",
+        "terminology_sha256",
         "timeout_seconds",
     }
     if not isinstance(configuration, dict) or set(configuration) != expected_keys:
@@ -1234,17 +1324,52 @@ def collection_topic_normalization(
         not isinstance(analysis_bindings, list)
         or not analysis_bindings
         or not isinstance(dependencies, list)
-        or len(dependencies) != len(analysis_bindings)
+        or len(dependencies) != len(analysis_bindings) + 1
     ):
         raise NormalizationDependencyError(
-            "Collection topic normalization requires one analysis for every planned item"
+            "Collection topic normalization requires every analysis and terminology resolution"
         )
 
     store = context.artifact_store()
     analyses = []
     dependency_started_at = time.monotonic()
+    analysis_dependencies = dependencies[:-1]
+    terminology_reference = validated_artifact_reference(dependencies[-1])
+    if (
+        terminology_reference.get("artifact_kind") != "terminology-resolution"
+        or terminology_reference.get("schema") != TERMINOLOGY_RESOLUTION_SCHEMA
+        or terminology_reference.get("digest") != configuration["terminology_sha256"]
+    ):
+        raise NormalizationDependencyError(
+            "Collection topic normalization has invalid terminology resolution"
+        )
+    try:
+        terminology = json.loads(
+            store.get_bytes(terminology_reference).decode("utf-8")
+        )
+    except Exception as error:
+        failure = NormalizationDependencyError(
+            "Could not retrieve terminology-resolution dependency"
+        )
+        failure.classification = "analysis_dependency_unavailable"
+        failure.retryable = True
+        raise failure from error
+    validate_json_schema(
+        terminology, TERMINOLOGY_RESOLUTION_SCHEMA_PATH, "Terminology resolution"
+    )
+    if (
+        terminology.get("project", {}).get("project_id")
+        != configuration["project_id"]
+        or terminology.get("project", {}).get("revision")
+        != configuration["project_revision"]
+        or terminology.get("provenance", {}).get("plan_artifact_sha256")
+        != configuration["plan_artifact_sha256"]
+    ):
+        raise NormalizationDependencyError(
+            "Terminology resolution does not match the normalization project"
+        )
     for index, (binding, dependency) in enumerate(
-        zip(analysis_bindings, dependencies), start=1
+        zip(analysis_bindings, analysis_dependencies), start=1
     ):
         reference = validated_artifact_reference(dependency)
         if (
@@ -1261,7 +1386,7 @@ def collection_topic_normalization(
         context.report_progress(
             phase="fetching-analyses",
             completed=index - 1,
-            total=len(dependencies),
+            total=len(analysis_dependencies),
             unit="analyses",
             current=binding["item_id"],
         )
@@ -1287,7 +1412,8 @@ def collection_topic_normalization(
             raise NormalizationDependencyError(
                 f"Analysis dependency for {binding['item_id']} is invalid"
             )
-        analyses.append(analysis)
+        derived, _ = apply_automatic_terminology(analysis, terminology)
+        analyses.append(derived)
     dependency_ms = elapsed_milliseconds(dependency_started_at)
     context.report_progress(
         phase="normalizing-topics",
@@ -1362,9 +1488,10 @@ def collection_topic_normalization(
         "plan_hash": configuration["plan_hash"],
         "logical_task_id": configuration["logical_task_id"],
         "project_revision": configuration["project_revision"],
+        "terminology": terminology_reference,
         "analyses": [
             {**binding, "artifact": dependency}
-            for binding, dependency in zip(analysis_bindings, dependencies)
+            for binding, dependency in zip(analysis_bindings, analysis_dependencies)
         ],
         "timing": {
             "dependency_fetch_ms": dependency_ms,
@@ -1422,10 +1549,10 @@ def compile_video_collection(
         or not isinstance(dependencies, list)
         or not isinstance(bindings, list)
         or not bindings
-        or len(dependencies) != len(bindings) * 2 + 1
+        or len(dependencies) != len(bindings) * 2 + 2
     ):
         raise CompilationDependencyError(
-            "Collection compilation requires its plan, snapshot, transcripts, analyses, and normalization"
+            "Collection compilation requires its plan, snapshot, transcripts, analyses, terminology, and normalization"
         )
     plan_reference = validated_artifact_reference(inputs[0])
     snapshot_reference = validated_artifact_reference(inputs[1])
@@ -1439,9 +1566,12 @@ def compile_video_collection(
 
     transcript_references = dependencies[:len(bindings)]
     analysis_references = dependencies[len(bindings):len(bindings) * 2]
+    terminology_reference = validated_artifact_reference(dependencies[-2])
     normalization_reference = validated_artifact_reference(dependencies[-1])
     if (
-        normalization_reference.get("artifact_kind") != "topic-normalization"
+        terminology_reference.get("artifact_kind") != "terminology-resolution"
+        or terminology_reference.get("schema") != TERMINOLOGY_RESOLUTION_SCHEMA
+        or normalization_reference.get("artifact_kind") != "topic-normalization"
         or normalization_reference.get("schema") != TOPIC_NORMALIZATION_SCHEMA
     ):
         raise CompilationDependencyError("Collection compilation has invalid normalization")
@@ -1450,6 +1580,9 @@ def compile_video_collection(
     try:
         plan = json.loads(store.get_bytes(plan_reference).decode("utf-8"))
         snapshot = json.loads(store.get_bytes(snapshot_reference).decode("utf-8"))
+        terminology = json.loads(
+            store.get_bytes(terminology_reference).decode("utf-8")
+        )
         normalization = json.loads(
             store.get_bytes(normalization_reference).decode("utf-8")
         )
@@ -1461,6 +1594,9 @@ def compile_video_collection(
     validate_json_schema(
         snapshot, ITERATOR_SNAPSHOT_SCHEMA_PATH, "Collection iterator snapshot"
     )
+    validate_json_schema(
+        terminology, TERMINOLOGY_RESOLUTION_SCHEMA_PATH, "Terminology resolution"
+    )
     if (
         plan.get("project") != {
             "project_id": project["project_id"],
@@ -1471,11 +1607,20 @@ def compile_video_collection(
         or snapshot.get("project", {}).get("project_id") != project["project_id"]
         or snapshot.get("project", {}).get("revision", project["revision"])
         > project["revision"]
+        or terminology.get("project") != {
+            "project_id": project["project_id"],
+            "revision": project["revision"],
+            "metadata": project.get("metadata", {}),
+        }
+        or terminology.get("provenance", {}).get("plan_artifact_sha256")
+        != plan_reference["digest"]
         or normalization.get("kind") != "watchcraft.topic-normalization"
         or normalization.get("status") != "complete"
         or normalization.get("collection_id") != project["project_id"]
         or normalization.get("provenance", {}).get("plan_artifact_sha256")
         != plan_reference["digest"]
+        or normalization.get("provenance", {}).get("terminology")
+        != terminology_reference
     ):
         raise CompilationDependencyError(
             "Compilation inputs do not describe the same authoritative project revision"
@@ -1525,11 +1670,25 @@ def compile_video_collection(
             raise CompilationDependencyError(
                 f"Compilation resources for {binding['item_id']} do not match"
             )
+        try:
+            derived_analysis, applied_resolution_ids = apply_automatic_terminology(
+                analysis, terminology
+            )
+            derived_reference = store.put_json(
+                derived_analysis,
+                {"artifact_kind": "analysis", "schema": VIDEO_ANALYSIS_SCHEMA},
+            )
+        except Exception as error:
+            raise CompilationDependencyError(
+                f"Could not derive terminology-safe analysis for {binding['item_id']}"
+            ) from error
         transcripts.append(transcript)
-        analyses.append(analysis)
+        analyses.append(derived_analysis)
         resources.append({
             "path": f"analysis/{Path(binding['video']).stem}.analysis.json",
-            "artifact": analysis_reference,
+            "artifact": derived_reference,
+            "source_artifact": analysis_reference,
+            "applied_resolution_ids": applied_resolution_ids,
         })
 
     snapshot_items = {item["item_id"]: item for item in snapshot["items"]}
@@ -1623,6 +1782,7 @@ def compile_video_collection(
             "plan_job_id": configuration["plan_job_id"],
             "plan": plan_reference,
             "snapshot": snapshot_reference,
+            "terminology": terminology_reference,
             "normalization": normalization_reference,
             "items": [
                 {
@@ -1884,6 +2044,10 @@ LOCAL_HANDLER_CONTRACTS: dict[tuple[str, str], dict[str, Any]] = {
                 "schema": VIDEO_ANALYSIS_SCHEMA,
                 "cardinality": {"minimum": 1, "maximum": 10_000},
             },
+            {
+                "artifact_kind": "terminology-resolution",
+                "schema": TERMINOLOGY_RESOLUTION_SCHEMA,
+            },
         ],
         "output": {
             "artifact_kind": "topic-normalization",
@@ -1928,6 +2092,10 @@ LOCAL_HANDLER_CONTRACTS: dict[tuple[str, str], dict[str, Any]] = {
                 "artifact_kind": "analysis",
                 "schema": VIDEO_ANALYSIS_SCHEMA,
                 "cardinality": {"minimum": 1, "maximum": 10_000},
+            },
+            {
+                "artifact_kind": "terminology-resolution",
+                "schema": TERMINOLOGY_RESOLUTION_SCHEMA,
             },
             {
                 "artifact_kind": "topic-normalization",
@@ -4605,6 +4773,7 @@ def project_topic_normalization_spec(
     plan: dict[str, Any],
     dependencies: list[dict[str, Any]],
     bindings: list[dict[str, Any]],
+    terminology_reference: dict[str, Any],
 ) -> dict[str, Any]:
     if len(dependencies) != len(bindings) or not dependencies:
         raise ValueError("Topic normalization requires a complete non-empty analysis set")
@@ -4620,13 +4789,14 @@ def project_topic_normalization_spec(
             "media_asset_id": f"catalog-project:{plan['project']['project_id']}"
         },
         "inputs": [],
-        "dependencies": dependencies,
+        "dependencies": [*dependencies, terminology_reference],
         "configuration": {
             "project_id": plan["project"]["project_id"],
             "project_revision": plan["project"]["revision"],
             "plan_job_id": plan_job_id,
             "plan_artifact_sha256": plan_reference["digest"],
             "plan_hash": plan["plan_hash"],
+            "terminology_sha256": terminology_reference["digest"],
             "logical_task_id": plan["collection_tasks"][0]["task_id"],
             "model": TOPIC_NORMALIZATION_MODEL,
             "prompt_version": TOPIC_NORMALIZATION_PROMPT_VERSION,
@@ -4738,6 +4908,51 @@ def previous_terminology_checkpoint(
     ):
         raise RuntimeError("Previous terminology checkpoint has the wrong artifact contract")
     return checkpoint["sequence"], reference
+
+
+def completed_project_terminology_resolution(
+    control: AuthoringHttpClient,
+    *,
+    plan_job_id: str,
+    plan: dict[str, Any],
+    plan_reference: dict[str, Any],
+) -> dict[str, Any]:
+    project_id = plan["project"]["project_id"]
+    project_item_id = f"catalog-project:{project_id}"
+    job_id = stable_project_execution_id(
+        plan_reference["digest"],
+        project_item_id,
+        versioned_handler_execution_role(
+            "terminology-resolution", TERMINOLOGY_RESOLUTION_HANDLER
+        ),
+    )
+    submission = control.post("/submissions/get", {"job_id": job_id})
+    job = submission.get("job")
+    run = submission.get("run")
+    request = run.get("request") if isinstance(run, dict) else None
+    if (
+        not isinstance(job, dict)
+        or job.get("state") != "succeeded"
+        or job.get("spec", {}).get("handler")
+        != {
+            "id": TERMINOLOGY_RESOLUTION_HANDLER[0],
+            "version": TERMINOLOGY_RESOLUTION_HANDLER[1],
+        }
+        or not isinstance(request, dict)
+        or request.get("plan_job_id") != plan_job_id
+        or request.get("plan_artifact_sha256") != plan_reference["digest"]
+        or request.get("project_id") != project_id
+    ):
+        raise RuntimeError(
+            "The project plan has no successful bound terminology resolution"
+        )
+    reference = validated_artifact_reference(job.get("result"))
+    if (
+        reference.get("artifact_kind") != "terminology-resolution"
+        or reference.get("schema") != TERMINOLOGY_RESOLUTION_SCHEMA
+    ):
+        raise RuntimeError("The project terminology-resolution artifact is invalid")
+    return reference
 
 
 def completed_project_analysis_set(
@@ -4873,6 +5088,7 @@ def completed_project_compilation_inputs(
     list[dict[str, Any]],
     list[dict[str, Any]],
     dict[str, Any],
+    dict[str, Any],
 ]:
     analysis_references, analysis_bindings, _ = completed_project_analysis_set(
         control,
@@ -4927,8 +5143,18 @@ def completed_project_compilation_inputs(
         })
 
     project_item_id = f"catalog-project:{plan['project']['project_id']}"
+    terminology_reference = completed_project_terminology_resolution(
+        control,
+        plan_job_id=plan_job_id,
+        plan=plan,
+        plan_reference=plan_reference,
+    )
     normalization_job_id = stable_project_execution_id(
-        plan_reference["digest"], project_item_id, "topic-normalization"
+        plan_reference["digest"],
+        project_item_id,
+        versioned_handler_execution_role(
+            "topic-normalization", TOPIC_NORMALIZATION_HANDLER
+        ),
     )
     normalization_submission = control.post(
         "/submissions/get", {"job_id": normalization_job_id}
@@ -4951,6 +5177,8 @@ def completed_project_compilation_inputs(
         or normalization_request.get("plan_job_id") != plan_job_id
         or normalization_request.get("plan_artifact_sha256")
         != plan_reference["digest"]
+        or normalization_request.get("terminology_sha256")
+        != terminology_reference["digest"]
     ):
         raise RuntimeError("The project plan has no successful bound topic normalization")
     normalization_reference = validated_artifact_reference(
@@ -4965,6 +5193,7 @@ def completed_project_compilation_inputs(
         transcript_references,
         analysis_references,
         bindings,
+        terminology_reference,
         normalization_reference,
     )
 
@@ -4978,6 +5207,7 @@ def project_collection_compilation_spec(
     transcript_references: list[dict[str, Any]],
     analysis_references: list[dict[str, Any]],
     bindings: list[dict[str, Any]],
+    terminology_reference: dict[str, Any],
     normalization_reference: dict[str, Any],
 ) -> dict[str, Any]:
     if (
@@ -4999,6 +5229,7 @@ def project_collection_compilation_spec(
         "dependencies": [
             *transcript_references,
             *analysis_references,
+            terminology_reference,
             normalization_reference,
         ],
         "configuration": {
@@ -5388,22 +5619,41 @@ def run_normalize_project(args: argparse.Namespace) -> int:
         plan=plan,
         plan_reference=plan_reference,
     )
+    terminology_reference = completed_project_terminology_resolution(
+        control,
+        plan_job_id=args.plan_job_id,
+        plan=plan,
+        plan_reference=plan_reference,
+    )
     spec = project_topic_normalization_spec(
         plan_job_id=args.plan_job_id,
         plan_reference=plan_reference,
         plan=plan,
         dependencies=dependencies,
         bindings=bindings,
+        terminology_reference=terminology_reference,
     )
     project_item_id = f"catalog-project:{plan['project']['project_id']}"
     run_id = stable_project_execution_id(
-        plan_reference["digest"], project_item_id, "topic-normalization-run"
+        plan_reference["digest"],
+        project_item_id,
+        versioned_handler_execution_role(
+            "topic-normalization-run", TOPIC_NORMALIZATION_HANDLER
+        ),
     )
     job_id = stable_project_execution_id(
-        plan_reference["digest"], project_item_id, "topic-normalization"
+        plan_reference["digest"],
+        project_item_id,
+        versioned_handler_execution_role(
+            "topic-normalization", TOPIC_NORMALIZATION_HANDLER
+        ),
     )
     command_prefix = stable_project_execution_id(
-        plan_reference["digest"], project_item_id, "topic-normalization-commands"
+        plan_reference["digest"],
+        project_item_id,
+        versioned_handler_execution_role(
+            "topic-normalization-commands", TOPIC_NORMALIZATION_HANDLER
+        ),
     )
     request = {
         "kind": "project-topic-normalization",
@@ -5413,7 +5663,12 @@ def run_normalize_project(args: argparse.Namespace) -> int:
         "project_id": plan["project"]["project_id"],
         "project_revision": plan["project"]["revision"],
         "analysis_job_ids": analysis_job_ids,
+        "terminology_sha256": terminology_reference["digest"],
         "logical_task_id": plan["collection_tasks"][0]["task_id"],
+        "handler": {
+            "id": TOPIC_NORMALIZATION_HANDLER[0],
+            "version": TOPIC_NORMALIZATION_HANDLER[1],
+        },
     }
     existing = control.post("/pipelines/get", {"run_id": run_id})
     if existing.get("run") is None:
@@ -5469,6 +5724,7 @@ def run_normalize_project(args: argparse.Namespace) -> int:
         or not isinstance(provenance, dict)
         or provenance.get("handler_id") != TOPIC_NORMALIZATION_HANDLER[0]
         or provenance.get("plan_artifact_sha256") != plan_reference["digest"]
+        or provenance.get("terminology") != terminology_reference
         or len(provenance.get("analyses", [])) != len(bindings)
     ):
         raise RuntimeError("Project topic normalization returned an invalid result")
@@ -5809,6 +6065,7 @@ def run_compile_project(args: argparse.Namespace) -> int:
         transcript_references,
         analysis_references,
         bindings,
+        terminology_reference,
         normalization_reference,
     ) = completed_project_compilation_inputs(
         control,
@@ -5824,6 +6081,7 @@ def run_compile_project(args: argparse.Namespace) -> int:
         transcript_references=transcript_references,
         analysis_references=analysis_references,
         bindings=bindings,
+        terminology_reference=terminology_reference,
         normalization_reference=normalization_reference,
     )
     project_item_id = f"catalog-project:{project['project_id']}"
@@ -5919,6 +6177,7 @@ def run_compile_project(args: argparse.Namespace) -> int:
         or not isinstance(provenance, dict)
         or provenance.get("handler_id") != COLLECTION_COMPILATION_HANDLER[0]
         or provenance.get("plan") != plan_reference
+        or provenance.get("terminology") != terminology_reference
         or provenance.get("normalization") != normalization_reference
     ):
         raise RuntimeError("Collection compilation returned an invalid result")
