@@ -585,6 +585,8 @@ deterministically reduced into one immutable
 `watchcraft.terminology-resolution@1` artifact. Proposals that make no effective change are
 discarded. High-confidence spelling and presentation changes without alternatives are marked
 `automatic-safe`, but changes that add or remove lexical components cannot be automatic.
+Spelling-equivalent alternatives such as `i hat`, `i_hat`, and `i-hat` are collapsed before
+assigning that disposition.
 Semantic corrections and possible acoustic confusions are reported as `needs-review`. It never
 mutates a transcript or analysis. Applying accepted resolutions and selectively refining
 affected analyses is a separate later transition.
@@ -597,9 +599,10 @@ idempotency.
 When a handler revision fixes only terminal validation or worker packaging after mapper batches
 have completed, the CLI may import the previous revision's latest compatible checkpoint as an
 explicit content-addressed input. The new job validates its source and batch-plan hashes before
-reuse; an incompatible checkpoint fails closed.
+reuse and rebinds the validated checkpoint to its own attempt so another compatible handler
+revision can inherit it. An incompatible checkpoint fails closed.
 
-Terminology resolution adds capability registry `2026-09-10.3`. Commit and push the OpenAI
+Terminology resolution adds capability registry `2026-09-10.4`. Commit and push the OpenAI
 worker code, then publish and activate the checked-in registry before running the command.
 It requires no Convex deployment.
 

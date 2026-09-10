@@ -47,7 +47,7 @@ class TerminologyResolutionTests(unittest.TestCase):
                     "confidence": 0.99,
                     "rationale": "The underscore is a transcription spelling.",
                     "evidence": ["topic:i_hat"],
-                    "alternatives": [],
+                    "alternatives": [{"term": "i hat", "confidence": 0.2}],
                 },
                 {
                     "observed_forms": ["j_hat"],
@@ -92,6 +92,7 @@ class TerminologyResolutionTests(unittest.TestCase):
         )
         by_term = {item["canonical_term"]: item for item in result["resolutions"]}
         self.assertEqual(by_term["i-hat"]["disposition"], "automatic-safe")
+        self.assertEqual(by_term["i-hat"]["alternatives"], [])
         self.assertEqual(by_term["j-hat"]["disposition"], "needs-review")
         self.assertEqual(by_term["j-hat"]["alternatives"][0]["term"], "y-hat")
 
@@ -347,6 +348,7 @@ class TerminologyResolutionTests(unittest.TestCase):
                 "resolution_id": "second",
                 "observed_forms": ["i hat"],
                 "affected_items": ["youtube:second"],
+                "alternatives": [{"term": "i_hat", "confidence": 0.2}],
             },
         ])
 
@@ -426,6 +428,57 @@ class TerminologyResolutionTests(unittest.TestCase):
 
         self.assertEqual(resumed, first)
         self.assertEqual(resumed_client.responses.parse.call_count, 1)
+
+    def test_completed_imported_checkpoint_is_rebound_without_model_calls(self):
+        project = {
+            "project_id": "linear-algebra",
+            "revision": 2,
+            "metadata": {"title": "Linear algebra"},
+        }
+        records = [{
+            "item_id": "youtube:lesson",
+            "source_title": "Basis vectors",
+            "transcript": {"segments": []},
+            "analysis": {
+                "title": "Basis vectors",
+                "summary": "Basis vectors use i-hat.",
+                "topics": ["i_hat"],
+                "sections": [],
+            },
+        }]
+        payload = resolve_terminology.corpus_observations(project, records)
+        batches = resolve_terminology.resolution_batches(
+            payload, maximum_terms=1, maximum_chars=60_000
+        )
+        checkpoint = {
+            "kind": "watchcraft.terminology-resolution-checkpoint",
+            "schema_version": 1,
+            "source_hash": resolve_terminology.source_hash(payload),
+            "batch_plan_hash": resolve_terminology.batch_plan_hash(batches),
+            "batches": 1,
+            "next_batch": 1,
+            "mapped_resolutions": [],
+        }
+        rebound = []
+        client = Mock()
+
+        result = resolve_terminology.infer_terminology_resolution(
+            project=project,
+            records=records,
+            client=client,
+            model="test-model",
+            retries=0,
+            batch_max_terms=1,
+            batch_max_chars=60_000,
+            resume_checkpoint=checkpoint,
+            save_checkpoint=lambda value, *progress: rebound.append((value, progress)),
+        )
+
+        client.responses.parse.assert_not_called()
+        self.assertEqual(result["resolutions"], [])
+        self.assertEqual(len(rebound), 1)
+        self.assertEqual(rebound[0][0], checkpoint)
+        self.assertEqual(rebound[0][1], (1, 1, 1, "batch 1"))
 
     def test_permanent_provider_request_is_not_retried(self):
         class BadRequest(Exception):

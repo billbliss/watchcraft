@@ -62,11 +62,11 @@ EDUCATIONAL_VIDEO_ANALYSIS_HANDLER = (
 )
 TERMINOLOGY_RESOLUTION_HANDLER = (
     "watchcraft.resolve.collection-terminology",
-    "6",
+    "7",
 )
 PREVIOUS_TERMINOLOGY_RESOLUTION_HANDLER = (
     "watchcraft.resolve.collection-terminology",
-    "5",
+    "6",
 )
 TRANSCRIPTION_SMOKE_HANDLER = ("watchcraft.transcript.mlx-whisper-smoke", "1")
 HTTP_TRANSCRIPTION_SMOKE_HANDLER = (

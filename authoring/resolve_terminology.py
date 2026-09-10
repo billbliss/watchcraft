@@ -107,6 +107,38 @@ def _preserves_lexical_shape(
     )
 
 
+def _normalized_alternatives(
+    alternatives: list[Any], canonical_term: str
+) -> list[dict[str, Any]]:
+    canonical_components = _lexical_components(canonical_term)
+    by_term: dict[str, dict[str, Any]] = {}
+    for alternative in alternatives:
+        raw_term = (
+            alternative.term
+            if isinstance(alternative, Alternative)
+            else alternative.get("term") if isinstance(alternative, dict) else None
+        )
+        raw_confidence = (
+            alternative.confidence
+            if isinstance(alternative, Alternative)
+            else alternative.get("confidence") if isinstance(alternative, dict) else None
+        )
+        if not isinstance(raw_term, str):
+            continue
+        term = " ".join(raw_term.split())
+        if not term or _lexical_components(term) == canonical_components:
+            continue
+        try:
+            confidence = round(max(0.0, min(1.0, float(raw_confidence))), 3)
+        except (TypeError, ValueError):
+            continue
+        key = term.casefold()
+        existing = by_term.get(key)
+        if existing is None or confidence > existing["confidence"]:
+            by_term[key] = {"term": term, "confidence": confidence}
+    return [alternative for _, alternative in sorted(by_term.items())]
+
+
 def transcript_evidence(
     transcript: dict[str, Any], terms: list[str], *, maximum: int = 20
 ) -> list[dict[str, Any]]:
@@ -385,10 +417,11 @@ def normalize_resolutions(
             if allowed_forms is None:
                 raise ValueError("Terminology resolution has an empty rationale")
             continue
+        alternatives = _normalized_alternatives(proposed.alternatives, canonical)
         automatic = (
             proposed.classification == "orthographic-normalization"
             and confidence >= 0.9
-            and not proposed.alternatives
+            and not alternatives
             and _preserves_lexical_shape(matched, canonical)
         )
         results.append({
@@ -401,16 +434,7 @@ def normalize_resolutions(
             "rationale": rationale,
             "affected_items": affected,
             "evidence": _clean_strings(proposed.evidence),
-            "alternatives": [
-                {
-                    "term": " ".join(alternative.term.split()),
-                    "confidence": round(
-                        max(0.0, min(1.0, float(alternative.confidence))), 3
-                    ),
-                }
-                for alternative in proposed.alternatives
-                if alternative.term.strip()
-            ],
+            "alternatives": alternatives,
             "disposition": "automatic-safe" if automatic else "needs-review",
         })
     return sorted(results, key=lambda item: item["resolution_id"])
@@ -429,17 +453,14 @@ def merge_resolutions(resolutions: list[dict[str, Any]]) -> list[dict[str, Any]]
         forms = _clean_strings([
             form for resolution in group for form in resolution["observed_forms"]
         ])
-        alternatives_by_term: dict[str, dict[str, Any]] = {}
-        for resolution in group:
-            for alternative in resolution["alternatives"]:
-                term = " ".join(alternative["term"].split())
-                key = term.casefold()
-                existing = alternatives_by_term.get(key)
-                if existing is None or alternative["confidence"] > existing["confidence"]:
-                    alternatives_by_term[key] = {
-                        "term": term,
-                        "confidence": alternative["confidence"],
-                    }
+        alternatives = _normalized_alternatives(
+            [
+                alternative
+                for resolution in group
+                for alternative in resolution["alternatives"]
+            ],
+            first["canonical_term"],
+        )
         confidence = min(resolution["confidence"] for resolution in group)
         if _is_identity_resolution(
             forms, first["canonical_term"], first["display_label"]
@@ -453,7 +474,7 @@ def merge_resolutions(resolutions: list[dict[str, Any]]) -> list[dict[str, Any]]
         automatic = (
             first["classification"] == "orthographic-normalization"
             and confidence >= 0.9
-            and not alternatives_by_term
+            and not alternatives
             and _preserves_lexical_shape(forms, first["canonical_term"])
         )
         merged.append({
@@ -478,10 +499,7 @@ def merge_resolutions(resolutions: list[dict[str, Any]]) -> list[dict[str, Any]]
                 for resolution in group
                 for evidence in resolution["evidence"]
             ]),
-            "alternatives": [
-                alternative
-                for _, alternative in sorted(alternatives_by_term.items())
-            ],
+            "alternatives": alternatives,
             "disposition": "automatic-safe" if automatic else "needs-review",
         })
     return sorted(merged, key=lambda item: item["resolution_id"])
@@ -572,6 +590,22 @@ def infer_terminology_resolution(
         expected_batch_plan_hash=plan_hash,
         expected_batches=len(batches),
     )
+    if resume_checkpoint is not None and start_batch > 0 and save_checkpoint is not None:
+        save_checkpoint(
+            {
+                "kind": "watchcraft.terminology-resolution-checkpoint",
+                "schema_version": 1,
+                "source_hash": payload_source_hash,
+                "batch_plan_hash": plan_hash,
+                "batches": len(batches),
+                "next_batch": start_batch,
+                "mapped_resolutions": mapped,
+            },
+            start_batch,
+            start_batch,
+            len(batches),
+            f"batch {start_batch}",
+        )
     for index, batch in enumerate(batches[start_batch:], start=start_batch):
         if report_progress is not None:
             report_progress(index, len(batches), f"batch {index + 1}")
