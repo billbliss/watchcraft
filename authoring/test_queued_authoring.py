@@ -30,7 +30,7 @@ def registry_snapshot(
 ):
     if terminology_resolution:
         return {
-            "registry_version": "2026-09-10.2",
+            "registry_version": "2026-09-10.3",
             "registry_sha256": "c" * 64,
             "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
                 queued_authoring.TERMINOLOGY_RESOLUTION_HANDLER
@@ -1225,6 +1225,69 @@ class QueuedAuthoringTests(unittest.TestCase):
 
         self.assertEqual(checkpoint, (27, checkpoint_reference))
         self.assertEqual(control.post.call_args.args[0], "/pipelines/get")
+
+    def test_terminology_resolution_summary_includes_local_ledger_and_worker_timing(self):
+        artifact = transcript_reference()
+        completed = {
+            "job": {
+                "job_id": "terminology-job",
+                "state": "succeeded",
+                "created_at": 1_000,
+                "updated_at": 6_000,
+                "result": artifact,
+                "dispatch": {"requested_at": 2_000},
+                "attempts": [{
+                    "state": "succeeded",
+                    "started_at": 3_000,
+                    "updated_at": 5_500,
+                }],
+            },
+            "run": {"run_id": "terminology-run"},
+        }
+        resolution = {
+            "project": {"project_id": "linear-algebra", "revision": 2},
+            "stats": {"observed_terms": 2, "proposed_changes": 2},
+            "resolutions": [
+                {
+                    "observed_forms": ["i_hat"],
+                    "canonical_term": "i-hat",
+                    "display_label": "i-hat",
+                    "confidence": 0.99,
+                    "disposition": "automatic-safe",
+                },
+                {
+                    "observed_forms": ["j_hat"],
+                    "canonical_term": "j-hat",
+                    "display_label": "j-hat",
+                    "confidence": 0.75,
+                    "disposition": "needs-review",
+                    "alternatives": ["y-hat"],
+                    "affected_items": ["youtube:lesson"],
+                    "rationale": "The audio is ambiguous.",
+                },
+            ],
+            "provenance": {
+                "timing": {
+                    "dependency_fetch_ms": 100,
+                    "resolution_ms": 4_000,
+                    "handler_ms": 4_200,
+                }
+            },
+        }
+
+        summary = queued_authoring.compact_terminology_resolution_result(
+            completed,
+            resolution,
+            local_timing={"command_total_ms": 5_500},
+        )
+
+        self.assertEqual(summary["job_id"], "terminology-job")
+        self.assertEqual(summary["run_id"], "terminology-run")
+        self.assertEqual(summary["automatic_safe"][0]["canonical_term"], "i-hat")
+        self.assertEqual(summary["needs_review"][0]["alternatives"], ["y-hat"])
+        self.assertEqual(summary["timing"]["local"]["command_total_ms"], 5_500)
+        self.assertEqual(summary["timing"]["ledger"]["worker_attempt_ms"], 2_500)
+        self.assertEqual(summary["timing"]["worker"]["resolution_ms"], 4_000)
 
     def test_mlx_smoke_transcribes_a_temporary_generated_audio_fixture(self):
         transcription_smoke_spec = queued_authoring.transcription_smoke_spec(

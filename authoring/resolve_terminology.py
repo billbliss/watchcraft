@@ -85,6 +85,28 @@ def _tokens(value: str) -> set[str]:
     return set(re.findall(r"[a-z0-9]+", value.casefold().replace("_", " ")))
 
 
+def _lexical_components(value: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", value.casefold().replace("_", " "))
+
+
+def _is_identity_resolution(
+    observed_forms: list[str], canonical_term: str, display_label: str
+) -> bool:
+    return bool(observed_forms) and all(
+        form == canonical_term == display_label for form in observed_forms
+    )
+
+
+def _preserves_lexical_shape(
+    observed_forms: list[str], canonical_term: str
+) -> bool:
+    canonical_components = _lexical_components(canonical_term)
+    return bool(canonical_components) and all(
+        len(_lexical_components(form)) == len(canonical_components)
+        for form in observed_forms
+    )
+
+
 def transcript_evidence(
     transcript: dict[str, Any], terms: list[str], *, maximum: int = 20
 ) -> list[dict[str, Any]]:
@@ -346,6 +368,8 @@ def normalize_resolutions(
             if allowed_forms is None:
                 raise ValueError("Terminology resolution has an empty canonical term")
             continue
+        if _is_identity_resolution(matched, canonical, display):
+            continue
         identity = json.dumps(
             [sorted(form.casefold() for form in matched), canonical.casefold()],
             ensure_ascii=False,
@@ -365,6 +389,7 @@ def normalize_resolutions(
             proposed.classification == "orthographic-normalization"
             and confidence >= 0.9
             and not proposed.alternatives
+            and _preserves_lexical_shape(matched, canonical)
         )
         results.append({
             "resolution_id": resolution_id,
@@ -416,6 +441,10 @@ def merge_resolutions(resolutions: list[dict[str, Any]]) -> list[dict[str, Any]]
                         "confidence": alternative["confidence"],
                     }
         confidence = min(resolution["confidence"] for resolution in group)
+        if _is_identity_resolution(
+            forms, first["canonical_term"], first["display_label"]
+        ):
+            continue
         identity = json.dumps(
             [sorted(form.casefold() for form in forms), first["canonical_term"].casefold()],
             ensure_ascii=False,
@@ -425,6 +454,7 @@ def merge_resolutions(resolutions: list[dict[str, Any]]) -> list[dict[str, Any]]
             first["classification"] == "orthographic-normalization"
             and confidence >= 0.9
             and not alternatives_by_term
+            and _preserves_lexical_shape(forms, first["canonical_term"])
         )
         merged.append({
             "resolution_id": "term-" + hashlib.sha256(

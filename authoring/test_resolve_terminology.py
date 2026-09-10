@@ -196,6 +196,67 @@ class TerminologyResolutionTests(unittest.TestCase):
 
         self.assertEqual(resolutions, [])
 
+    def test_mapper_discards_a_proposal_that_makes_no_effective_change(self):
+        payload = {
+            "observed_terms": [
+                {"term": "coordinate system", "item_ids": ["youtube:lesson"]},
+                {"term": "inverse matrix", "item_ids": ["youtube:lesson"]},
+            ],
+            "items": [{"item_id": "youtube:lesson"}],
+        }
+        generated = resolve_terminology.GeneratedTerminologyResolution(
+            resolutions=[
+                {
+                    "observed_forms": ["coordinate system"],
+                    "canonical_term": "coordinate system",
+                    "display_label": "coordinate system",
+                    "classification": "orthographic-normalization",
+                    "confidence": 0.99,
+                    "rationale": "No change is needed.",
+                    "evidence": [],
+                    "alternatives": [],
+                },
+                {
+                    "observed_forms": ["inverse matrix"],
+                    "canonical_term": "inverse matrix",
+                    "display_label": "Inverse Matrix",
+                    "classification": "orthographic-normalization",
+                    "confidence": 0.99,
+                    "rationale": "Use the configured display casing.",
+                    "evidence": [],
+                    "alternatives": [],
+                },
+            ]
+        )
+
+        resolutions = resolve_terminology.normalize_resolutions(generated, payload)
+
+        self.assertEqual(len(resolutions), 1)
+        self.assertEqual(resolutions[0]["canonical_term"], "inverse matrix")
+        self.assertEqual(resolutions[0]["display_label"], "Inverse Matrix")
+
+    def test_semantic_expansion_cannot_be_automatic_safe(self):
+        payload = {
+            "observed_terms": [{"term": "vectors", "item_ids": ["youtube:lesson"]}],
+            "items": [{"item_id": "youtube:lesson"}],
+        }
+        generated = resolve_terminology.GeneratedTerminologyResolution(
+            resolutions=[{
+                "observed_forms": ["vectors"],
+                "canonical_term": "vectors as ordered lists of numbers",
+                "display_label": "vectors as ordered lists of numbers",
+                "classification": "orthographic-normalization",
+                "confidence": 0.99,
+                "rationale": "Expand the term using collection context.",
+                "evidence": [],
+                "alternatives": [],
+            }]
+        )
+
+        resolutions = resolve_terminology.normalize_resolutions(generated, payload)
+
+        self.assertEqual(resolutions[0]["disposition"], "needs-review")
+
     def test_resolution_batches_are_deterministic_and_bounded(self):
         payload = {
             "project": {"project_id": "example", "revision": 1, "metadata": {}},
@@ -295,6 +356,23 @@ class TerminologyResolutionTests(unittest.TestCase):
             merged[0]["affected_items"], ["youtube:first", "youtube:second"]
         )
         self.assertEqual(merged[0]["disposition"], "automatic-safe")
+
+    def test_reducer_discards_identity_proposals_from_an_imported_checkpoint(self):
+        resolution = {
+            "resolution_id": "old-checkpoint-resolution",
+            "observed_forms": ["coordinate system"],
+            "canonical_term": "coordinate system",
+            "display_label": "coordinate system",
+            "classification": "orthographic-normalization",
+            "confidence": 0.99,
+            "rationale": "No change is needed.",
+            "affected_items": ["youtube:lesson"],
+            "evidence": [],
+            "alternatives": [],
+            "disposition": "automatic-safe",
+        }
+
+        self.assertEqual(resolve_terminology.merge_resolutions([resolution]), [])
 
     def test_resolution_resumes_after_the_last_completed_batch(self):
         project = {

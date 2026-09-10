@@ -62,11 +62,11 @@ EDUCATIONAL_VIDEO_ANALYSIS_HANDLER = (
 )
 TERMINOLOGY_RESOLUTION_HANDLER = (
     "watchcraft.resolve.collection-terminology",
-    "5",
+    "6",
 )
 PREVIOUS_TERMINOLOGY_RESOLUTION_HANDLER = (
     "watchcraft.resolve.collection-terminology",
-    "4",
+    "5",
 )
 TRANSCRIPTION_SMOKE_HANDLER = ("watchcraft.transcript.mlx-whisper-smoke", "1")
 HTTP_TRANSCRIPTION_SMOKE_HANDLER = (
@@ -3904,6 +3904,53 @@ def compact_analysis_result(
     }
 
 
+def compact_terminology_resolution_result(
+    completed: dict[str, Any],
+    result: dict[str, Any],
+    *,
+    local_timing: dict[str, int],
+) -> dict[str, Any]:
+    provenance = result.get("provenance")
+    worker_timing = (
+        provenance.get("timing") if isinstance(provenance, dict) else None
+    )
+    return {
+        "job_id": completed["job"]["job_id"],
+        "run_id": completed["run"]["run_id"],
+        "state": completed["job"]["state"],
+        "artifact": completed["job"]["result"],
+        "project": result["project"],
+        "stats": result["stats"],
+        "automatic_safe": [
+            {
+                "observed_forms": item["observed_forms"],
+                "canonical_term": item["canonical_term"],
+                "display_label": item["display_label"],
+                "confidence": item["confidence"],
+            }
+            for item in result["resolutions"]
+            if item["disposition"] == "automatic-safe"
+        ],
+        "needs_review": [
+            {
+                "observed_forms": item["observed_forms"],
+                "canonical_term": item["canonical_term"],
+                "alternatives": item["alternatives"],
+                "affected_items": item["affected_items"],
+                "confidence": item["confidence"],
+                "rationale": item["rationale"],
+            }
+            for item in result["resolutions"]
+            if item["disposition"] == "needs-review"
+        ],
+        "timing": {
+            "local": local_timing,
+            "ledger": completed_job_timing(completed["job"]),
+            "worker": worker_timing if isinstance(worker_timing, dict) else {},
+        },
+    }
+
+
 def staged_transcription_spec(
     *,
     source: dict[str, Any],
@@ -5280,41 +5327,11 @@ def run_resolve_project_terminology(args: argparse.Namespace) -> int:
         or provenance.get("plan_artifact_sha256") != plan_reference["digest"]
     ):
         raise RuntimeError("Terminology resolution returned an invalid project binding")
-    timing = completed_timing(completed["job"], completed.get("run"))
-    summary = {
-        "job_id": job_id,
-        "run_id": completed["run"]["run_id"],
-        "state": completed["job"]["state"],
-        "artifact": completed["job"]["result"],
-        "project": result["project"],
-        "stats": result["stats"],
-        "automatic_safe": [
-            {
-                "observed_forms": item["observed_forms"],
-                "canonical_term": item["canonical_term"],
-                "display_label": item["display_label"],
-                "confidence": item["confidence"],
-            }
-            for item in result["resolutions"]
-            if item["disposition"] == "automatic-safe"
-        ],
-        "needs_review": [
-            {
-                "observed_forms": item["observed_forms"],
-                "canonical_term": item["canonical_term"],
-                "alternatives": item["alternatives"],
-                "affected_items": item["affected_items"],
-                "confidence": item["confidence"],
-                "rationale": item["rationale"],
-            }
-            for item in result["resolutions"]
-            if item["disposition"] == "needs-review"
-        ],
-        "timing": {
-            **timing,
-            "local": {"command_total_ms": elapsed_milliseconds(command_started_at)},
-        },
-    }
+    summary = compact_terminology_resolution_result(
+        completed,
+        result,
+        local_timing={"command_total_ms": elapsed_milliseconds(command_started_at)},
+    )
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
     print(
         "Full resolution: ./authoring/watchcraft-author queue result "
