@@ -593,7 +593,12 @@ exact specification rather than retrying them as transient provider failures. Ba
 character bounds are material job configuration and therefore participate in approval and
 idempotency.
 
-Terminology resolution adds capability registry `2026-09-10.1`. Commit and push the OpenAI
+When a handler revision fixes only terminal validation or worker packaging after mapper batches
+have completed, the CLI may import the previous revision's latest compatible checkpoint as an
+explicit content-addressed input. The new job validates its source and batch-plan hashes before
+reuse; an incompatible checkpoint fails closed.
+
+Terminology resolution adds capability registry `2026-09-10.2`. Commit and push the OpenAI
 worker code, then publish and activate the checked-in registry before running the command.
 It requires no Convex deployment.
 

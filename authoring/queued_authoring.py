@@ -62,6 +62,10 @@ EDUCATIONAL_VIDEO_ANALYSIS_HANDLER = (
 )
 TERMINOLOGY_RESOLUTION_HANDLER = (
     "watchcraft.resolve.collection-terminology",
+    "5",
+)
+PREVIOUS_TERMINOLOGY_RESOLUTION_HANDLER = (
+    "watchcraft.resolve.collection-terminology",
     "4",
 )
 TRANSCRIPTION_SMOKE_HANDLER = ("watchcraft.transcript.mlx-whisper-smoke", "1")
@@ -760,6 +764,13 @@ class TerminologyProviderError(RuntimeError):
     retryable = True
 
 
+class WorkerDependencyError(RuntimeError):
+    """A worker deployment is missing a declared runtime dependency."""
+
+    classification = "worker_dependency_unavailable"
+    retryable = True
+
+
 class NormalizationDependencyError(RuntimeError):
     """An authoritative analysis set cannot be normalized."""
 
@@ -981,7 +992,8 @@ def collection_terminology_resolution(
         or type(project.get("revision")) is not int
         or spec.get("source", {}).get("media_asset_id")
         != f"catalog-project:{project['project_id']}"
-        or spec.get("inputs") != []
+        or not isinstance(spec.get("inputs"), list)
+        or len(spec["inputs"]) > 1
         or not isinstance(bindings, list)
         or not bindings
         or not isinstance(dependencies, list)
@@ -1056,6 +1068,32 @@ def collection_terminology_resolution(
         schema=TERMINOLOGY_RESOLUTION_CHECKPOINT_SCHEMA,
     )
     resume_checkpoint = latest_checkpoint[1] if latest_checkpoint is not None else None
+    if resume_checkpoint is None and spec["inputs"]:
+        checkpoint_reference = validated_artifact_reference(spec["inputs"][0])
+        if (
+            checkpoint_reference.get("artifact_kind")
+            != "terminology-resolution-checkpoint"
+            or checkpoint_reference.get("schema")
+            != TERMINOLOGY_RESOLUTION_CHECKPOINT_SCHEMA
+        ):
+            raise TerminologyDependencyError(
+                "The imported terminology checkpoint has the wrong artifact contract"
+            )
+        try:
+            resume_checkpoint = json.loads(
+                store.get_bytes(checkpoint_reference).decode("utf-8")
+            )
+        except Exception as error:
+            failure = TerminologyDependencyError(
+                "Could not retrieve the imported terminology checkpoint"
+            )
+            failure.classification = "terminology_dependency_unavailable"
+            failure.retryable = True
+            raise failure from error
+        if not isinstance(resume_checkpoint, dict):
+            raise TerminologyDependencyError(
+                "The imported terminology checkpoint is not an object"
+            )
     try:
         from analyze_catalog import create_openai_client
         from resolve_terminology import infer_terminology_resolution
@@ -1796,7 +1834,13 @@ LOCAL_HANDLER_CONTRACTS: dict[tuple[str, str], dict[str, Any]] = {
         "id": TERMINOLOGY_RESOLUTION_HANDLER[0],
         "version": TERMINOLOGY_RESOLUTION_HANDLER[1],
         "operation": "generate",
-        "inputs": [],
+        "inputs": [
+            {
+                "artifact_kind": "terminology-resolution-checkpoint",
+                "schema": TERMINOLOGY_RESOLUTION_CHECKPOINT_SCHEMA,
+                "cardinality": {"minimum": 0, "maximum": 1},
+            },
+        ],
         "dependencies": [
             {
                 "artifact_kind": "transcript",
@@ -1823,6 +1867,7 @@ LOCAL_HANDLER_CONTRACTS: dict[tuple[str, str], dict[str, Any]] = {
             "retryable_classifications": [
                 "terminology_dependency_unavailable",
                 "terminology_provider_failed",
+                "worker_dependency_unavailable",
                 "artifact_store_failed",
                 "lease_expired",
             ],
@@ -2602,7 +2647,9 @@ def validate_json_schema(value: Any, path: Path, label: str) -> None:
     try:
         from jsonschema import Draft202012Validator, FormatChecker
     except ImportError as error:
-        raise RuntimeError("jsonschema is required by collection iterator workers") from error
+        raise WorkerDependencyError(
+            "JSON Schema validation requires the jsonschema worker dependency"
+        ) from error
     try:
         schema = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
@@ -4554,6 +4601,7 @@ def project_terminology_resolution_spec(
     transcript_references: list[dict[str, Any]],
     analysis_references: list[dict[str, Any]],
     bindings: list[dict[str, Any]],
+    resume_checkpoint: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if (
         not bindings
@@ -4570,7 +4618,7 @@ def project_terminology_resolution_spec(
             "version": TERMINOLOGY_RESOLUTION_HANDLER[1],
         },
         "source": {"media_asset_id": f"catalog-project:{project['project_id']}"},
-        "inputs": [],
+        "inputs": [resume_checkpoint] if resume_checkpoint is not None else [],
         "dependencies": [*transcript_references, *analysis_references],
         "configuration": {
             "project": {
@@ -4595,6 +4643,54 @@ def project_terminology_resolution_spec(
             "items": bindings,
         },
     }
+
+
+def previous_terminology_checkpoint(
+    control: AuthoringHttpClient,
+    *,
+    plan_reference: dict[str, Any],
+    project_id: str,
+) -> tuple[int, dict[str, Any]] | None:
+    project_item_id = f"catalog-project:{project_id}"
+    run_id = stable_project_execution_id(
+        plan_reference["digest"],
+        project_item_id,
+        versioned_handler_execution_role(
+            "terminology-resolution-run", PREVIOUS_TERMINOLOGY_RESOLUTION_HANDLER
+        ),
+    )
+    pipeline = control.post("/pipelines/get", {"run_id": run_id})
+    jobs = pipeline.get("jobs")
+    if not isinstance(jobs, list) or len(jobs) != 1:
+        return None
+    job = jobs[0]
+    if (
+        job.get("spec", {}).get("handler")
+        != {
+            "id": PREVIOUS_TERMINOLOGY_RESOLUTION_HANDLER[0],
+            "version": PREVIOUS_TERMINOLOGY_RESOLUTION_HANDLER[1],
+        }
+        or not isinstance(job.get("spec_sha256"), str)
+    ):
+        return None
+    checkpoints = [
+        checkpoint
+        for attempt in job.get("attempts", [])
+        if isinstance(attempt, dict)
+        and isinstance((checkpoint := attempt.get("checkpoint")), dict)
+        and checkpoint.get("spec_sha256") == job["spec_sha256"]
+        and type(checkpoint.get("sequence")) is int
+    ]
+    if not checkpoints:
+        return None
+    checkpoint = max(checkpoints, key=lambda value: value["sequence"])
+    reference = validated_artifact_reference(checkpoint.get("artifact"))
+    if (
+        reference.get("artifact_kind") != "terminology-resolution-checkpoint"
+        or reference.get("schema") != TERMINOLOGY_RESOLUTION_CHECKPOINT_SCHEMA
+    ):
+        raise RuntimeError("Previous terminology checkpoint has the wrong artifact contract")
+    return checkpoint["sequence"], reference
 
 
 def completed_project_analysis_set(
@@ -5069,6 +5165,18 @@ def run_resolve_project_terminology(args: argparse.Namespace) -> int:
             plan_reference=plan_reference,
         )
     )
+    project_item_id = f"catalog-project:{project['project_id']}"
+    previous_checkpoint = previous_terminology_checkpoint(
+        control,
+        plan_reference=plan_reference,
+        project_id=project["project_id"],
+    )
+    resume_checkpoint = previous_checkpoint[1] if previous_checkpoint is not None else None
+    if previous_checkpoint is not None:
+        print(
+            f"reusing terminology checkpoint after {previous_checkpoint[0]} batches",
+            flush=True,
+        )
     spec = project_terminology_resolution_spec(
         project=project,
         plan_job_id=args.plan_job_id,
@@ -5077,8 +5185,8 @@ def run_resolve_project_terminology(args: argparse.Namespace) -> int:
         transcript_references=transcript_references,
         analysis_references=analysis_references,
         bindings=bindings,
+        resume_checkpoint=resume_checkpoint,
     )
-    project_item_id = f"catalog-project:{project['project_id']}"
     run_id = stable_project_execution_id(
         plan_reference["digest"],
         project_item_id,

@@ -1,7 +1,7 @@
 {
   "kind": "watchcraft.authoring-capability-registry",
   "schema_version": 1,
-  "registry_version": "2026-09-10.1",
+  "registry_version": "2026-09-10.2",
   "handlers": [
     {
       "id": "watchcraft.analysis.lexical",
@@ -67,9 +67,21 @@
     },
     {
       "id": "watchcraft.resolve.collection-terminology",
-      "version": "4",
+      "version": "5",
       "operation": "generate",
-      "inputs": [],
+      "inputs": [
+        {
+          "artifact_kind": "terminology-resolution-checkpoint",
+          "schema": {
+            "id": "watchcraft.terminology-resolution-checkpoint",
+            "version": 1
+          },
+          "cardinality": {
+            "minimum": 0,
+            "maximum": 1
+          }
+        }
+      ],
       "dependencies": [
         {
           "artifact_kind": "transcript",
@@ -111,6 +123,7 @@
         "retryable_classifications": [
           "terminology_dependency_unavailable",
           "terminology_provider_failed",
+          "worker_dependency_unavailable",
           "artifact_store_failed",
           "lease_expired"
         ]

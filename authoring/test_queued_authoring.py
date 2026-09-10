@@ -30,7 +30,7 @@ def registry_snapshot(
 ):
     if terminology_resolution:
         return {
-            "registry_version": "2026-09-10.1",
+            "registry_version": "2026-09-10.2",
             "registry_sha256": "c" * 64,
             "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
                 queued_authoring.TERMINOLOGY_RESOLUTION_HANDLER
@@ -1087,6 +1087,13 @@ class QueuedAuthoringTests(unittest.TestCase):
             "transcript_digest": transcript_artifact["digest"],
             "analysis_digest": analysis_artifact["digest"],
         }
+        checkpoint_artifact = {
+            **transcript_artifact,
+            "digest": "9" * 64,
+            "artifact_kind": "terminology-resolution-checkpoint",
+            "schema": queued_authoring.TERMINOLOGY_RESOLUTION_CHECKPOINT_SCHEMA,
+            "key": "objects/sha256/99/" + "9" * 62,
+        }
         spec = queued_authoring.project_terminology_resolution_spec(
             project=project,
             plan_job_id="plan-job",
@@ -1095,6 +1102,7 @@ class QueuedAuthoringTests(unittest.TestCase):
             transcript_references=[transcript_artifact],
             analysis_references=[analysis_artifact],
             bindings=[binding],
+            resume_checkpoint=checkpoint_artifact,
         )
         transcript = {
             "kind": "watchcraft.transcript",
@@ -1115,6 +1123,9 @@ class QueuedAuthoringTests(unittest.TestCase):
         payloads = {
             transcript_artifact["key"]: json.dumps(transcript).encode(),
             analysis_artifact["key"]: json.dumps(analysis).encode(),
+            checkpoint_artifact["key"]: json.dumps({
+                "kind": "watchcraft.terminology-resolution-checkpoint"
+            }).encode(),
         }
         store = Mock()
         store.get_bytes.side_effect = lambda reference: payloads[reference["key"]]
@@ -1155,6 +1166,10 @@ class QueuedAuthoringTests(unittest.TestCase):
             result = queued_authoring.collection_terminology_resolution(job, context)
 
         resolve.assert_called_once()
+        self.assertEqual(
+            resolve.call_args.kwargs["resume_checkpoint"],
+            {"kind": "watchcraft.terminology-resolution-checkpoint"},
+        )
         self.assertEqual(result["kind"], "watchcraft.terminology-resolution")
         self.assertEqual(result["stats"], {
             "observed_terms": 3,
@@ -1166,6 +1181,50 @@ class QueuedAuthoringTests(unittest.TestCase):
             result["provenance"]["items"][0]["transcript"], transcript_artifact
         )
         self.assertEqual(context.report_progress.call_count, 3)
+
+    def test_new_terminology_handler_imports_the_previous_completed_checkpoint(self):
+        plan_reference = {
+            **transcript_reference(),
+            "digest": "f" * 64,
+            "artifact_kind": "project-processing-plan",
+            "schema": queued_authoring.PROJECT_PROCESSING_PLAN_SCHEMA,
+            "key": "objects/sha256/ff/" + "f" * 62,
+        }
+        checkpoint_reference = {
+            **transcript_reference(),
+            "digest": "9" * 64,
+            "artifact_kind": "terminology-resolution-checkpoint",
+            "schema": queued_authoring.TERMINOLOGY_RESOLUTION_CHECKPOINT_SCHEMA,
+            "key": "objects/sha256/99/" + "9" * 62,
+        }
+        control = Mock()
+        control.post.return_value = {
+            "jobs": [{
+                "spec": {
+                    "handler": {
+                        "id": queued_authoring.PREVIOUS_TERMINOLOGY_RESOLUTION_HANDLER[0],
+                        "version": queued_authoring.PREVIOUS_TERMINOLOGY_RESOLUTION_HANDLER[1],
+                    }
+                },
+                "spec_sha256": "a" * 64,
+                "attempts": [{
+                    "checkpoint": {
+                        "sequence": 27,
+                        "spec_sha256": "a" * 64,
+                        "artifact": checkpoint_reference,
+                    }
+                }],
+            }]
+        }
+
+        checkpoint = queued_authoring.previous_terminology_checkpoint(
+            control,
+            plan_reference=plan_reference,
+            project_id="linear-algebra",
+        )
+
+        self.assertEqual(checkpoint, (27, checkpoint_reference))
+        self.assertEqual(control.post.call_args.args[0], "/pipelines/get")
 
     def test_mlx_smoke_transcribes_a_temporary_generated_audio_fixture(self):
         transcription_smoke_spec = queued_authoring.transcription_smoke_spec(
