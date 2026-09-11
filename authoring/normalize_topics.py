@@ -935,6 +935,20 @@ def make_related_symmetric(related: dict[str, list[str]]) -> dict[str, list[str]
     return {key: sorted(values) for key, values in sorted(graph.items())}
 
 
+def prune_related_topics(
+    related: dict[str, list[str]], known_keys: set[str]
+) -> dict[str, list[str]]:
+    return {
+        key: [
+            related_key
+            for related_key in related_keys
+            if related_key in known_keys and related_key != key
+        ]
+        for key, related_keys in related.items()
+        if key in known_keys and isinstance(related_keys, list)
+    }
+
+
 def run(args: argparse.Namespace) -> int:
     analyses = load_analyses(args.root)
     topic_maps = load_topic_chapter_maps(args.root, analyses)
@@ -1030,6 +1044,7 @@ def run(args: argparse.Namespace) -> int:
     finalize_canonical_assignments(records, state["assignments"])
     save_state(path, state)
     canonical = canonical_inventory(records, state["assignments"])
+    state["related"] = prune_related_topics(state.get("related", {}), set(canonical))
     state["display_labels"] = {
         key: label
         for key, label in state.get("display_labels", {}).items()

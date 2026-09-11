@@ -619,14 +619,19 @@ missing, failed, foreign, or stale item executions. It also requires the success
 resolution bound to that plan. The normalization worker derives an in-memory copy of each
 analysis, applies only `automatic-safe` terminology changes to human-facing generated fields,
 and runs the existing topic-family, assignment, compact-label, and related-topic logic over
-those corrected copies. Original transcript and analysis artifacts remain immutable. Its
-deterministic, handler-versioned run and job IDs make the command safe to resume while allowing
-this revised normalization to coexist with earlier results. The compact result reports the raw
-and canonical topic counts, families, labels, related pairs, and timing; the printed
-`queue result` command retrieves the complete normalization artifact.
+those corrected copies. When a successful pre-terminology normalization exists for the exact
+plan, it is bound as an explicit immutable baseline. The worker preserves its family taxonomy
+and completed decisions for unchanged topic keys, drops stale keys, and asks the model only for
+newly corrected topics. Approved orthography is then enforced deterministically on UI display
+labels, including one-token technical labels such as `i-hat`. Original transcript and analysis
+artifacts remain immutable. Its deterministic, handler-versioned run and job IDs make the
+command safe to resume while allowing this revised normalization to coexist with earlier
+results. The compact result reports the raw and canonical topic counts, families, labels,
+related pairs, and timing; the printed `queue result` command retrieves the complete
+normalization artifact.
 
-Terminology application, revised normalization, and revised compilation are registered in
-capability registry `2026-09-10.5`. After committing and pushing, publish and activate the
+Terminology application, stable-baseline normalization, and revised compilation are registered
+in capability registry `2026-09-10.6`. After committing and pushing, publish and activate the
 checked-in registry before running either downstream command:
 
 ```bash

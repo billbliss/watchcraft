@@ -42,6 +42,7 @@ from normalize_topics import (
     load_state,
     make_related_symmetric,
     mechanically_equivalent,
+    prune_related_topics,
     topic_inventory,
 )
 from process_catalog import select_work
@@ -2505,6 +2506,41 @@ class FormattingTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(RuntimeError, "first-model"):
                 load_state(path, "collection", "hash", "second-model", False)
+
+    def test_normalization_baseline_preserves_taxonomy_and_prunes_stale_relations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "topic-normalization.json"
+            families = {"family-stable": {"label": "Stable family"}}
+            path.write_text(
+                json.dumps({
+                    "schema_version": 1,
+                    "prompt_version": 2,
+                    "collection_id": "collection",
+                    "model": "model",
+                    "source_hash": "old-hash",
+                    "families": families,
+                    "assignments": {},
+                    "related": {},
+                    "display_labels": {},
+                }),
+                encoding="utf-8",
+            )
+
+            state = load_state(path, "collection", "new-hash", "model", False)
+
+            self.assertEqual(state["families"], families)
+            self.assertEqual(state["source_hash"], "new-hash")
+        self.assertEqual(
+            prune_related_topics(
+                {
+                    "kept": ["other", "removed", "kept"],
+                    "other": ["kept"],
+                    "removed": ["kept"],
+                },
+                {"kept", "other"},
+            ),
+            {"kept": ["other"], "other": ["kept"]},
+        )
 
     def test_process_limit_selects_next_unfinished_video_for_both_stages(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -153,11 +153,19 @@ const terminologyResolutionArtifact = {
   key: `objects/sha256/bb/${"b".repeat(62)}`,
 };
 
+const normalizationBaselineArtifact = {
+  ...transcriptArtifact,
+  digest: "4".repeat(64),
+  artifact_kind: "topic-normalization",
+  schema: { id: "watchcraft.topic-normalization", version: 1 },
+  key: `objects/sha256/44/${"4".repeat(62)}`,
+};
+
 const topicNormalizationSpec = {
   operation: "generate" as const,
   artifact_kind: "topic-normalization",
   output_schema: { id: "watchcraft.topic-normalization", version: 1 },
-  handler: { id: "watchcraft.normalize.collection-topics", version: "2" },
+  handler: { id: "watchcraft.normalize.collection-topics", version: "3" },
   source: { media_asset_id: "catalog-project:essence-of-linear-algebra" },
   inputs: [],
   dependencies: [firstAnalysisArtifact, secondAnalysisArtifact, terminologyResolutionArtifact],
@@ -245,7 +253,7 @@ const collectionCompilationSpec = {
   operation: "compile" as const,
   artifact_kind: "collection-compilation",
   output_schema: { id: "watchcraft.collection-compilation", version: 1 },
-  handler: { id: "watchcraft.compile.video-collection", version: "3" },
+  handler: { id: "watchcraft.compile.video-collection", version: "4" },
   source: { media_asset_id: "catalog-project:essence-of-linear-algebra" },
   inputs: [projectPlanArtifact, iteratorSnapshotArtifact],
   dependencies: [
@@ -263,7 +271,7 @@ test("the checked-in registry is valid, stable, and fully resolves an approved j
   const registry = parseCapabilityRegistry(DEFAULT_CAPABILITY_REGISTRY);
   const spec = resolveJobSpecAgainstRegistry(lexicalSpec, registry);
 
-  assert.equal(spec.registry_snapshot?.registry_version, "2026-09-10.5");
+  assert.equal(spec.registry_snapshot?.registry_version, "2026-09-10.6");
   assert.equal(spec.registry_snapshot?.registry_sha256, capabilityRegistrySha256(registry));
   assert.equal(spec.registry_snapshot?.execution_profile.id, "python-portable");
   assert.equal(spec.registry_snapshot?.execution_profile.dispatcher.workflow, "authoring-worker.yml");
@@ -337,6 +345,13 @@ test("collection topic normalization binds a variable complete analysis set", ()
     secondAnalysisArtifact,
     terminologyResolutionArtifact,
   ]);
+  assert.deepEqual(
+    resolveJobSpecAgainstRegistry(
+      { ...topicNormalizationSpec, inputs: [normalizationBaselineArtifact] },
+      DEFAULT_CAPABILITY_REGISTRY,
+    ).inputs,
+    [normalizationBaselineArtifact],
+  );
   assert.deepEqual(spec.registry_snapshot?.handler.dependencies[0]?.cardinality, {
     minimum: 1,
     maximum: 10_000,

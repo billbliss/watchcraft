@@ -92,11 +92,15 @@ PROJECT_PROCESSING_PLANNER_HANDLER = (
 )
 TOPIC_NORMALIZATION_HANDLER = (
     "watchcraft.normalize.collection-topics",
-    "2",
+    "3",
+)
+PRE_TERMINOLOGY_TOPIC_NORMALIZATION_HANDLER = (
+    "watchcraft.normalize.collection-topics",
+    "1",
 )
 COLLECTION_COMPILATION_HANDLER = (
     "watchcraft.compile.video-collection",
-    "3",
+    "4",
 )
 PYTHON_EXECUTION_PROFILE = ("python-portable", "1")
 PYTHON_EXECUTION_WORKFLOW = "authoring-worker.yml"
@@ -1279,6 +1283,134 @@ def apply_automatic_terminology(
     return derived, sorted(applied)
 
 
+def apply_automatic_terminology_to_display_labels(
+    normalization: dict[str, Any], resolution: dict[str, Any]
+) -> dict[str, str]:
+    from normalize_topics import deterministic_display_label, display_label_error
+
+    automatic = [
+        item
+        for item in resolution.get("resolutions", [])
+        if isinstance(item, dict) and item.get("disposition") == "automatic-safe"
+    ]
+    styles = []
+    for item in automatic:
+        display = item.get("display_label")
+        if not isinstance(display, str) or not display:
+            continue
+        desired_tokens = re.findall(r"[A-Za-z0-9]+", display)
+        if not desired_tokens:
+            continue
+        variants = [display, *item.get("observed_forms", [])]
+        patterns = []
+        for variant in variants:
+            if not isinstance(variant, str):
+                continue
+            tokens = re.findall(r"[A-Za-z0-9]+", variant)
+            if [token.casefold() for token in tokens] != [
+                token.casefold() for token in desired_tokens
+            ]:
+                continue
+            patterns.append(re.compile(
+                r"(?<![A-Za-z0-9])"
+                + r"[\s_-]+".join(re.escape(token) for token in tokens)
+                + r"(?![A-Za-z0-9])",
+                flags=re.IGNORECASE,
+            ))
+        if patterns:
+            styles.append((display, patterns))
+
+    def style(value: str) -> tuple[str, set[str]]:
+        styled = value
+        present = set()
+        for display, patterns in styles:
+            matched = False
+            for pattern in patterns:
+                styled, count = pattern.subn(lambda _match: display, styled)
+                matched = matched or bool(count)
+            if matched:
+                present.add(display)
+        return styled, present
+
+    assignments = normalization.get("assignments", {})
+    display_labels = normalization.get("display_labels", {})
+    if not isinstance(assignments, dict) or not isinstance(display_labels, dict):
+        raise ValueError("Topic normalization has invalid display-label state")
+    canonical_labels = {}
+    for assignment in assignments.values():
+        if not isinstance(assignment, dict):
+            continue
+        key = assignment.get("canonical_key")
+        label = assignment.get("canonical_label")
+        if isinstance(key, str) and isinstance(label, str):
+            canonical_labels.setdefault(key, label)
+
+    repaired = {}
+    for key, label in display_labels.items():
+        if not isinstance(key, str) or not isinstance(label, str):
+            raise ValueError("Topic normalization has an invalid display label")
+        styled_label, present = style(label)
+        canonical_label = canonical_labels.get(key, key)
+        styled_canonical, required = style(canonical_label)
+        canonical_error = display_label_error(styled_canonical, set())
+        approved_atomic = (
+            styled_canonical in required
+            and len(styled_canonical) <= 32
+            and not re.search(r"[,;:()\[\]{}]", styled_canonical)
+        )
+        if len(required) == 1 and (canonical_error is None or approved_atomic):
+            styled_label = styled_canonical
+        elif required - present:
+            # Prefer the source topic when it already satisfies the compact-label
+            # contract. This keeps approved notation instead of accepting a model
+            # paraphrase that dropped it entirely.
+            if canonical_error is None:
+                styled_label = styled_canonical
+            elif approved_atomic:
+                # A terminology-approved atomic label such as `i-hat` is allowed
+                # even though the generic UI-label prompt normally requires two words.
+                styled_label = styled_canonical
+        repaired[key] = styled_label
+
+    unique = {}
+    by_identity: dict[str, str] = {}
+    ordered_keys = sorted(
+        repaired,
+        key=lambda key: (
+            " ".join(repaired[key].casefold().split()) != key,
+            key,
+        ),
+    )
+    for key in ordered_keys:
+        label = repaired[key]
+        identity = " ".join(label.casefold().split())
+        existing = by_identity.get(identity)
+        if existing is not None:
+            canonical_label, _ = style(canonical_labels.get(key, key))
+            if display_label_error(canonical_label, set(by_identity)) is None:
+                label = canonical_label
+            else:
+                fallback = deterministic_display_label(
+                    canonical_label,
+                    set(by_identity),
+                    preferred_label=label,
+                )
+                if fallback is None:
+                    raise ValueError(
+                        f"Terminology-aware display label {label!r} is not unique"
+                    )
+                label, _ = style(fallback)
+            identity = " ".join(label.casefold().split())
+            if identity in by_identity:
+                raise ValueError(
+                    f"Terminology-aware display label {label!r} is not unique"
+                )
+        unique[key] = label
+        by_identity[identity] = key
+    normalization["display_labels"] = unique
+    return unique
+
+
 def collection_topic_normalization(
     job: dict[str, Any], context: WorkerContext | None = None
 ) -> dict[str, Any]:
@@ -1289,6 +1421,7 @@ def collection_topic_normalization(
     configuration = spec.get("configuration")
     expected_keys = {
         "analyses",
+        "baseline_sha256",
         "batch_size",
         "display_label_prompt_version",
         "logical_task_id",
@@ -1315,9 +1448,22 @@ def collection_topic_normalization(
         or configuration["timeout_seconds"] != TOPIC_NORMALIZATION_TIMEOUT_SECONDS
         or spec.get("source", {}).get("media_asset_id")
         != f"catalog-project:{configuration['project_id']}"
-        or spec.get("inputs") != []
     ):
         raise ValueError("the collection topic-normalization policy is unsupported")
+    inputs = spec.get("inputs")
+    baseline_sha256 = configuration["baseline_sha256"]
+    if (
+        (baseline_sha256 is None and inputs != [])
+        or (
+            isinstance(baseline_sha256, str)
+            and (not isinstance(inputs, list) or len(inputs) != 1)
+        )
+        or (
+            baseline_sha256 is not None
+            and not isinstance(baseline_sha256, str)
+        )
+    ):
+        raise ValueError("the collection topic-normalization baseline is invalid")
     analysis_bindings = configuration["analyses"]
     dependencies = spec.get("dependencies")
     if (
@@ -1333,6 +1479,44 @@ def collection_topic_normalization(
     store = context.artifact_store()
     analyses = []
     dependency_started_at = time.monotonic()
+    baseline = None
+    baseline_reference = None
+    if isinstance(baseline_sha256, str):
+        baseline_reference = validated_artifact_reference(inputs[0])
+        if (
+            baseline_reference.get("artifact_kind") != "topic-normalization"
+            or baseline_reference.get("schema") != TOPIC_NORMALIZATION_SCHEMA
+            or baseline_reference.get("digest") != baseline_sha256
+        ):
+            raise NormalizationDependencyError(
+                "Collection topic normalization has an invalid baseline"
+            )
+        try:
+            baseline = json.loads(store.get_bytes(baseline_reference).decode("utf-8"))
+        except Exception as error:
+            failure = NormalizationDependencyError(
+                "Could not retrieve topic-normalization baseline"
+            )
+            failure.classification = "analysis_dependency_unavailable"
+            failure.retryable = True
+            raise failure from error
+        baseline_provenance = (
+            baseline.get("provenance") if isinstance(baseline, dict) else None
+        )
+        if (
+            not isinstance(baseline, dict)
+            or baseline.get("kind") != "watchcraft.topic-normalization"
+            or baseline.get("status") != "complete"
+            or baseline.get("collection_id") != configuration["project_id"]
+            or baseline.get("model") != TOPIC_NORMALIZATION_MODEL
+            or baseline.get("prompt_version") != TOPIC_NORMALIZATION_PROMPT_VERSION
+            or not isinstance(baseline_provenance, dict)
+            or baseline_provenance.get("plan_artifact_sha256")
+            != configuration["plan_artifact_sha256"]
+        ):
+            raise NormalizationDependencyError(
+                "Topic-normalization baseline does not match the project plan"
+            )
     analysis_dependencies = dependencies[:-1]
     terminology_reference = validated_artifact_reference(dependencies[-1])
     if (
@@ -1438,6 +1622,11 @@ def collection_topic_normalization(
                 json.dumps({"collection_id": configuration["project_id"]}),
                 encoding="utf-8",
             )
+            if baseline is not None:
+                (catalog / "topic-normalization.json").write_text(
+                    json.dumps(baseline, ensure_ascii=False),
+                    encoding="utf-8",
+                )
             for analysis in analyses:
                 (analysis_root / f"{Path(analysis['video']).stem}.analysis.json").write_text(
                     json.dumps(analysis, ensure_ascii=False),
@@ -1459,6 +1648,7 @@ def collection_topic_normalization(
             result = json.loads(
                 (catalog / "topic-normalization.json").read_text(encoding="utf-8")
             )
+            apply_automatic_terminology_to_display_labels(result, terminology)
         normalization_ms = elapsed_milliseconds(normalization_started_at)
     except (NormalizationDependencyError, ValueError):
         raise
@@ -1488,6 +1678,7 @@ def collection_topic_normalization(
         "plan_hash": configuration["plan_hash"],
         "logical_task_id": configuration["logical_task_id"],
         "project_revision": configuration["project_revision"],
+        "baseline": baseline_reference,
         "terminology": terminology_reference,
         "analyses": [
             {**binding, "artifact": dependency}
@@ -2037,7 +2228,13 @@ LOCAL_HANDLER_CONTRACTS: dict[tuple[str, str], dict[str, Any]] = {
         "id": TOPIC_NORMALIZATION_HANDLER[0],
         "version": TOPIC_NORMALIZATION_HANDLER[1],
         "operation": "generate",
-        "inputs": [],
+        "inputs": [
+            {
+                "artifact_kind": "topic-normalization",
+                "schema": TOPIC_NORMALIZATION_SCHEMA,
+                "cardinality": {"minimum": 0, "maximum": 1},
+            },
+        ],
         "dependencies": [
             {
                 "artifact_kind": "analysis",
@@ -4774,6 +4971,7 @@ def project_topic_normalization_spec(
     dependencies: list[dict[str, Any]],
     bindings: list[dict[str, Any]],
     terminology_reference: dict[str, Any],
+    baseline_reference: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if len(dependencies) != len(bindings) or not dependencies:
         raise ValueError("Topic normalization requires a complete non-empty analysis set")
@@ -4788,7 +4986,7 @@ def project_topic_normalization_spec(
         "source": {
             "media_asset_id": f"catalog-project:{plan['project']['project_id']}"
         },
-        "inputs": [],
+        "inputs": [baseline_reference] if baseline_reference is not None else [],
         "dependencies": [*dependencies, terminology_reference],
         "configuration": {
             "project_id": plan["project"]["project_id"],
@@ -4796,6 +4994,11 @@ def project_topic_normalization_spec(
             "plan_job_id": plan_job_id,
             "plan_artifact_sha256": plan_reference["digest"],
             "plan_hash": plan["plan_hash"],
+            "baseline_sha256": (
+                baseline_reference["digest"]
+                if baseline_reference is not None
+                else None
+            ),
             "terminology_sha256": terminology_reference["digest"],
             "logical_task_id": plan["collection_tasks"][0]["task_id"],
             "model": TOPIC_NORMALIZATION_MODEL,
@@ -4952,6 +5155,47 @@ def completed_project_terminology_resolution(
         or reference.get("schema") != TERMINOLOGY_RESOLUTION_SCHEMA
     ):
         raise RuntimeError("The project terminology-resolution artifact is invalid")
+    return reference
+
+
+def previous_project_topic_normalization(
+    control: AuthoringHttpClient,
+    *,
+    plan_job_id: str,
+    plan: dict[str, Any],
+    plan_reference: dict[str, Any],
+) -> dict[str, Any] | None:
+    project_id = plan["project"]["project_id"]
+    project_item_id = f"catalog-project:{project_id}"
+    run_id = stable_project_execution_id(
+        plan_reference["digest"], project_item_id, "topic-normalization-run"
+    )
+    pipeline = control.post("/pipelines/get", {"run_id": run_id})
+    jobs = pipeline.get("jobs")
+    run = pipeline.get("run")
+    request = run.get("request") if isinstance(run, dict) else None
+    if not isinstance(jobs, list) or len(jobs) != 1:
+        return None
+    job = jobs[0]
+    if (
+        job.get("state") != "succeeded"
+        or job.get("spec", {}).get("handler")
+        != {
+            "id": PRE_TERMINOLOGY_TOPIC_NORMALIZATION_HANDLER[0],
+            "version": PRE_TERMINOLOGY_TOPIC_NORMALIZATION_HANDLER[1],
+        }
+        or not isinstance(request, dict)
+        or request.get("plan_job_id") != plan_job_id
+        or request.get("plan_artifact_sha256") != plan_reference["digest"]
+        or request.get("project_id") != project_id
+    ):
+        return None
+    reference = validated_artifact_reference(job.get("result"))
+    if (
+        reference.get("artifact_kind") != "topic-normalization"
+        or reference.get("schema") != TOPIC_NORMALIZATION_SCHEMA
+    ):
+        raise RuntimeError("Previous topic normalization has the wrong artifact contract")
     return reference
 
 
@@ -5625,6 +5869,17 @@ def run_normalize_project(args: argparse.Namespace) -> int:
         plan=plan,
         plan_reference=plan_reference,
     )
+    baseline_reference = previous_project_topic_normalization(
+        control,
+        plan_job_id=args.plan_job_id,
+        plan=plan,
+        plan_reference=plan_reference,
+    )
+    if baseline_reference is not None:
+        print(
+            "reusing pre-terminology topic normalization as a stable baseline",
+            flush=True,
+        )
     spec = project_topic_normalization_spec(
         plan_job_id=args.plan_job_id,
         plan_reference=plan_reference,
@@ -5632,6 +5887,7 @@ def run_normalize_project(args: argparse.Namespace) -> int:
         dependencies=dependencies,
         bindings=bindings,
         terminology_reference=terminology_reference,
+        baseline_reference=baseline_reference,
     )
     project_item_id = f"catalog-project:{plan['project']['project_id']}"
     run_id = stable_project_execution_id(
@@ -5663,6 +5919,11 @@ def run_normalize_project(args: argparse.Namespace) -> int:
         "project_id": plan["project"]["project_id"],
         "project_revision": plan["project"]["revision"],
         "analysis_job_ids": analysis_job_ids,
+        "baseline_sha256": (
+            baseline_reference["digest"]
+            if baseline_reference is not None
+            else None
+        ),
         "terminology_sha256": terminology_reference["digest"],
         "logical_task_id": plan["collection_tasks"][0]["task_id"],
         "handler": {
@@ -5724,6 +5985,7 @@ def run_normalize_project(args: argparse.Namespace) -> int:
         or not isinstance(provenance, dict)
         or provenance.get("handler_id") != TOPIC_NORMALIZATION_HANDLER[0]
         or provenance.get("plan_artifact_sha256") != plan_reference["digest"]
+        or provenance.get("baseline") != baseline_reference
         or provenance.get("terminology") != terminology_reference
         or len(provenance.get("analyses", [])) != len(bindings)
     ):

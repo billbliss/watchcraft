@@ -30,7 +30,7 @@ def registry_snapshot(
 ):
     if terminology_resolution:
         return {
-            "registry_version": "2026-09-10.5",
+            "registry_version": "2026-09-10.6",
             "registry_sha256": "c" * 64,
             "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
                 queued_authoring.TERMINOLOGY_RESOLUTION_HANDLER
@@ -41,7 +41,7 @@ def registry_snapshot(
         }
     if collection_compilation:
         return {
-            "registry_version": "2026-09-10.5",
+            "registry_version": "2026-09-10.6",
             "registry_sha256": "c" * 64,
             "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
                 queued_authoring.COLLECTION_COMPILATION_HANDLER
@@ -52,7 +52,7 @@ def registry_snapshot(
         }
     if topic_normalization:
         return {
-            "registry_version": "2026-09-10.5",
+            "registry_version": "2026-09-10.6",
             "registry_sha256": "c" * 64,
             "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
                 queued_authoring.TOPIC_NORMALIZATION_HANDLER
@@ -2607,6 +2607,54 @@ class QueuedAuthoringTests(unittest.TestCase):
             },
         )
 
+    def test_automatic_terminology_repairs_normalized_display_labels(self):
+        normalization = {
+            "assignments": {
+                "basis vectors i-hat and j-hat": {
+                    "canonical_key": "basis vectors i-hat and j-hat",
+                    "canonical_label": "basis vectors i-hat and j-hat",
+                },
+                "i-hat": {
+                    "canonical_key": "i-hat",
+                    "canonical_label": "i-hat",
+                },
+                "i-hat and j-hat": {
+                    "canonical_key": "i-hat and j-hat",
+                    "canonical_label": "i-hat and j-hat",
+                },
+            },
+            "display_labels": {
+                "basis vectors i-hat and j-hat": "i Hat and j Hat",
+                "i-hat": "I Hat Vector",
+                "i-hat and j-hat": "Jennifer Coordinates",
+            },
+        }
+        terminology = {
+            "resolutions": [
+                {
+                    "observed_forms": ["i_hat"],
+                    "display_label": "i-hat",
+                    "disposition": "automatic-safe",
+                },
+                {
+                    "observed_forms": ["j_hat"],
+                    "display_label": "j-hat",
+                    "disposition": "automatic-safe",
+                },
+            ],
+        }
+
+        labels = queued_authoring.apply_automatic_terminology_to_display_labels(
+            normalization, terminology
+        )
+
+        self.assertEqual(
+            labels["basis vectors i-hat and j-hat"],
+            "basis vectors i-hat and j-hat",
+        )
+        self.assertEqual(labels["i-hat"], "i-hat")
+        self.assertEqual(labels["i-hat and j-hat"], "i-hat and j-hat")
+
     def test_collection_topic_normalizer_uses_the_existing_normalization_core(self):
         references = []
         analyses = []
@@ -2668,6 +2716,22 @@ class QueuedAuthoringTests(unittest.TestCase):
                 "plan_artifact_sha256": "d" * 64,
             },
         }
+        baseline_reference = {
+            **references[0],
+            "digest": "6" * 64,
+            "artifact_kind": "topic-normalization",
+            "schema": queued_authoring.TOPIC_NORMALIZATION_SCHEMA,
+            "key": "objects/sha256/66/" + "6" * 62,
+        }
+        baseline = {
+            "kind": "watchcraft.topic-normalization",
+            "status": "complete",
+            "collection_id": "linear-algebra",
+            "model": queued_authoring.TOPIC_NORMALIZATION_MODEL,
+            "prompt_version": queued_authoring.TOPIC_NORMALIZATION_PROMPT_VERSION,
+            "families": {"family-stable": {"label": "Stable family"}},
+            "provenance": {"plan_artifact_sha256": "d" * 64},
+        }
         spec = queued_authoring.project_topic_normalization_spec(
             plan_job_id="plan-job-1",
             plan_reference={"digest": "d" * 64},
@@ -2679,10 +2743,12 @@ class QueuedAuthoringTests(unittest.TestCase):
             dependencies=references,
             bindings=bindings,
             terminology_reference=terminology_reference,
+            baseline_reference=baseline_reference,
         )
         job = {"job_id": "normalization-job-1", "spec_sha256": "a" * 64, "spec": spec}
         store = Mock()
         store.get_bytes.side_effect = [
+            json.dumps(baseline).encode("utf-8"),
             json.dumps(terminology).encode("utf-8"),
             *[
             json.dumps(analysis).encode("utf-8") for analysis in analyses
@@ -2691,8 +2757,14 @@ class QueuedAuthoringTests(unittest.TestCase):
         context = Mock()
         context.artifact_store.return_value = store
         normalized_analyses = []
+        observed_baselines = []
 
         def normalize(args):
+            observed_baselines.append(json.loads(
+                (args.root / "Video Catalog" / "topic-normalization.json").read_text(
+                    encoding="utf-8"
+                )
+            ))
             normalized_analyses.extend(
                 json.loads(path.read_text(encoding="utf-8"))
                 for path in sorted(
@@ -2727,15 +2799,56 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertEqual(result["kind"], "watchcraft.topic-normalization")
         self.assertEqual(result["status"], "complete")
         self.assertEqual(result["provenance"]["plan_job_id"], "plan-job-1")
+        self.assertEqual(result["provenance"]["baseline"], baseline_reference)
         self.assertEqual(result["provenance"]["terminology"], terminology_reference)
         self.assertEqual(len(result["provenance"]["analyses"]), 2)
-        self.assertEqual(store.get_bytes.call_count, 3)
+        self.assertEqual(store.get_bytes.call_count, 4)
         self.assertEqual(context.report_progress.call_count, 4)
+        self.assertEqual(observed_baselines[0]["families"], baseline["families"])
         self.assertTrue(all(
             analysis["summary"] == "The i-hat basis vector."
             and analysis["topics"][0] == "i-hat"
             for analysis in normalized_analyses
         ))
+
+    def test_previous_topic_normalization_is_an_explicit_plan_bound_baseline(self):
+        reference = {
+            "store": "r2",
+            "algorithm": "sha256",
+            "digest": "6" * 64,
+            "byte_length": 1_000,
+            "media_type": "application/json",
+            "artifact_kind": "topic-normalization",
+            "schema": queued_authoring.TOPIC_NORMALIZATION_SCHEMA,
+            "key": "objects/sha256/66/" + "6" * 62,
+        }
+        control = Mock()
+        control.post.return_value = {
+            "run": {"request": {
+                "plan_job_id": "plan-job-1",
+                "plan_artifact_sha256": "d" * 64,
+                "project_id": "linear-algebra",
+            }},
+            "jobs": [{
+                "state": "succeeded",
+                "spec": {"handler": {
+                    "id": queued_authoring.PRE_TERMINOLOGY_TOPIC_NORMALIZATION_HANDLER[0],
+                    "version": queued_authoring.PRE_TERMINOLOGY_TOPIC_NORMALIZATION_HANDLER[1],
+                }},
+                "result": reference,
+            }],
+        }
+
+        self.assertEqual(
+            queued_authoring.previous_project_topic_normalization(
+                control,
+                plan_job_id="plan-job-1",
+                plan={"project": {"project_id": "linear-algebra"}},
+                plan_reference={"digest": "d" * 64},
+            ),
+            reference,
+        )
+        control.post.assert_called_once()
 
     def test_normalize_project_submits_the_complete_analysis_set_deterministically(self):
         snapshot = {
@@ -2786,6 +2899,13 @@ class QueuedAuthoringTests(unittest.TestCase):
             "artifact_kind": "terminology-resolution",
             "schema": queued_authoring.TERMINOLOGY_RESOLUTION_SCHEMA,
             "key": "objects/sha256/77/" + "7" * 62,
+        }
+        baseline_reference = {
+            **plan_reference,
+            "digest": "6" * 64,
+            "artifact_kind": "topic-normalization",
+            "schema": queued_authoring.TOPIC_NORMALIZATION_SCHEMA,
+            "key": "objects/sha256/66/" + "6" * 62,
         }
         plan_job = {
             "job_id": "plan-job-1",
@@ -2861,6 +2981,7 @@ class QueuedAuthoringTests(unittest.TestCase):
             "provenance": {
                 "handler_id": queued_authoring.TOPIC_NORMALIZATION_HANDLER[0],
                 "plan_artifact_sha256": plan_reference["digest"],
+                "baseline": baseline_reference,
                 "terminology": terminology_reference,
                 "analyses": [{"artifact": analysis_reference}],
                 "timing": {"normalization_ms": 1_000},
@@ -2886,6 +3007,9 @@ class QueuedAuthoringTests(unittest.TestCase):
             "queued_authoring.completed_project_terminology_resolution",
             return_value=terminology_reference,
         ), patch(
+            "queued_authoring.previous_project_topic_normalization",
+            return_value=baseline_reference,
+        ), patch(
             "queued_authoring.submit_spec", side_effect=submit
         ), patch(
             "queued_authoring._resume_pipeline_job"
@@ -2900,6 +3024,10 @@ class QueuedAuthoringTests(unittest.TestCase):
             analysis_reference,
             terminology_reference,
         ])
+        self.assertEqual(captured["spec"]["inputs"], [baseline_reference])
+        self.assertEqual(
+            captured["request"]["baseline_sha256"], baseline_reference["digest"]
+        )
         self.assertEqual(captured["spec"]["handler"]["id"], (
             queued_authoring.TOPIC_NORMALIZATION_HANDLER[0]
         ))

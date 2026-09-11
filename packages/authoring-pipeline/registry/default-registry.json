@@ -1,7 +1,7 @@
 {
   "kind": "watchcraft.authoring-capability-registry",
   "schema_version": 1,
-  "registry_version": "2026-09-10.5",
+  "registry_version": "2026-09-10.6",
   "handlers": [
     {
       "id": "watchcraft.analysis.lexical",
@@ -131,9 +131,21 @@
     },
     {
       "id": "watchcraft.normalize.collection-topics",
-      "version": "2",
+      "version": "3",
       "operation": "generate",
-      "inputs": [],
+      "inputs": [
+        {
+          "artifact_kind": "topic-normalization",
+          "schema": {
+            "id": "watchcraft.topic-normalization",
+            "version": 1
+          },
+          "cardinality": {
+            "minimum": 0,
+            "maximum": 1
+          }
+        }
+      ],
       "dependencies": [
         {
           "artifact_kind": "analysis",
@@ -178,7 +190,7 @@
     },
     {
       "id": "watchcraft.compile.video-collection",
-      "version": "3",
+      "version": "4",
       "operation": "compile",
       "inputs": [
         {
