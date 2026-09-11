@@ -1,4 +1,5 @@
 import argparse
+import copy
 import io
 import json
 import os
@@ -4925,6 +4926,26 @@ class QueuedAuthoringTests(unittest.TestCase):
             plan["estimate"]["sequential_worker_upper_bound_minutes"],
             item_count * 90,
         )
+        projection = plan["estimate"]["projection"]
+        self.assertEqual(
+            projection["policy"]["id"],
+            "watchcraft.video-collection-estimator",
+        )
+        self.assertEqual(projection["scope"], "gross-full-pipeline")
+        self.assertEqual(projection["confidence"], "low")
+        self.assertEqual(projection["time"]["assumed_concurrency"], 2)
+        self.assertGreater(projection["time"]["expected_seconds"], 0)
+        self.assertGreater(
+            projection["time"]["high_seconds"],
+            projection["time"]["expected_seconds"],
+        )
+        self.assertEqual(
+            [component["stage"] for component in projection["cost"]["components"]],
+            ["analysis", "terminology-resolution", "topic-normalization"],
+        )
+        self.assertGreater(projection["cost"]["expected_usd"], 0)
+        self.assertEqual(projection["cost"]["github_actions_usd"], 0)
+        self.assertIsNone(projection["cost"]["r2_and_convex_usd"])
         self.assertEqual(context.report_progress.call_count, item_count)
         self.assertEqual(
             context.report_progress.call_args.kwargs,
@@ -4937,9 +4958,39 @@ class QueuedAuthoringTests(unittest.TestCase):
             },
         )
 
+        changed_estimate = copy.deepcopy(plan)
+        changed_estimate["estimate"]["projection"]["cost"]["expected_usd"] += 1
+        with self.assertRaisesRegex(ValueError, "hash"):
+            queued_authoring.validate_project_processing_plan(changed_estimate)
+
         plan["summary"]["unique_items"] = 15
         with self.assertRaisesRegex(ValueError, "summary"):
             queued_authoring.validate_project_processing_plan(plan)
+
+    def test_project_pipeline_estimate_is_deterministic_and_imputes_unknown_duration(self):
+        first = queued_authoring.project_pipeline_estimate(
+            item_count=3,
+            known_duration_seconds=600,
+            unknown_duration_items=2,
+        )
+        second = queued_authoring.project_pipeline_estimate(
+            item_count=3,
+            known_duration_seconds=600,
+            unknown_duration_items=2,
+        )
+
+        self.assertEqual(first, second)
+        self.assertEqual(first["media_duration_seconds"], {
+            "known": 600,
+            "projected": 1800,
+            "unknown_items": 2,
+        })
+        self.assertFalse(first["time"]["queue_contention_included"])
+        self.assertEqual(first["cost"]["currency"], "USD")
+        self.assertEqual(
+            first["cost"]["high_usd"],
+            round(first["cost"]["expected_usd"] * 2, 6),
+        )
 
     def test_python_worker_preserves_classified_staged_input_failures(self):
         reference = staged_audio_reference()

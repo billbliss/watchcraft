@@ -576,11 +576,19 @@ deferred collection-wide tasks. Reuse decisions for derived artifacts remain def
 until their exact input digests exist.
 
 This command creates only the planner job and its immutable plan artifact. It does not
-download video audio or dispatch any of the described processing jobs. The compact
-result reports task counts, duration coverage, and conservative sequential worker
-timeout bounds; the printed `queue result` command retrieves the full plan. The
-planner requires capability registry `2026-09-08.2` or later to be published and activated
-after its code is available on `main`. It does not require another Convex deployment.
+download video audio, invoke an AI model, or dispatch any of the described processing
+jobs. The compact result reports task counts plus a deterministic preflight estimate
+for the complete pipeline. The estimate includes expected and conservative elapsed
+time, assumed concurrency, projected OpenAI token cost by stage, duration coverage,
+confidence, and caveats. It is a gross estimate because exact artifact reuse cannot be
+known until acquisition produces stable content digests. Standard GitHub-hosted runner
+cost is currently recorded as zero for this public repository; R2 and Convex are left
+unpriced because their marginal cost depends on account-level usage and free-tier
+consumption. The estimation policy is embedded in the plan and covered by its hash.
+
+Planner version 2 requires capability registry `2026-09-11.1` or later to be published
+and activated after its code is available on `main`. It does not require another Convex
+deployment. The printed `queue result` command retrieves the full immutable plan.
 
 Execute every item from a successful immutable plan with bounded concurrency:
 

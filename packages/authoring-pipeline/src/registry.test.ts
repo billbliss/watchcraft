@@ -208,7 +208,7 @@ const projectProcessingPlanSpec = {
   operation: "generate" as const,
   artifact_kind: "project-processing-plan",
   output_schema: { id: "watchcraft.project-processing-plan", version: 1 },
-  handler: { id: "watchcraft.planner.video-collection", version: "1" },
+  handler: { id: "watchcraft.planner.video-collection", version: "2" },
   source: { media_asset_id: "catalog-project:essence-of-linear-algebra" },
   inputs: [iteratorSnapshotArtifact],
   dependencies: [],
@@ -277,7 +277,7 @@ test("the checked-in registry is valid, stable, and fully resolves an approved j
   const registry = parseCapabilityRegistry(DEFAULT_CAPABILITY_REGISTRY);
   const spec = resolveJobSpecAgainstRegistry(lexicalSpec, registry);
 
-  assert.equal(spec.registry_snapshot?.registry_version, "2026-09-10.10");
+  assert.equal(spec.registry_snapshot?.registry_version, "2026-09-11.1");
   assert.equal(spec.registry_snapshot?.registry_sha256, capabilityRegistrySha256(registry));
   assert.equal(spec.registry_snapshot?.execution_profile.id, "python-portable");
   assert.equal(spec.registry_snapshot?.execution_profile.dispatcher.workflow, "authoring-worker.yml");

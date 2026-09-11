@@ -92,8 +92,9 @@ EXPLICIT_MEMBERSHIP_ITERATOR_HANDLER = (
 )
 PROJECT_PROCESSING_PLANNER_HANDLER = (
     "watchcraft.planner.video-collection",
-    "1",
+    "2",
 )
+SUPPORTED_PROJECT_PROCESSING_PLANNER_VERSIONS = {"1", "2"}
 TOPIC_NORMALIZATION_HANDLER = (
     "watchcraft.normalize.collection-topics",
     "6",
@@ -119,6 +120,66 @@ EDUCATIONAL_VIDEO_ANALYSIS_PROMPT_VERSION = 3
 EDUCATIONAL_VIDEO_ANALYSIS_MAX_TRANSCRIPT_CHARS = 1_500_000
 EDUCATIONAL_VIDEO_ANALYSIS_RETRIES = 5
 EDUCATIONAL_VIDEO_ANALYSIS_TIMEOUT_SECONDS = 300
+PROJECT_ESTIMATION_POLICY = {
+    "id": "watchcraft.video-collection-estimator",
+    "version": "1",
+    "currency": "USD",
+    "pricing_observed_at": "2026-09-11",
+    "pricing_sources": {
+        "openai": "https://developers.openai.com/api/docs/models",
+        "github_actions": "https://docs.github.com/en/billing/concepts/product-billing/github-actions",
+    },
+    "assumed_concurrency": 2,
+    "high_cost_multiplier": 2.0,
+    "coefficients": {
+        "default_unknown_duration_seconds": 600.0,
+        "high_unknown_duration_seconds": 1_800.0,
+        "acquisition_expected_fixed_seconds_per_item": 10.0,
+        "acquisition_expected_seconds_per_media_second": 0.02,
+        "acquisition_high_fixed_seconds_per_item": 30.0,
+        "acquisition_high_seconds_per_media_second": 0.10,
+        "transcription_expected_fixed_seconds_per_item": 75.0,
+        "transcription_expected_seconds_per_media_second": 0.20,
+        "transcription_high_fixed_seconds_per_item": 180.0,
+        "transcription_high_seconds_per_media_second": 0.40,
+        "analysis_expected_fixed_seconds_per_item": 75.0,
+        "analysis_expected_seconds_per_media_second": 0.02,
+        "analysis_high_fixed_seconds_per_item": 180.0,
+        "analysis_high_seconds_per_media_second": 0.05,
+        "terminology_expected_fixed_seconds": 45.0,
+        "terminology_expected_seconds_per_item": 20.0,
+        "terminology_high_fixed_seconds": 60.0,
+        "terminology_high_seconds_per_item": 45.0,
+        "normalization_expected_fixed_seconds": 60.0,
+        "normalization_expected_seconds_per_item": 2.0,
+        "normalization_high_fixed_seconds": 180.0,
+        "normalization_high_seconds_per_item": 5.0,
+        "compilation_expected_fixed_seconds": 30.0,
+        "compilation_expected_seconds_per_item": 0.5,
+        "compilation_high_fixed_seconds": 90.0,
+        "compilation_high_seconds_per_item": 2.0,
+        "analysis_input_tokens_per_media_second": 3.4,
+        "analysis_input_tokens_per_item": 1_500.0,
+        "analysis_output_tokens_per_item": 2_000.0,
+        "terminology_input_tokens_per_media_second": 20.0,
+        "terminology_input_tokens_per_item": 2_000.0,
+        "terminology_output_tokens_per_item": 1_000.0,
+        "normalization_input_fixed_tokens": 5_000.0,
+        "normalization_input_tokens_per_item": 1_000.0,
+        "normalization_output_fixed_tokens": 5_000.0,
+        "normalization_output_tokens_per_item": 500.0,
+    },
+    "rates": {
+        "gpt-5-nano": {
+            "input_per_million_tokens_usd": 0.05,
+            "output_per_million_tokens_usd": 0.40,
+        },
+        "gpt-5.4-mini": {
+            "input_per_million_tokens_usd": 0.75,
+            "output_per_million_tokens_usd": 4.50,
+        },
+    },
+}
 TOPIC_NORMALIZATION_MODEL = "gpt-5.4-mini"
 TOPIC_NORMALIZATION_PROMPT_VERSION = 2
 TOPIC_DISPLAY_LABEL_PROMPT_VERSION = 1
@@ -3276,8 +3337,25 @@ def validate_project_processing_plan(plan: dict[str, Any]) -> None:
         "deferred_collection_jobs": len(collection_tasks),
     }:
         raise ValueError("Project processing plan summary is inconsistent")
+    if (
+        plan.get("planner") == {
+            "id": PROJECT_PROCESSING_PLANNER_HANDLER[0],
+            "version": PROJECT_PROCESSING_PLANNER_HANDLER[1],
+        }
+        and "projection" not in plan["estimate"]
+    ):
+        raise ValueError("Project processing plan is missing its pipeline projection")
     if plan["plan_hash"] != project_processing_plan_sha256(plan):
         raise ValueError("Project processing plan hash is invalid")
+
+
+def is_supported_project_processing_plan_job(job: Any) -> bool:
+    handler = job.get("spec", {}).get("handler") if isinstance(job, dict) else None
+    return (
+        isinstance(handler, dict)
+        and handler.get("id") == PROJECT_PROCESSING_PLANNER_HANDLER[0]
+        and handler.get("version") in SUPPORTED_PROJECT_PROCESSING_PLANNER_VERSIONS
+    )
 
 
 def project_processing_plan_spec(
@@ -3981,6 +4059,207 @@ def _planned_item_task_id(item_id: str, stage: str) -> str:
     return f"item:{sha256_hex(item_id)[:16]}:{stage}"
 
 
+def _estimated_model_cost(
+    model: str,
+    *,
+    input_tokens: int,
+    output_tokens: int,
+) -> float:
+    rates = PROJECT_ESTIMATION_POLICY["rates"][model]
+    return round(
+        (
+            input_tokens * rates["input_per_million_tokens_usd"]
+            + output_tokens * rates["output_per_million_tokens_usd"]
+        )
+        / 1_000_000,
+        6,
+    )
+
+
+def project_pipeline_estimate(
+    *,
+    item_count: int,
+    known_duration_seconds: float,
+    unknown_duration_items: int,
+) -> dict[str, Any]:
+    """Project the gross pipeline without executing acquisition or model work."""
+    coefficients = PROJECT_ESTIMATION_POLICY["coefficients"]
+    known_items = item_count - unknown_duration_items
+    imputed_duration_seconds = (
+        known_duration_seconds / known_items
+        if known_items
+        else coefficients["default_unknown_duration_seconds"]
+    )
+    projected_duration_seconds = known_duration_seconds + (
+        unknown_duration_items * imputed_duration_seconds
+    )
+    high_duration_seconds = known_duration_seconds + (
+        unknown_duration_items
+        * max(imputed_duration_seconds, coefficients["high_unknown_duration_seconds"])
+    )
+    concurrency = PROJECT_ESTIMATION_POLICY["assumed_concurrency"]
+
+    expected_parallelizable_seconds = (
+        (
+            coefficients["acquisition_expected_fixed_seconds_per_item"] * item_count
+            + coefficients["acquisition_expected_seconds_per_media_second"]
+            * projected_duration_seconds
+        )
+        + (
+            coefficients["transcription_expected_fixed_seconds_per_item"] * item_count
+            + coefficients["transcription_expected_seconds_per_media_second"]
+            * projected_duration_seconds
+        )
+        + (
+            coefficients["analysis_expected_fixed_seconds_per_item"] * item_count
+            + coefficients["analysis_expected_seconds_per_media_second"]
+            * projected_duration_seconds
+        )
+    )
+    high_parallelizable_seconds = (
+        (
+            coefficients["acquisition_high_fixed_seconds_per_item"] * item_count
+            + coefficients["acquisition_high_seconds_per_media_second"]
+            * high_duration_seconds
+        )
+        + (
+            coefficients["transcription_high_fixed_seconds_per_item"] * item_count
+            + coefficients["transcription_high_seconds_per_media_second"]
+            * high_duration_seconds
+        )
+        + (
+            coefficients["analysis_high_fixed_seconds_per_item"] * item_count
+            + coefficients["analysis_high_seconds_per_media_second"]
+            * high_duration_seconds
+        )
+    )
+    expected_collection_seconds = (
+        (
+            coefficients["terminology_expected_fixed_seconds"]
+            + coefficients["terminology_expected_seconds_per_item"] * item_count
+        )
+        + (
+            coefficients["normalization_expected_fixed_seconds"]
+            + coefficients["normalization_expected_seconds_per_item"] * item_count
+        )
+        + (
+            coefficients["compilation_expected_fixed_seconds"]
+            + coefficients["compilation_expected_seconds_per_item"] * item_count
+        )
+    )
+    high_collection_seconds = (
+        (
+            coefficients["terminology_high_fixed_seconds"]
+            + coefficients["terminology_high_seconds_per_item"] * item_count
+        )
+        + (
+            coefficients["normalization_high_fixed_seconds"]
+            + coefficients["normalization_high_seconds_per_item"] * item_count
+        )
+        + (
+            coefficients["compilation_high_fixed_seconds"]
+            + coefficients["compilation_high_seconds_per_item"] * item_count
+        )
+    )
+    expected_seconds = math.ceil(
+        expected_parallelizable_seconds / concurrency + expected_collection_seconds
+    )
+    high_seconds = math.ceil(
+        high_parallelizable_seconds / concurrency + high_collection_seconds
+    )
+
+    analysis_input = math.ceil(
+        coefficients["analysis_input_tokens_per_media_second"]
+        * projected_duration_seconds
+        + coefficients["analysis_input_tokens_per_item"] * item_count
+    )
+    analysis_output = math.ceil(
+        coefficients["analysis_output_tokens_per_item"] * item_count
+    )
+    terminology_input = math.ceil(
+        coefficients["terminology_input_tokens_per_media_second"]
+        * projected_duration_seconds
+        + coefficients["terminology_input_tokens_per_item"] * item_count
+    )
+    terminology_output = math.ceil(
+        coefficients["terminology_output_tokens_per_item"] * item_count
+    )
+    normalization_input = math.ceil(
+        coefficients["normalization_input_fixed_tokens"]
+        + coefficients["normalization_input_tokens_per_item"] * item_count
+    )
+    normalization_output = math.ceil(
+        coefficients["normalization_output_fixed_tokens"]
+        + coefficients["normalization_output_tokens_per_item"] * item_count
+    )
+    cost_components = [
+        {
+            "stage": "analysis",
+            "provider": "openai",
+            "model": EDUCATIONAL_VIDEO_ANALYSIS_MODEL,
+            "input_tokens": analysis_input,
+            "output_tokens": analysis_output,
+            "expected_usd": _estimated_model_cost(
+                EDUCATIONAL_VIDEO_ANALYSIS_MODEL,
+                input_tokens=analysis_input,
+                output_tokens=analysis_output,
+            ),
+        },
+        {
+            "stage": "terminology-resolution",
+            "provider": "openai",
+            "model": TERMINOLOGY_RESOLUTION_MODEL,
+            "input_tokens": terminology_input,
+            "output_tokens": terminology_output,
+            "expected_usd": _estimated_model_cost(
+                TERMINOLOGY_RESOLUTION_MODEL,
+                input_tokens=terminology_input,
+                output_tokens=terminology_output,
+            ),
+        },
+        {
+            "stage": "topic-normalization",
+            "provider": "openai",
+            "model": TOPIC_NORMALIZATION_MODEL,
+            "input_tokens": normalization_input,
+            "output_tokens": normalization_output,
+            "expected_usd": _estimated_model_cost(
+                TOPIC_NORMALIZATION_MODEL,
+                input_tokens=normalization_input,
+                output_tokens=normalization_output,
+            ),
+        },
+    ]
+    expected_cost = round(sum(item["expected_usd"] for item in cost_components), 6)
+    return {
+        "policy": copy.deepcopy(PROJECT_ESTIMATION_POLICY),
+        "scope": "gross-full-pipeline",
+        "confidence": "low" if item_count else "high",
+        "media_duration_seconds": {
+            "known": round(known_duration_seconds, 3),
+            "projected": round(projected_duration_seconds, 3),
+            "unknown_items": unknown_duration_items,
+        },
+        "time": {
+            "assumed_concurrency": concurrency,
+            "expected_seconds": expected_seconds,
+            "high_seconds": high_seconds,
+            "queue_contention_included": False,
+        },
+        "cost": {
+            "currency": "USD",
+            "expected_usd": expected_cost,
+            "high_usd": round(
+                expected_cost * PROJECT_ESTIMATION_POLICY["high_cost_multiplier"], 6
+            ),
+            "components": cost_components,
+            "github_actions_usd": 0,
+            "github_actions_basis": "public-repository-standard-runners",
+            "r2_and_convex_usd": None,
+        },
+    }
+
+
 def project_processing_planner(
     job: dict[str, Any], context: WorkerContext | None = None
 ) -> dict[str, Any]:
@@ -4166,6 +4445,11 @@ def project_processing_planner(
             "depends_on": [normalization_task],
         },
     ]
+    projection = project_pipeline_estimate(
+        item_count=len(item_plans),
+        known_duration_seconds=known_duration_seconds,
+        unknown_duration_items=unknown_duration_items,
+    )
     plan = {
         "kind": "watchcraft.project-processing-plan",
         "schema_version": 1,
@@ -4200,10 +4484,12 @@ def project_processing_planner(
                 + LOCAL_EXECUTION_PROFILES[OPENAI_EXECUTION_PROFILE]["timeout_minutes"]
             ),
             "parallel_wall_clock_ms": None,
+            "projection": projection,
             "caveats": [
-                "The bound excludes local metadata enrichment and source acquisition.",
-                "Actual concurrency and queue latency are not known at planning time.",
-                "Historical duration heuristics have not been calibrated yet.",
+                "The legacy sequential timeout bound excludes local metadata enrichment and source acquisition.",
+                "The projection assumes bounded concurrency and excludes queue contention.",
+                "Reuse remains unknown until exact acquired-media and derived-artifact digests exist.",
+                "Token quantities are estimated; completed OpenAI calls do not yet record actual usage.",
             ],
         },
         "plan_hash": "",
@@ -6976,10 +7262,7 @@ def run_process_project(args: argparse.Namespace) -> int:
     if (
         not isinstance(plan_job, dict)
         or plan_job.get("state") != "succeeded"
-        or plan_job.get("spec", {}).get("handler") != {
-            "id": PROJECT_PROCESSING_PLANNER_HANDLER[0],
-            "version": PROJECT_PROCESSING_PLANNER_HANDLER[1],
-        }
+        or not is_supported_project_processing_plan_job(plan_job)
     ):
         raise RuntimeError(
             f"Job {args.plan_job_id} is not a successful project processing plan"
@@ -7109,10 +7392,7 @@ def run_resolve_project_terminology(args: argparse.Namespace) -> int:
     if (
         not isinstance(plan_job, dict)
         or plan_job.get("state") != "succeeded"
-        or plan_job.get("spec", {}).get("handler") != {
-            "id": PROJECT_PROCESSING_PLANNER_HANDLER[0],
-            "version": PROJECT_PROCESSING_PLANNER_HANDLER[1],
-        }
+        or not is_supported_project_processing_plan_job(plan_job)
     ):
         raise RuntimeError(
             f"Job {args.plan_job_id} is not a successful project processing plan"
@@ -7287,10 +7567,7 @@ def run_normalize_project(args: argparse.Namespace) -> int:
     if (
         not isinstance(plan_job, dict)
         or plan_job.get("state") != "succeeded"
-        or plan_job.get("spec", {}).get("handler") != {
-            "id": PROJECT_PROCESSING_PLANNER_HANDLER[0],
-            "version": PROJECT_PROCESSING_PLANNER_HANDLER[1],
-        }
+        or not is_supported_project_processing_plan_job(plan_job)
     ):
         raise RuntimeError(
             f"Job {args.plan_job_id} is not a successful project processing plan"
@@ -8045,10 +8322,7 @@ def run_compile_project(args: argparse.Namespace) -> int:
     if (
         not isinstance(plan_job, dict)
         or plan_job.get("state") != "succeeded"
-        or plan_job.get("spec", {}).get("handler") != {
-            "id": PROJECT_PROCESSING_PLANNER_HANDLER[0],
-            "version": PROJECT_PROCESSING_PLANNER_HANDLER[1],
-        }
+        or not is_supported_project_processing_plan_job(plan_job)
     ):
         raise RuntimeError(
             f"Job {args.plan_job_id} is not a successful project processing plan"
