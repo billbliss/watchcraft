@@ -2,6 +2,7 @@ import argparse
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -3595,7 +3596,7 @@ class QueuedAuthoringTests(unittest.TestCase):
             ),
         )
 
-    def test_materialize_project_creates_a_new_revision_package_and_diff(self):
+    def test_materialize_and_publish_project_preserve_the_review_boundary(self):
         from build_collection import build_collection_manifest, render_csv
 
         with tempfile.TemporaryDirectory() as directory:
@@ -3658,6 +3659,11 @@ class QueuedAuthoringTests(unittest.TestCase):
             job = {
                 "job_id": "compile-job-1",
                 "state": "succeeded",
+                "result": {
+                    **analysis_reference,
+                    "artifact_kind": "collection-compilation",
+                    "schema": queued_authoring.COLLECTION_COMPILATION_SCHEMA,
+                },
                 "spec": {"handler": {
                     "id": queued_authoring.COLLECTION_COMPILATION_HANDLER[0],
                     "version": queued_authoring.COLLECTION_COMPILATION_HANDLER[1],
@@ -3717,6 +3723,82 @@ class QueuedAuthoringTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(RuntimeError, "already exists"):
                 queued_authoring.run_materialize_project(args)
+
+            candidate_analysis = destination / "analysis/lesson.analysis.json"
+            materialized_analysis = candidate_analysis.read_bytes()
+            candidate_analysis.write_bytes(materialized_analysis + b"\n")
+            publish_args = build_parser().parse_args([
+                "queue", "publish-project", job["job_id"],
+                "--candidate-directory", str(destination),
+                "--published-collection", str(published_root / "collection.json"),
+            ])
+            with patch("queued_authoring.operator_client", return_value=control), patch(
+                "queued_authoring.verified_json_result", return_value=bundle
+            ), patch(
+                "queued_authoring.r2_artifact_reader", return_value=store
+            ), self.assertRaisesRegex(RuntimeError, "changed after materialization"):
+                queued_authoring.run_publish_project(publish_args)
+            candidate_analysis.write_bytes(materialized_analysis)
+
+            (published_root / "README.md").write_text(
+                "Authoring notes stay here.\n", encoding="utf-8"
+            )
+            (published_root / "transcripts").mkdir()
+            (published_root / "transcripts/lesson.txt").write_text(
+                "Preserved transcript.\n", encoding="utf-8"
+            )
+            subprocess.run(["git", "init", str(root)], check=True, capture_output=True)
+            subprocess.run(
+                ["git", "-C", str(root), "config", "user.email", "test@example.com"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(root), "config", "user.name", "Watchcraft Test"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(root), "add", "published"], check=True
+            )
+            subprocess.run(
+                ["git", "-C", str(root), "commit", "-m", "published baseline"],
+                check=True,
+                capture_output=True,
+            )
+            with patch("queued_authoring.operator_client", return_value=control), patch(
+                "queued_authoring.verified_json_result", return_value=bundle
+            ), patch(
+                "queued_authoring.r2_artifact_reader", return_value=store
+            ):
+                with redirect_stdout(io.StringIO()) as publication_output:
+                    self.assertEqual(
+                        queued_authoring.run_publish_project(publish_args), 0
+                    )
+
+            promoted = json.loads(
+                (published_root / "collection.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(promoted, materialized)
+            self.assertEqual(
+                (published_root / "analysis/lesson.analysis.json").read_bytes(),
+                (destination / "analysis/lesson.analysis.json").read_bytes(),
+            )
+            self.assertEqual(
+                (published_root / "README.md").read_text(encoding="utf-8"),
+                "Authoring notes stay here.\n",
+            )
+            self.assertEqual(
+                (published_root / "transcripts/lesson.txt").read_text(encoding="utf-8"),
+                "Preserved transcript.\n",
+            )
+            self.assertIn('"state": "published-to-worktree"', publication_output.getvalue())
+            with patch("queued_authoring.operator_client", return_value=control), patch(
+                "queued_authoring.verified_json_result", return_value=bundle
+            ), patch(
+                "queued_authoring.r2_artifact_reader", return_value=store
+            ), self.assertRaisesRegex(
+                RuntimeError, "uncommitted managed-file changes"
+            ):
+                queued_authoring.run_publish_project(publish_args)
 
     def test_waiting_for_a_remote_job_reports_periodic_progress(self):
         client = Mock()

@@ -6365,6 +6365,296 @@ def run_materialize_project(args: argparse.Namespace) -> int:
     return 0
 
 
+def git_repository_root(path: Path) -> Path:
+    completed = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(f"Published collection is not inside a Git repository: {path}")
+    root = Path(completed.stdout.strip()).resolve()
+    try:
+        path.resolve().relative_to(root)
+    except ValueError as error:
+        raise RuntimeError("Git returned an invalid repository root") from error
+    return root
+
+
+def git_path_status(repository: Path, paths: list[Path]) -> str:
+    relative = [str(path.resolve().relative_to(repository)) for path in paths]
+    completed = subprocess.run(
+        [
+            "git", "-C", str(repository), "status", "--porcelain=v1",
+            "--untracked-files=all", "--", *relative,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"Could not inspect published collection status: "
+            f"{completed.stderr.strip() or 'git status failed'}"
+        )
+    return completed.stdout.strip()
+
+
+def run_publish_project(args: argparse.Namespace) -> int:
+    candidate_root = args.candidate_directory.resolve()
+    published_collection_path = args.published_collection.resolve()
+    published_root = published_collection_path.parent
+    if not candidate_root.is_dir():
+        raise RuntimeError(f"Candidate directory does not exist: {candidate_root}")
+    if not published_collection_path.is_file():
+        raise RuntimeError(
+            f"Published collection does not exist: {published_collection_path}"
+        )
+    if candidate_root == published_root:
+        raise RuntimeError("Candidate and published collection directories must differ")
+    if (
+        published_root in candidate_root.parents
+        or candidate_root in published_root.parents
+    ):
+        raise RuntimeError(
+            "Candidate and published collection directories must not contain one another"
+        )
+
+    from build_collection import render_csv, validate_collection_manifest
+
+    try:
+        published = json.loads(published_collection_path.read_text(encoding="utf-8"))
+        candidate = json.loads(
+            (candidate_root / "collection.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError("Could not read candidate and published collection manifests") from error
+    validate_collection_manifest(published)
+    validate_collection_manifest(candidate)
+    if published.get("content_hash") != collection_manifest_content_hash(published):
+        raise RuntimeError("Published collection content_hash does not match its content")
+    if candidate.get("content_hash") != collection_manifest_content_hash(candidate):
+        raise RuntimeError("Candidate collection content_hash does not match its content")
+    if candidate.get("collection_id") != published.get("collection_id"):
+        raise RuntimeError("Candidate and published collection IDs do not match")
+    content_changed = candidate["content_hash"] != published["content_hash"]
+    expected_revision = published["revision"] + 1 if content_changed else published["revision"]
+    if candidate.get("revision") != expected_revision:
+        raise RuntimeError(
+            f"Candidate revision {candidate.get('revision')} does not match expected "
+            f"publication revision {expected_revision}"
+        )
+
+    control = operator_client(args.operator_token_source)
+    submission = control.post("/submissions/get", {"job_id": args.compilation_job_id})
+    job = submission.get("job")
+    if (
+        not isinstance(job, dict)
+        or job.get("state") != "succeeded"
+        or job.get("spec", {}).get("handler") != {
+            "id": COLLECTION_COMPILATION_HANDLER[0],
+            "version": COLLECTION_COMPILATION_HANDLER[1],
+        }
+    ):
+        raise RuntimeError(
+            f"Job {args.compilation_job_id} is not a successful collection compilation"
+        )
+    bundle = verified_json_result(job, args.r2_credentials_source)
+    manifest = bundle.get("manifest") if isinstance(bundle, dict) else None
+    resources = bundle.get("resources") if isinstance(bundle, dict) else None
+    provenance = bundle.get("provenance") if isinstance(bundle, dict) else None
+    if (
+        not isinstance(bundle, dict)
+        or bundle.get("kind") != "watchcraft.collection-compilation"
+        or bundle.get("schema_version") != COLLECTION_COMPILATION_SCHEMA["version"]
+        or not isinstance(manifest, dict)
+        or not isinstance(resources, list)
+        or not isinstance(provenance, dict)
+        or provenance.get("handler_id") != COLLECTION_COMPILATION_HANDLER[0]
+        or provenance.get("job_id") != job["job_id"]
+    ):
+        raise RuntimeError("The compilation artifact is invalid")
+    validate_collection_manifest(manifest)
+    expected_candidate = json.loads(json.dumps(manifest, ensure_ascii=False))
+    expected_candidate["revision"] = expected_revision
+    if candidate != expected_candidate:
+        raise RuntimeError("Materialized candidate does not match its compilation artifact")
+
+    expected_paths = {item["analysis"]["path"] for item in candidate["items"].values()}
+    references_by_path = {}
+    for resource in resources:
+        path_value = resource.get("path") if isinstance(resource, dict) else None
+        path = Path(path_value) if isinstance(path_value, str) else None
+        reference = validated_artifact_reference(
+            resource.get("artifact") if isinstance(resource, dict) else None
+        )
+        if (
+            path is None
+            or path.is_absolute()
+            or ".." in path.parts
+            or path.as_posix() not in expected_paths
+            or reference.get("artifact_kind") != "analysis"
+            or reference.get("schema") != VIDEO_ANALYSIS_SCHEMA
+            or reference.get("media_type") != "application/json"
+            or path.as_posix() in references_by_path
+        ):
+            raise RuntimeError("The compilation artifact has an invalid resource binding")
+        references_by_path[path.as_posix()] = reference
+    if set(references_by_path) != expected_paths:
+        raise RuntimeError("Compilation resources do not exactly cover manifest analyses")
+
+    store = r2_artifact_reader(args.r2_credentials_source)
+    analyses = []
+    expected_resource_payloads = {}
+    for relative, reference in sorted(references_by_path.items()):
+        payload = store.get_bytes(reference)
+        try:
+            analysis = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RuntimeError(f"Analysis resource is invalid JSON: {relative}") from error
+        if (
+            not isinstance(analysis, dict)
+            or analysis.get("schema_version") != VIDEO_ANALYSIS_SCHEMA["version"]
+            or f"analysis/{Path(analysis.get('video', '')).stem}.analysis.json" != relative
+        ):
+            raise RuntimeError(f"Analysis resource does not match its path: {relative}")
+        analyses.append(analysis)
+        expected_resource_payloads[relative] = (
+            json.dumps(analysis, ensure_ascii=False, indent=2) + "\n"
+        ).encode("utf-8")
+
+    expected_files = {"collection.json", "catalog.csv", *expected_paths}
+    observed_files = {
+        path.relative_to(candidate_root).as_posix()
+        for path in candidate_root.rglob("*")
+        if path.is_file()
+    }
+    if any(path.is_symlink() for path in candidate_root.rglob("*")):
+        raise RuntimeError("Candidate package must not contain symbolic links")
+    if observed_files != expected_files:
+        unexpected = sorted(observed_files - expected_files)
+        missing = sorted(expected_files - observed_files)
+        raise RuntimeError(
+            f"Candidate package file inventory is invalid; unexpected={unexpected}, "
+            f"missing={missing}"
+        )
+    expected_manifest_payload = (
+        json.dumps(candidate, ensure_ascii=False, indent=2) + "\n"
+    ).encode("utf-8")
+    if (candidate_root / "collection.json").read_bytes() != expected_manifest_payload:
+        raise RuntimeError("Candidate collection.json is not the materialized artifact")
+    expected_csv = render_csv(analyses, candidate).encode("utf-8")
+    if (candidate_root / "catalog.csv").read_bytes() != expected_csv:
+        raise RuntimeError("Candidate catalog.csv does not match its analyses")
+    for relative, expected_payload in expected_resource_payloads.items():
+        if (candidate_root / relative).read_bytes() != expected_payload:
+            raise RuntimeError(f"Candidate resource was changed after materialization: {relative}")
+
+    repository = git_repository_root(published_root)
+    if published_root == repository:
+        raise RuntimeError("The collection directory must not be the Git repository root")
+    current_analysis_paths = {
+        path.relative_to(published_root).as_posix()
+        for path in (published_root / "analysis").rglob("*.analysis.json")
+    } if (published_root / "analysis").is_dir() else set()
+    managed_paths = {
+        "collection.json", "catalog.csv", *expected_paths, *current_analysis_paths
+    }
+    managed_targets = [published_root / relative for relative in sorted(managed_paths)]
+    status = git_path_status(repository, managed_targets)
+    if status:
+        raise RuntimeError(
+            "Published collection has uncommitted managed-file changes:\n" + status
+        )
+    original_payloads = {
+        relative: (published_root / relative).read_bytes()
+        for relative in managed_paths
+        if (published_root / relative).is_file()
+    }
+
+    staging = Path(tempfile.mkdtemp(
+        prefix=f".{published_root.name}.publishing-", dir=published_root.parent
+    ))
+    backup = published_root.parent / f".{published_root.name}.publication-backup-{uuid.uuid4()}"
+    try:
+        shutil.copytree(published_root, staging, dirs_exist_ok=True)
+        staged_analysis = staging / "analysis"
+        if staged_analysis.is_dir():
+            for path in staged_analysis.rglob("*.analysis.json"):
+                path.unlink()
+        shutil.copytree(candidate_root / "analysis", staged_analysis, dirs_exist_ok=True)
+        shutil.copy2(candidate_root / "collection.json", staging / "collection.json")
+        shutil.copy2(candidate_root / "catalog.csv", staging / "catalog.csv")
+        validate_collection_manifest(json.loads(
+            (staging / "collection.json").read_text(encoding="utf-8")
+        ))
+        for relative, original in original_payloads.items():
+            current = published_root / relative
+            if not current.is_file() or current.read_bytes() != original:
+                raise RuntimeError("Published collection changed during publication")
+        status = git_path_status(repository, managed_targets)
+        if status:
+            raise RuntimeError(
+                "Published collection changed during publication:\n" + status
+            )
+        os.replace(published_root, backup)
+        try:
+            os.replace(staging, published_root)
+        except Exception:
+            os.replace(backup, published_root)
+            raise
+        shutil.rmtree(backup)
+    except Exception:
+        if staging.exists():
+            shutil.rmtree(staging)
+        raise
+
+    changed = git_path_status(repository, [published_root])
+    print(json.dumps({
+        "state": "published-to-worktree",
+        "compilation_job_id": job["job_id"],
+        "compilation_artifact": validated_artifact_reference(job.get("result")),
+        "repository": str(repository),
+        "collection": str(published_root),
+        "collection_id": candidate["collection_id"],
+        "revision": candidate["revision"],
+        "content_hash": candidate["content_hash"],
+        "resources": len(expected_resource_payloads),
+        "git_changes": changed.splitlines(),
+        "evidence": {
+            "source": {
+                "revision": published["revision"],
+                "content_hash": published["content_hash"],
+            },
+            "candidate": {
+                "revision": candidate["revision"],
+                "content_hash": candidate["content_hash"],
+                "stats": candidate.get("stats", {}),
+            },
+            "comparison": collection_comparison(candidate, published),
+            "workflow": {
+                "github_run_id": job.get("dispatch", {}).get("github_run_id"),
+                "github_run_url": job.get("dispatch", {}).get("github_run_url"),
+            },
+            "checks": [
+                "compilation-artifact-verified",
+                "candidate-bytes-verified",
+                "published-baseline-unchanged",
+                "collection-schema-validated",
+                "managed-target-paths-clean",
+            ],
+            "compilation_timing": provenance.get("timing", {}),
+        },
+    }, ensure_ascii=False, indent=2, sort_keys=True))
+    print(
+        f"Review with: git -C {repository} diff -- "
+        f"{published_root.relative_to(repository)}",
+        flush=True,
+    )
+    return 0
+
+
 def run_compile_project(args: argparse.Namespace) -> int:
     command_started_at = time.monotonic()
     control = operator_client(args.operator_token_source)
@@ -7633,6 +7923,35 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         default="auto",
         help="Read-only compilation and resource credential source (default: auto)",
     )
+    publish_project = commands.add_parser(
+        "publish-project",
+        parents=[credentials],
+        help="Promote a reviewed candidate into a collection Git worktree",
+        description=(
+            "Reverify a materialized collection candidate against its immutable "
+            "compilation artifact and unchanged published baseline, then replace only "
+            "the managed reader package files. This does not commit, push, or deploy."
+        ),
+    )
+    publish_project.add_argument("compilation_job_id")
+    publish_project.add_argument(
+        "--candidate-directory",
+        required=True,
+        type=Path,
+        help="Reviewed materialized candidate directory",
+    )
+    publish_project.add_argument(
+        "--published-collection",
+        required=True,
+        type=Path,
+        help="Current tracked collection.json to replace after verification",
+    )
+    publish_project.add_argument(
+        "--r2-credentials-source",
+        choices=("auto", "keychain", "environment"),
+        default="auto",
+        help="Read-only compilation and resource credential source (default: auto)",
+    )
     queued_analysis = commands.add_parser(
         "analyze-transcript",
         parents=[credentials],
@@ -7973,6 +8292,8 @@ def run_queue_command(args: argparse.Namespace) -> int:
         return run_compile_project(args)
     if args.queue_command == "materialize-project":
         return run_materialize_project(args)
+    if args.queue_command == "publish-project":
+        return run_publish_project(args)
     if args.queue_command == "analyze-transcript":
         return run_queued_video_analysis(args)
 

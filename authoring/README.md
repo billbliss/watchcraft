@@ -686,6 +686,32 @@ only `collection.json`, `catalog.csv`, and analysis resources, so authoring-only
 published workspace do not appear as deletions. Use `--diff-output` to choose another new
 patch path. This command needs neither a Convex deployment nor a registry update.
 
+After reviewing the materialized package, promote its managed reader files into the tracked
+collection worktree explicitly:
+
+```bash
+./authoring/watchcraft-author queue publish-project COMPILATION_JOB_ID \
+  --candidate-directory /path/to/review-directory \
+  --published-collection /path/to/current/collection.json \
+  --operator-token-source keychain \
+  --r2-credentials-source keychain
+```
+
+Publication re-fetches and verifies the immutable compilation and every analysis artifact,
+requires the candidate byte-for-byte materialization to be intact, verifies the current
+published content hash and next revision, and refuses modified or untracked managed target
+files. It replaces `collection.json`, `catalog.csv`, and the managed analysis resources as one
+recoverable directory transition while preserving authoring-only files such as transcripts,
+project configuration, and notes. The command writes only to the Git worktree: it never
+commits, pushes, or deploys, and a second invocation is refused until the first publication is
+reviewed and committed.
+
+The command's structured result is also the evidence contract for a future PR-producing step:
+it includes the compilation job and artifact, source and candidate revisions and content
+hashes, collection statistics, completed validation checks, worker timing, and exact Git status.
+A future `create-project-pr` command can render that evidence into a commit and PR description
+without weakening this local review boundary.
+
 `queue result` resolves the artifact reference from the authoritative completed job,
 downloads the object from private R2, and verifies its declared byte length and SHA-256
 digest. JSON is displayed in readable form by default; `--output PATH` writes the exact
