@@ -30,7 +30,7 @@ def registry_snapshot(
 ):
     if terminology_resolution:
         return {
-            "registry_version": "2026-09-10.6",
+            "registry_version": "2026-09-10.7",
             "registry_sha256": "c" * 64,
             "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
                 queued_authoring.TERMINOLOGY_RESOLUTION_HANDLER
@@ -41,7 +41,7 @@ def registry_snapshot(
         }
     if collection_compilation:
         return {
-            "registry_version": "2026-09-10.6",
+            "registry_version": "2026-09-10.7",
             "registry_sha256": "c" * 64,
             "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
                 queued_authoring.COLLECTION_COMPILATION_HANDLER
@@ -52,7 +52,7 @@ def registry_snapshot(
         }
     if topic_normalization:
         return {
-            "registry_version": "2026-09-10.6",
+            "registry_version": "2026-09-10.7",
             "registry_sha256": "c" * 64,
             "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
                 queued_authoring.TOPIC_NORMALIZATION_HANDLER
@@ -2622,11 +2622,28 @@ class QueuedAuthoringTests(unittest.TestCase):
                     "canonical_key": "i-hat and j-hat",
                     "canonical_label": "i-hat and j-hat",
                 },
+                "basis vectors i-hat, j-hat, k-hat": {
+                    "canonical_key": "basis vectors i-hat, j-hat, k-hat",
+                    "canonical_label": "basis vectors i-hat, j-hat, k-hat",
+                },
+                "columns as images of basis vectors (i-hat, j-hat)": {
+                    "canonical_key": "columns as images of basis vectors (i-hat, j-hat)",
+                    "canonical_label": "columns as images of basis vectors (i-hat, j-hat)",
+                },
+                "i-hat, j-hat, k-hat": {
+                    "canonical_key": "i-hat, j-hat, k-hat",
+                    "canonical_label": "i-hat, j-hat, k-hat",
+                },
             },
             "display_labels": {
-                "basis vectors i-hat and j-hat": "i Hat and j Hat",
+                "basis vectors i-hat and j-hat": "basis vectors i Hat & j Hat",
                 "i-hat": "I Hat Vector",
                 "i-hat and j-hat": "Jennifer Coordinates",
+                "basis vectors i-hat, j-hat, k-hat": "i j k Basis",
+                "columns as images of basis vectors (i-hat, j-hat)": (
+                    "columns images of basis vectors"
+                ),
+                "i-hat, j-hat, k-hat": "ijk Basis Vectors",
             },
         }
         terminology = {
@@ -2650,10 +2667,22 @@ class QueuedAuthoringTests(unittest.TestCase):
 
         self.assertEqual(
             labels["basis vectors i-hat and j-hat"],
-            "basis vectors i-hat and j-hat",
+            "basis vectors i-hat & j-hat",
         )
         self.assertEqual(labels["i-hat"], "i-hat")
         self.assertEqual(labels["i-hat and j-hat"], "i-hat and j-hat")
+        self.assertEqual(
+            labels["basis vectors i-hat, j-hat, k-hat"],
+            "Basis i-hat j-hat k-hat",
+        )
+        self.assertEqual(
+            labels["columns as images of basis vectors (i-hat, j-hat)"],
+            "Columns i-hat j-hat",
+        )
+        self.assertEqual(
+            labels["i-hat, j-hat, k-hat"],
+            "i-hat j-hat k-hat",
+        )
 
     def test_collection_topic_normalizer_uses_the_existing_normalization_core(self):
         references = []

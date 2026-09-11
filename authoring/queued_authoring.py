@@ -92,7 +92,7 @@ PROJECT_PROCESSING_PLANNER_HANDLER = (
 )
 TOPIC_NORMALIZATION_HANDLER = (
     "watchcraft.normalize.collection-topics",
-    "3",
+    "4",
 )
 PRE_TERMINOLOGY_TOPIC_NORMALIZATION_HANDLER = (
     "watchcraft.normalize.collection-topics",
@@ -100,7 +100,7 @@ PRE_TERMINOLOGY_TOPIC_NORMALIZATION_HANDLER = (
 )
 COLLECTION_COMPILATION_HANDLER = (
     "watchcraft.compile.video-collection",
-    "4",
+    "5",
 )
 PYTHON_EXECUTION_PROFILE = ("python-portable", "1")
 PYTHON_EXECUTION_WORKFLOW = "authoring-worker.yml"
@@ -1332,6 +1332,58 @@ def apply_automatic_terminology_to_display_labels(
                 present.add(display)
         return styled, present
 
+    def protected_terms(value: str) -> list[str]:
+        styled, approved = style(value)
+        terms = list(approved)
+        terms.extend(
+            match.group(0).casefold()
+            for match in re.finditer(
+                r"(?<![A-Za-z0-9])[A-Za-z0-9]+-hat(?![A-Za-z0-9])",
+                styled,
+                flags=re.IGNORECASE,
+            )
+        )
+        return list(dict.fromkeys(
+            sorted(terms, key=lambda term: styled.casefold().find(term.casefold()))
+        ))
+
+    def contains_term(value: str, term: str) -> bool:
+        return re.search(
+            r"(?<![A-Za-z0-9])" + re.escape(term) + r"(?![A-Za-z0-9])",
+            value,
+            flags=re.IGNORECASE,
+        ) is not None
+
+    def protected_fallback(
+        canonical_label: str,
+        required: list[str],
+        reserved: set[str],
+    ) -> str | None:
+        joined = " ".join(required)
+        words = re.findall(
+            r"[A-Za-z0-9]+(?:[&+./-][A-Za-z0-9]+)*", canonical_label
+        )
+        ignored = {
+            "a", "an", "and", "as", "for", "in", "of", "on", "or", "the", "to", "with",
+        }
+        context = next(
+            (
+                word
+                for word in words
+                if word.casefold() not in ignored
+                and all(word.casefold() != term.casefold() for term in required)
+            ),
+            None,
+        )
+        candidates = []
+        if context is not None:
+            candidates.append(f"{context.title()} {joined}")
+        candidates.append(joined)
+        for candidate in candidates:
+            if display_label_error(candidate, reserved) is None:
+                return candidate
+        return None
+
     assignments = normalization.get("assignments", {})
     display_labels = normalization.get("display_labels", {})
     if not isinstance(assignments, dict) or not isinstance(display_labels, dict):
@@ -1349,26 +1401,25 @@ def apply_automatic_terminology_to_display_labels(
     for key, label in display_labels.items():
         if not isinstance(key, str) or not isinstance(label, str):
             raise ValueError("Topic normalization has an invalid display label")
-        styled_label, present = style(label)
+        styled_label, _present = style(label)
         canonical_label = canonical_labels.get(key, key)
-        styled_canonical, required = style(canonical_label)
+        styled_canonical, _required = style(canonical_label)
+        required = protected_terms(styled_canonical)
         canonical_error = display_label_error(styled_canonical, set())
         approved_atomic = (
-            styled_canonical in required
+            len(required) == 1
+            and styled_canonical.casefold() == required[0].casefold()
             and len(styled_canonical) <= 32
             and not re.search(r"[,;:()\[\]{}]", styled_canonical)
         )
-        if len(required) == 1 and (canonical_error is None or approved_atomic):
+        missing = [term for term in required if not contains_term(styled_label, term)]
+        if len(required) == 1 and approved_atomic:
             styled_label = styled_canonical
-        elif required - present:
+        elif missing:
             # Prefer the source topic when it already satisfies the compact-label
             # contract. This keeps approved notation instead of accepting a model
             # paraphrase that dropped it entirely.
             if canonical_error is None:
-                styled_label = styled_canonical
-            elif approved_atomic:
-                # A terminology-approved atomic label such as `i-hat` is allowed
-                # even though the generic UI-label prompt normally requires two words.
                 styled_label = styled_canonical
         repaired[key] = styled_label
 
@@ -1377,17 +1428,38 @@ def apply_automatic_terminology_to_display_labels(
     ordered_keys = sorted(
         repaired,
         key=lambda key: (
-            " ".join(repaired[key].casefold().split()) != key,
+            len([
+                word
+                for word in re.findall(
+                    r"[A-Za-z0-9]+(?:[&+./-][A-Za-z0-9]+)*",
+                    canonical_labels.get(key, key),
+                )
+                if word.casefold() not in {
+                    *[term.casefold() for term in protected_terms(canonical_labels.get(key, key))],
+                    "a", "an", "and", "as", "for", "in", "of", "on", "or", "the", "to", "with",
+                }
+            ]),
             key,
         ),
     )
     for key in ordered_keys:
         label = repaired[key]
+        canonical_label, _ = style(canonical_labels.get(key, key))
+        required = protected_terms(canonical_label)
+        if any(not contains_term(label, term) for term in required):
+            fallback = protected_fallback(canonical_label, required, set(by_identity))
+            if fallback is None:
+                raise ValueError(
+                    f"Could not preserve terminology in display label for {key!r}"
+                )
+            label = fallback
         identity = " ".join(label.casefold().split())
         existing = by_identity.get(identity)
         if existing is not None:
-            canonical_label, _ = style(canonical_labels.get(key, key))
-            if display_label_error(canonical_label, set(by_identity)) is None:
+            protected = protected_fallback(canonical_label, required, set(by_identity))
+            if required and protected is not None:
+                label = protected
+            elif display_label_error(canonical_label, set(by_identity)) is None:
                 label = canonical_label
             else:
                 fallback = deterministic_display_label(

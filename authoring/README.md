@@ -631,7 +631,7 @@ related pairs, and timing; the printed `queue result` command retrieves the comp
 normalization artifact.
 
 Terminology application, stable-baseline normalization, and revised compilation are registered
-in capability registry `2026-09-10.6`. After committing and pushing, publish and activate the
+in capability registry `2026-09-10.7`. After committing and pushing, publish and activate the
 checked-in registry before running either downstream command:
 
 ```bash
