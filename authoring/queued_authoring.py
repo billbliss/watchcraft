@@ -6022,6 +6022,157 @@ def run_project_import(args: argparse.Namespace) -> int:
     return 0
 
 
+def catalog_project_slug(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", value.casefold()).strip("-")
+
+
+def youtube_playlist_catalog_project(
+    playlist: dict[str, Any],
+    *,
+    project_id: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    publisher: str | None = None,
+    publisher_url: str | None = None,
+    language: str = "en",
+    excluded_video_ids: list[str] | None = None,
+    listed: bool = True,
+) -> dict[str, Any]:
+    playlist_id = playlist.get("playlist_id")
+    canonical_url = playlist.get("url")
+    observed_title = playlist.get("title")
+    if not all(
+        isinstance(value, str) and value
+        for value in (playlist_id, canonical_url, observed_title)
+    ):
+        raise ValueError("YouTube playlist discovery returned incomplete identity")
+    accepted_title = title.strip() if isinstance(title, str) else observed_title.strip()
+    if not accepted_title:
+        raise ValueError("Catalog project title must not be empty")
+    accepted_project_id = project_id or catalog_project_slug(accepted_title)
+    if (
+        not accepted_project_id
+        or catalog_project_slug(accepted_project_id) != accepted_project_id
+        or len(accepted_project_id) > 200
+    ):
+        raise ValueError("Catalog project ID must be lowercase kebab-case")
+    if publisher_url and not publisher:
+        raise ValueError("--publisher-url requires --publisher")
+    metadata: dict[str, Any] = {"title": accepted_title, "language": language}
+    metadata_basis: dict[str, Any] = {
+        "title": {
+            "origin": "editorial" if title is not None else "source-observation",
+            **(
+                {}
+                if title is not None
+                else {"source_path": "youtube.playlist.title"}
+            ),
+        },
+        "language": {"origin": "editorial"},
+    }
+    accepted_description = (
+        description.strip()
+        if isinstance(description, str)
+        else str(playlist.get("description") or "").strip()
+    )
+    if accepted_description:
+        metadata["description"] = accepted_description
+        metadata_basis["description"] = {
+            "origin": "editorial" if description is not None else "source-observation",
+            **(
+                {}
+                if description is not None
+                else {"source_path": "youtube.playlist.description"}
+            ),
+        }
+    if publisher:
+        publisher_value = {"name": publisher.strip()}
+        if not publisher_value["name"]:
+            raise ValueError("Catalog project publisher must not be empty")
+        if publisher_url:
+            publisher_value["canonical_url"] = publisher_url
+        metadata["publisher"] = publisher_value
+        metadata_basis["publisher"] = {"origin": "editorial"}
+    project = {
+        "kind": "watchcraft.catalog-project",
+        "schema_version": 1,
+        "project_id": accepted_project_id,
+        "revision": 1,
+        "collection_type": {
+            "id": "watchcraft.video-collection",
+            "version": "1",
+            "configuration": {"structure": "ordered-list"},
+        },
+        "iterator": {
+            "id": "watchcraft.youtube-playlist",
+            "version": "1",
+            "configuration": {
+                "canonical_url": canonical_url,
+                "playlist_id": playlist_id,
+                "selection": {
+                    "kind": "published-order",
+                    "excluded_item_ids": list(dict.fromkeys(excluded_video_ids or [])),
+                },
+            },
+            "access_profile": "public-anonymous",
+            "refresh": {"mode": "on-demand", "stale_while_refresh": True},
+        },
+        "metadata": metadata,
+        "metadata_basis": metadata_basis,
+        "publication": {
+            "collection_id": accepted_project_id,
+            "listed": listed,
+        },
+    }
+    validate_json_schema(project, CATALOG_PROJECT_SCHEMA_PATH, "Catalog project")
+    validate_youtube_playlist_project(project)
+    return project
+
+
+def run_create_project(args: argparse.Namespace) -> int:
+    playlist = discover_youtube_playlist(args.from_youtube_playlist)
+    excluded_video_ids = [youtube_video_id(value) for value in args.exclude]
+    project = youtube_playlist_catalog_project(
+        playlist,
+        project_id=args.project_id,
+        title=args.title,
+        description=args.description,
+        publisher=args.publisher,
+        publisher_url=args.publisher_url,
+        language=args.language,
+        excluded_video_ids=excluded_video_ids,
+        listed=not args.unlisted,
+    )
+    if args.dry_run:
+        result = {"created": False, "dry_run": True, "project": project}
+    else:
+        control = operator_client(args.operator_token_source)
+        result = control.post("/projects/import", {
+            "command_id": str(uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                "watchcraft:create-catalog-project:" + sha256_hex(canonical_json(project)),
+            )),
+            "actor": "watchcraft-author-cli",
+            "project": project,
+        })
+    output = {
+        **result,
+        "discovery": {
+            "playlist_id": playlist["playlist_id"],
+            "visible_entries": len(playlist.get("entries", [])),
+            "unique_videos": len(playlist.get("video_ids", [])),
+            "duplicate_entries": playlist.get("duplicate_count", 0),
+        },
+        "next_command": (
+            "./authoring/watchcraft-author queue iterate-project "
+            "--operator-token-source keychain --r2-credentials-source keychain "
+            f"{project['project_id']}"
+        ),
+    }
+    print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
 def run_project_accept_snapshot(args: argparse.Namespace) -> int:
     control = operator_client(args.operator_token_source)
     current = control.post("/projects/get", {"project_id": args.project_id})
@@ -8915,6 +9066,57 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         default="auto",
         help="Temporary source-media uploader credential source (default: auto)",
     )
+    create_project = commands.add_parser(
+        "create-project",
+        parents=[credentials],
+        help="Create an initial CatalogProject from a YouTube playlist",
+        description=(
+            "Discover public YouTube playlist metadata, construct and validate a "
+            "watchcraft.video-collection CatalogProject, and import its unbound "
+            "revision 1 into Convex. Member discovery and acceptance remain separate."
+        ),
+    )
+    create_project.add_argument(
+        "--from-youtube-playlist",
+        required=True,
+        metavar="URL_OR_ID",
+        help="Public or unlisted YouTube playlist URL or ID",
+    )
+    create_project.add_argument(
+        "--project-id",
+        help="Lowercase kebab-case project and collection ID; defaults from the title",
+    )
+    create_project.add_argument(
+        "--title",
+        help="Editorial title override; defaults to the observed playlist title",
+    )
+    create_project.add_argument(
+        "--description",
+        help="Editorial description override; defaults to the playlist description",
+    )
+    create_project.add_argument("--publisher", help="Editorial publisher name")
+    create_project.add_argument(
+        "--publisher-url",
+        help="Canonical publisher URL; requires --publisher",
+    )
+    create_project.add_argument("--language", default="en")
+    create_project.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="VIDEO_URL_OR_ID",
+        help="Exclude a YouTube video from iteration; may be repeated",
+    )
+    create_project.add_argument(
+        "--unlisted",
+        action="store_true",
+        help="Keep the eventual collection out of the public directory",
+    )
+    create_project.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Discover and display the exact project without importing it",
+    )
     project_import = commands.add_parser(
         "project-import",
         parents=[credentials],
@@ -9548,6 +9750,8 @@ def run_queue_command(args: argparse.Namespace) -> int:
         return run_local_youtube_transcription(args, smoke=False)
     if args.queue_command == "process-youtube":
         return run_youtube_video_pipeline(args)
+    if args.queue_command == "create-project":
+        return run_create_project(args)
     if args.queue_command == "project-import":
         return run_project_import(args)
     if args.queue_command == "import-legacy-projects":

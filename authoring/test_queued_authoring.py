@@ -359,6 +359,17 @@ class QueuedAuthoringTests(unittest.TestCase):
         ])
         self.assertEqual(normalization.plan_job_id, "plan-job-1")
         self.assertEqual(normalization.timeout_seconds, 3600)
+        create_project = build_parser().parse_args([
+            "queue", "create-project",
+            "--from-youtube-playlist", "PL1234567890",
+            "--project-id", "useful-lessons",
+            "--exclude", "abcdefghijk",
+            "--dry-run",
+        ])
+        self.assertEqual(create_project.from_youtube_playlist, "PL1234567890")
+        self.assertEqual(create_project.project_id, "useful-lessons")
+        self.assertEqual(create_project.exclude, ["abcdefghijk"])
+        self.assertTrue(create_project.dry_run)
         project_import = build_parser().parse_args([
             "queue", "project-import", "project.json",
         ])
@@ -792,6 +803,113 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertEqual(import_payload["project"]["iterator"]["accepted_snapshot"], reference)
         self.assertEqual(import_payload["accepted_snapshot_json"], payload.decode("utf-8"))
         self.assertEqual(json.loads(output.getvalue())["summary"]["imported"], 1)
+
+    def test_youtube_playlist_catalog_project_uses_observed_and_editorial_metadata(self):
+        project = queued_authoring.youtube_playlist_catalog_project(
+            {
+                "playlist_id": "PL1234567890",
+                "url": "https://www.youtube.com/playlist?list=PL1234567890",
+                "title": "Useful Lessons!",
+                "description": "Observed description",
+            },
+            publisher="Example Publisher",
+            publisher_url="https://www.youtube.com/@example",
+            excluded_video_ids=["abcdefghijk", "abcdefghijk"],
+            listed=False,
+        )
+
+        self.assertEqual(project["project_id"], "useful-lessons")
+        self.assertEqual(project["metadata"]["title"], "Useful Lessons!")
+        self.assertEqual(project["metadata_basis"]["title"], {
+            "origin": "source-observation",
+            "source_path": "youtube.playlist.title",
+        })
+        self.assertEqual(project["metadata"]["publisher"], {
+            "name": "Example Publisher",
+            "canonical_url": "https://www.youtube.com/@example",
+        })
+        self.assertEqual(
+            project["iterator"]["configuration"]["selection"]["excluded_item_ids"],
+            ["abcdefghijk"],
+        )
+        self.assertFalse(project["publication"]["listed"])
+        self.assertNotIn("accepted_snapshot", project["iterator"])
+
+    def test_create_project_dry_run_does_not_contact_convex(self):
+        playlist = {
+            "playlist_id": "PL1234567890",
+            "url": "https://www.youtube.com/playlist?list=PL1234567890",
+            "title": "Useful Lessons",
+            "description": "Observed description",
+            "entries": ["abcdefghijk"],
+            "video_ids": ["abcdefghijk"],
+            "duplicate_count": 0,
+        }
+        args = build_parser().parse_args([
+            "queue", "create-project",
+            "--from-youtube-playlist", "PL1234567890",
+            "--dry-run",
+        ])
+
+        with (
+            patch.object(queued_authoring, "discover_youtube_playlist", return_value=playlist),
+            patch.object(queued_authoring, "operator_client") as operator,
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            result = queued_authoring.run_create_project(args)
+
+        self.assertEqual(result, 0)
+        operator.assert_not_called()
+        rendered = json.loads(output.getvalue())
+        self.assertTrue(rendered["dry_run"])
+        self.assertEqual(rendered["project"]["project_id"], "useful-lessons")
+        self.assertIn("iterate-project", rendered["next_command"])
+
+    def test_create_project_imports_unbound_revision_with_stable_command(self):
+        playlist = {
+            "playlist_id": "PL1234567890",
+            "url": "https://www.youtube.com/playlist?list=PL1234567890",
+            "title": "Useful Lessons",
+            "description": "",
+            "entries": ["abcdefghijk"],
+            "video_ids": ["abcdefghijk"],
+            "duplicate_count": 0,
+        }
+        control = Mock()
+        control.post.return_value = {
+            "created": True,
+            "project": {"project_id": "useful-lessons", "revision": 1},
+            "updated_at": 1,
+        }
+        args = build_parser().parse_args([
+            "queue", "create-project",
+            "--from-youtube-playlist", "PL1234567890",
+            "--operator-token-source", "keychain",
+        ])
+
+        with (
+            patch.object(queued_authoring, "discover_youtube_playlist", return_value=playlist),
+            patch.object(queued_authoring, "operator_client", return_value=control),
+            redirect_stdout(io.StringIO()),
+        ):
+            queued_authoring.run_create_project(args)
+        first_payload = control.post.call_args.args[1]
+        control.reset_mock()
+        control.post.return_value = {
+            "created": False,
+            "project": {"project_id": "useful-lessons", "revision": 1},
+            "updated_at": 1,
+        }
+        with (
+            patch.object(queued_authoring, "discover_youtube_playlist", return_value=playlist),
+            patch.object(queued_authoring, "operator_client", return_value=control),
+            redirect_stdout(io.StringIO()),
+        ):
+            queued_authoring.run_create_project(args)
+        second_payload = control.post.call_args.args[1]
+
+        self.assertEqual(first_payload["command_id"], second_payload["command_id"])
+        self.assertNotIn("accepted_snapshot", first_payload["project"]["iterator"])
 
     def test_project_import_verifies_and_sends_the_bound_snapshot(self):
         examples = queued_authoring.CATALOG_PROJECT_SCHEMA_PATH.parent / "examples"

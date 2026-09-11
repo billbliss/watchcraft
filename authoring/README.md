@@ -421,6 +421,26 @@ result` commands retrieve the full transcript and analysis independently. This c
 requires the updated Convex functions to be deployed; it does not require a new
 capability-registry version because it composes existing registered handlers.
 
+Create an initial v2 CatalogProject directly from a public or unlisted YouTube
+playlist:
+
+```bash
+./authoring/watchcraft-author queue create-project \
+  --from-youtube-playlist "https://www.youtube.com/playlist?list=PLAYLIST_ID" \
+  --operator-token-source keychain
+```
+
+The command observes the playlist title and description, derives a lowercase
+kebab-case project and publication ID, validates the resulting
+`watchcraft.video-collection@1` project, and imports unbound revision 1 into Convex.
+It reports the exact `iterate-project` command to run next. This bootstrap observation
+does not become collection membership and does not accept a snapshot, process video,
+or publish anything. Use `--project-id`, `--title`, `--description`, `--publisher`,
+`--publisher-url`, `--language`, `--exclude`, or `--unlisted` for editorial choices.
+Use `--dry-run` to display the exact project without contacting Convex. Repeating an
+identical creation is idempotent; an existing project with different content fails
+closed.
+
 Run the first queued collection iterator against a `CatalogProject` document:
 
 ```bash
