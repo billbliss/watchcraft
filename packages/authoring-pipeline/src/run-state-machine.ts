@@ -100,7 +100,7 @@ export function applyRunCommand(run: AuthoringRun, command: RunCommand, now: num
       next.state = "complete";
       break;
     case "fail":
-      requireState(next, "running");
+      requireState(next, "approved", "running");
       next.state = "failed";
       break;
     case "retry":

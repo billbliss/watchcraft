@@ -217,6 +217,10 @@ async function startRunForJob(
   if (!stored) return null;
   const run = parseAuthoringRun(stored.aggregate);
   if (run.state === "running") return run;
+  // A sibling may have failed after this dispatch was requested. Recording the
+  // dispatch remains a valid job transition and must not roll back merely
+  // because the aggregate run is already terminal or awaiting a retry.
+  if (run.state !== "approved") return run;
   return applyStoredRunCommand(ctx, run.run_id, {
     type: "start",
     command_id: commandId,
@@ -234,9 +238,10 @@ async function reconcileSuccessfulRun(
   if (!stored) return null;
   const run = parseAuthoringRun(stored.aggregate);
   if (run.state === "complete") return run;
-  if (run.state !== "running") {
-    throw new Error(`Run ${run.run_id} is ${run.state} while a job succeeded.`);
-  }
+  // Child jobs retain their own valid lifecycle after a sibling has failed.
+  // Only a running run can become complete; other states are reconciled by the
+  // retry or cancellation command that put the run there.
+  if (run.state !== "running") return run;
   const jobs = await Promise.all(run.job_ids.map((jobId) => jobDocument(ctx, jobId)));
   const allSucceeded = jobs.every(
     (storedJob) => storedJob && parseAuthoringJob(storedJob.aggregate).state === "succeeded",
@@ -245,6 +250,54 @@ async function reconcileSuccessfulRun(
   return applyStoredRunCommand(ctx, run.run_id, {
     type: "succeed",
     command_id: commandId,
+    expected_revision: run.revision,
+  }, now);
+}
+
+async function failRunForJob(
+  ctx: MutationCtx,
+  job: AuthoringJob,
+  commandId: string,
+  now: number,
+): Promise<AuthoringRun | null> {
+  const stored = await runDocument(ctx, job.run_id);
+  if (!stored) return null;
+  const run = parseAuthoringRun(stored.aggregate);
+  if (run.state === "failed" || run.state === "cancelled") return run;
+  if (run.state !== "running" && run.state !== "approved") return run;
+  return applyStoredRunCommand(ctx, run.run_id, {
+    type: "fail",
+    command_id: commandId,
+    expected_revision: run.revision,
+  }, now);
+}
+
+async function cancelRunJobs(
+  ctx: MutationCtx,
+  selected: AuthoringJob,
+  commandId: string,
+  now: number,
+): Promise<AuthoringRun | null> {
+  const stored = await runDocument(ctx, selected.run_id);
+  if (!stored) return null;
+  const run = parseAuthoringRun(stored.aggregate);
+  for (const jobId of run.job_ids) {
+    if (jobId === selected.job_id) continue;
+    const storedJob = await jobDocument(ctx, jobId);
+    if (!storedJob) throw new Error(`Pipeline job ${jobId} is missing.`);
+    const sibling = parseAuthoringJob(storedJob.aggregate);
+    if (["succeeded", "terminal_failed", "cancelled"].includes(sibling.state)) continue;
+    await applyStoredCommand(ctx, jobId, {
+      type: "cancel",
+      command_id: `${commandId}:${jobId}`,
+      expected_revision: sibling.revision,
+    }, now);
+  }
+  if (run.state === "cancelled") return run;
+  if (run.state === "complete") return run;
+  return applyStoredRunCommand(ctx, run.run_id, {
+    type: "cancel",
+    command_id: `${commandId}:run`,
     expected_revision: run.revision,
   }, now);
 }
@@ -912,10 +965,7 @@ export const cancelJob = internalMutation({
       type: "cancel",
       ...args,
     }, now);
-    await applyRunForJob(ctx, job, {
-      type: "cancel",
-      command_id: `${args.command_id}:run`,
-    }, now);
+    await cancelRunJobs(ctx, job, args.command_id, now);
     return job;
   },
 });
@@ -1141,10 +1191,7 @@ export const failJob = internalMutation({
       attempt_id: args.attempt_id,
       failure: { ...args.failure, retryable },
     }, now);
-    await applyRunForJob(ctx, job, {
-      type: "fail",
-      command_id: `${args.command_id}:run`,
-    }, now);
+    await failRunForJob(ctx, job, `${args.command_id}:run`, now);
     return job;
   },
 });
@@ -1163,15 +1210,28 @@ export const reconcileExpiredLeases = internalMutation({
         && job.lease
         && job.lease.expires_at <= now
       ) {
+        const retryPolicy = job.spec.registry_snapshot?.handler.retry_policy;
+        const retryable = retryPolicy
+          ? retryPolicy.retryable_classifications.includes("lease_expired")
+            && job.attempts.length < retryPolicy.max_attempts
+          : true;
         const expired = await applyStoredCommand(ctx, job.job_id, {
-          type: "expire_lease",
+          type: "fail",
           command_id: `lease-expiry:${job.lease.attempt_id}:${job.lease.expires_at}`,
           expected_revision: job.revision,
+          attempt_id: job.lease.attempt_id,
+          failure: {
+            classification: "lease_expired",
+            message: "The worker lease expired before completion.",
+            retryable,
+          },
         }, now);
-        await applyRunForJob(ctx, expired, {
-          type: "fail",
-          command_id: `lease-expiry:${job.lease.attempt_id}:${job.lease.expires_at}:run`,
-        }, now);
+        await failRunForJob(
+          ctx,
+          expired,
+          `lease-expiry:${job.lease.attempt_id}:${job.lease.expires_at}:run`,
+          now,
+        );
         recovered += 1;
       }
     }

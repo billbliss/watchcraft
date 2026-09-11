@@ -659,6 +659,87 @@ test("registered lease and retry policy are enforced by the control plane", asyn
   });
 });
 
+test("lease expiration honors the registered maximum attempt count", async () => {
+  vi.useFakeTimers();
+  try {
+    vi.setSystemTime(new Date("2026-09-11T19:00:00Z"));
+    const t = convexTest(schema, modules);
+    const spec = resolveJobSpecAgainstRegistry(
+      lexicalAnalysisSpec("operator:lease-limit"),
+      DEFAULT_CAPABILITY_REGISTRY,
+    );
+    let job = await t.mutation(internal.authoringInternal.createJob, {
+      job_id: "lease-limit-job",
+      run_id: "lease-limit-run",
+      command_id: "lease-limit:create",
+      spec,
+    }) as any;
+    job = await t.mutation(internal.authoringInternal.requestApproval, {
+      job_id: job.job_id,
+      command_id: "lease-limit:request-approval",
+      expected_revision: job.revision,
+    }) as any;
+    job = await t.mutation(internal.authoringInternal.approveJob, {
+      job_id: job.job_id,
+      command_id: "lease-limit:approve",
+      expected_revision: job.revision,
+      actor: "test-operator",
+      spec_sha256: job.spec_sha256,
+    }) as any;
+
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      job = await t.mutation(internal.authoringInternal.requestDispatch, {
+        job_id: job.job_id,
+        command_id: `lease-limit:${attempt}:request-dispatch`,
+        expected_revision: job.revision,
+      }) as any;
+      job = await t.mutation(internal.authoringInternal.recordDispatch, {
+        job_id: job.job_id,
+        command_id: `lease-limit:${attempt}:record-dispatch`,
+        expected_revision: job.revision,
+        generation: job.dispatch.generation,
+        github_run_id: `lease-limit-${attempt}`,
+        github_run_url: `https://github.com/example/runs/lease-limit-${attempt}`,
+      }) as any;
+      job = await t.mutation(internal.authoringInternal.claimJob, {
+        job_id: job.job_id,
+        command_id: `lease-limit:${attempt}:claim`,
+        expected_revision: job.revision,
+        attempt_id: `lease-limit:attempt-${attempt}`,
+        owner: "test-worker",
+        spec_sha256: job.spec_sha256,
+        dispatch_generation: job.dispatch.generation,
+        lease_duration_ms: 1,
+      }) as any;
+      vi.setSystemTime(job.lease.expires_at + 1);
+      expect(
+        await t.mutation(internal.authoringInternal.reconcileExpiredLeases, {}),
+      ).toBe(1);
+      job = await t.run(async (ctx) => (
+        await ctx.db.query("authoring_jobs").withIndex("by_job_id", (q) => (
+          q.eq("job_id", "lease-limit-job")
+        )).unique()
+      )) as any;
+      job = job.aggregate;
+      expect(job.state).toBe(attempt < 3 ? "retryable_failed" : "terminal_failed");
+      if (attempt < 3) {
+        job = await t.mutation(internal.authoringInternal.retryJob, {
+          job_id: job.job_id,
+          command_id: `lease-limit:${attempt}:retry`,
+          expected_revision: job.revision,
+        }) as any;
+      }
+    }
+    expect(job.attempts).toHaveLength(3);
+    expect(job.failure).toMatchObject({
+      classification: "lease_expired",
+      retryable: false,
+    });
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 test("operator and worker credentials drive a persisted non-transcript analysis run", async () => {
   const t = convexTest(schema, modules);
   const request = {
@@ -1127,4 +1208,267 @@ test("a pipeline run gates analysis on transcription and completes after both jo
     key: artifactKey(analysisDigest),
   }, submitted.run.run_id);
   expect(analysis.run).toMatchObject({ state: "complete", revision: 5 });
+});
+
+function lexicalAnalysisSpec(sourceId: string) {
+  return {
+    operation: "generate" as const,
+    artifact_kind: "analysis",
+    output_schema: { id: "watchcraft.analysis.lexical", version: 1 },
+    handler: { id: "watchcraft.analysis.lexical", version: "1" },
+    source: { media_asset_id: sourceId },
+    inputs: [],
+    dependencies: [],
+    configuration: { title: sourceId, text: "concurrent pipeline test", max_topics: 8 },
+  };
+}
+
+function lexicalArtifact(fill: string) {
+  const digest = fill.repeat(64);
+  return {
+    store: "r2",
+    algorithm: "sha256",
+    digest,
+    byte_length: 100,
+    media_type: "application/json",
+    artifact_kind: "analysis",
+    schema: { id: "watchcraft.analysis.lexical", version: 1 },
+    key: artifactKey(digest),
+  };
+}
+
+async function approvedLexicalPipeline(
+  t: ReturnType<typeof convexTest>,
+  runId: string,
+  jobIds: string[],
+) {
+  await publishAndActivateDefaultRegistry(t);
+  const submitted = await t.mutation(internal.authoringInternal.submitPipeline, {
+    run_id: runId,
+    command_prefix: `${runId}:submit`,
+    request: { kind: "concurrent-regression" },
+    jobs: jobIds.map((jobId) => ({
+      job_id: jobId,
+      spec: lexicalAnalysisSpec(`operator:${jobId}`),
+    })),
+  }) as any;
+  return t.mutation(internal.authoringInternal.approvePipeline, {
+    run_id: runId,
+    command_id: `${runId}:approve`,
+    expected_revision: submitted.run.revision,
+    actor: "test-operator",
+    approval_sha256: submitted.run.approval_sha256,
+  }) as any;
+}
+
+async function startConcurrentJob(t: ReturnType<typeof convexTest>, job: any) {
+  const generation = (job.dispatch?.generation ?? 0) + 1;
+  const pending = await t.mutation(internal.authoringInternal.requestDispatch, {
+    job_id: job.job_id,
+    command_id: `${job.job_id}:${generation}:request-dispatch`,
+    expected_revision: job.revision,
+  }) as any;
+  const dispatched = await t.mutation(internal.authoringInternal.recordDispatch, {
+    job_id: job.job_id,
+    command_id: `${job.job_id}:${generation}:record-dispatch`,
+    expected_revision: pending.revision,
+    generation: pending.dispatch.generation,
+    github_run_id: `run-${job.job_id}`,
+    github_run_url: `https://github.com/example/runs/${job.job_id}`,
+  }) as any;
+  const attemptId = `${job.job_id}:attempt-${dispatched.dispatch.generation}`;
+  const claimed = await t.mutation(internal.authoringInternal.claimJob, {
+    job_id: job.job_id,
+    command_id: `${job.job_id}:${generation}:claim`,
+    expected_revision: dispatched.revision,
+    attempt_id: attemptId,
+    owner: "test-worker",
+    spec_sha256: dispatched.spec_sha256,
+    dispatch_generation: dispatched.dispatch.generation,
+    lease_duration_ms: 60_000,
+  }) as any;
+  return t.mutation(internal.authoringInternal.startJob, {
+    job_id: job.job_id,
+    command_id: `${job.job_id}:${generation}:start`,
+    expected_revision: claimed.revision,
+    attempt_id: attemptId,
+  }) as any;
+}
+
+test("sibling jobs can record terminal outcomes after their run has failed", async () => {
+  const t = convexTest(schema, modules);
+  const approved = await approvedLexicalPipeline(
+    t,
+    "concurrent-run",
+    ["failed-first", "failed-second", "succeeded-third"],
+  );
+  const [first, second, third] = await Promise.all(
+    approved.jobs.map((job: any) => startConcurrentJob(t, job)),
+  );
+
+  const firstFailure = await t.mutation(internal.authoringInternal.failJob, {
+    job_id: first.job_id,
+    command_id: `${first.job_id}:fail`,
+    expected_revision: first.revision,
+    attempt_id: first.lease.attempt_id,
+    failure: {
+      classification: "artifact_store_failed",
+      message: "temporary failure",
+      retryable: true,
+    },
+  }) as any;
+  expect(firstFailure.state).toBe("retryable_failed");
+
+  const secondFailure = await t.mutation(internal.authoringInternal.failJob, {
+    job_id: second.job_id,
+    command_id: `${second.job_id}:fail`,
+    expected_revision: second.revision,
+    attempt_id: second.lease.attempt_id,
+    failure: {
+      classification: "handler_failed",
+      message: "permanent failure",
+      retryable: false,
+    },
+  }) as any;
+  expect(secondFailure.state).toBe("terminal_failed");
+
+  const thirdSuccess = await t.mutation(internal.authoringInternal.succeedJob, {
+    job_id: third.job_id,
+    command_id: `${third.job_id}:succeed`,
+    expected_revision: third.revision,
+    attempt_id: third.lease.attempt_id,
+    artifact: lexicalArtifact("7"),
+  }) as any;
+  expect(thirdSuccess.state).toBe("succeeded");
+
+  const snapshot = await t.run(async (ctx) => ({
+    run: await ctx.db.query("authoring_runs").withIndex("by_run_id", (q) => (
+      q.eq("run_id", "concurrent-run")
+    )).unique(),
+    jobs: await ctx.db.query("authoring_jobs").collect(),
+  }));
+  expect(snapshot.run?.aggregate).toMatchObject({ state: "failed" });
+  expect(
+    snapshot.jobs
+      .filter(({ aggregate }: any) => aggregate.run_id === "concurrent-run")
+      .map(({ aggregate }: any) => aggregate.state)
+      .sort(),
+  ).toEqual(["retryable_failed", "succeeded", "terminal_failed"]);
+});
+
+test("cancelling one pipeline job cancels every unfinished sibling", async () => {
+  const t = convexTest(schema, modules);
+  const approved = await approvedLexicalPipeline(
+    t,
+    "cancel-run",
+    ["cancel-first", "cancel-second"],
+  );
+  const cancelled = await t.mutation(internal.authoringInternal.cancelJob, {
+    job_id: approved.jobs[0].job_id,
+    command_id: "cancel-run:cancel",
+    expected_revision: approved.jobs[0].revision,
+  }) as any;
+  expect(cancelled.state).toBe("cancelled");
+
+  const snapshot = await t.run(async (ctx) => ({
+    run: await ctx.db.query("authoring_runs").withIndex("by_run_id", (q) => (
+      q.eq("run_id", "cancel-run")
+    )).unique(),
+    jobs: await ctx.db.query("authoring_jobs").collect(),
+  }));
+  expect(snapshot.run?.aggregate).toMatchObject({ state: "cancelled" });
+  expect(
+    snapshot.jobs
+      .filter(({ aggregate }: any) => aggregate.run_id === "cancel-run")
+      .map(({ aggregate }: any) => aggregate.state),
+  ).toEqual(["cancelled", "cancelled"]);
+});
+
+test("a failed run completes after its retry and successful sibling finish", async () => {
+  const t = convexTest(schema, modules);
+  const approved = await approvedLexicalPipeline(
+    t,
+    "retry-sibling-run",
+    ["retry-first", "retry-second"],
+  );
+  let [first, second] = await Promise.all(
+    approved.jobs.map((job: any) => startConcurrentJob(t, job)),
+  );
+  first = await t.mutation(internal.authoringInternal.failJob, {
+    job_id: first.job_id,
+    command_id: `${first.job_id}:fail`,
+    expected_revision: first.revision,
+    attempt_id: first.lease.attempt_id,
+    failure: {
+      classification: "artifact_store_failed",
+      message: "temporary failure",
+      retryable: true,
+    },
+  }) as any;
+  second = await t.mutation(internal.authoringInternal.succeedJob, {
+    job_id: second.job_id,
+    command_id: `${second.job_id}:succeed`,
+    expected_revision: second.revision,
+    attempt_id: second.lease.attempt_id,
+    artifact: lexicalArtifact("8"),
+  }) as any;
+  expect(second.state).toBe("succeeded");
+
+  first = await t.mutation(internal.authoringInternal.retryJob, {
+    job_id: first.job_id,
+    command_id: `${first.job_id}:retry`,
+    expected_revision: first.revision,
+  }) as any;
+  first = await startConcurrentJob(t, first);
+  first = await t.mutation(internal.authoringInternal.succeedJob, {
+    job_id: first.job_id,
+    command_id: `${first.job_id}:retry-succeed`,
+    expected_revision: first.revision,
+    attempt_id: first.lease.attempt_id,
+    artifact: lexicalArtifact("9"),
+  }) as any;
+  expect(first.state).toBe("succeeded");
+
+  const run = await t.run(async (ctx) => (
+    await ctx.db.query("authoring_runs").withIndex("by_run_id", (q) => (
+      q.eq("run_id", "retry-sibling-run")
+    )).unique()
+  ));
+  expect(run?.aggregate).toMatchObject({ state: "complete" });
+});
+
+test("one lease reconciliation recovers every expired sibling", async () => {
+  vi.useFakeTimers();
+  try {
+    vi.setSystemTime(new Date("2026-09-11T20:00:00Z"));
+    const t = convexTest(schema, modules);
+    const approved = await approvedLexicalPipeline(
+      t,
+      "expired-siblings-run",
+      ["expired-first", "expired-second"],
+    );
+    const running = await Promise.all(
+      approved.jobs.map((job: any) => startConcurrentJob(t, job)),
+    );
+    vi.setSystemTime(Math.max(...running.map((job: any) => job.lease.expires_at)) + 1);
+
+    expect(
+      await t.mutation(internal.authoringInternal.reconcileExpiredLeases, {}),
+    ).toBe(2);
+
+    const snapshot = await t.run(async (ctx) => ({
+      run: await ctx.db.query("authoring_runs").withIndex("by_run_id", (q) => (
+        q.eq("run_id", "expired-siblings-run")
+      )).unique(),
+      jobs: await ctx.db.query("authoring_jobs").collect(),
+    }));
+    expect(snapshot.run?.aggregate).toMatchObject({ state: "failed" });
+    expect(
+      snapshot.jobs
+        .filter(({ aggregate }: any) => aggregate.run_id === "expired-siblings-run")
+        .map(({ aggregate }: any) => aggregate.state),
+    ).toEqual(["retryable_failed", "retryable_failed"]);
+  } finally {
+    vi.useRealTimers();
+  }
 });
