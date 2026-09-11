@@ -67,6 +67,8 @@ function assertKnownCapabilities(project: Record<string, any>): void {
   const pair = `${collectionType.id}@${collectionType.version}|${iterator.id}@${iterator.version}`;
   const supported = new Set([
     "watchcraft.video-collection@1|watchcraft.youtube-playlist@1",
+    "watchcraft.video-collection@1|watchcraft.explicit-membership@1",
+    "watchcraft.grouped-video-collection@1|watchcraft.explicit-membership@1",
     "watchcraft.course@1|watchcraft.khan-course@1",
     "watchcraft.ranked-video-catalog@1|watchcraft.youtube-channel-popular@1",
   ]);

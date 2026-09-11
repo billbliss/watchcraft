@@ -7,6 +7,7 @@ import {
   acceptCatalogProjectCandidateForControl,
   artifactKey,
   DEFAULT_CATALOG_CAPABILITY_REGISTRY,
+  iteratorSnapshotStructureSha256,
   parseCatalogProject,
   parseCollectionIteratorSnapshot,
   sha256Hex,
@@ -41,7 +42,7 @@ test("current, Khan, and popular-video designs satisfy the typed contracts", asy
   validateCatalogCapabilityRegistry(DEFAULT_CATALOG_CAPABILITY_REGISTRY);
   assert.equal(
     DEFAULT_CATALOG_CAPABILITY_REGISTRY.registry_version,
-    "2026-09-08.1",
+    "2026-09-11.1",
   );
   for (const stem of ["current-playlist", "khan-course", "youtube-popular"]) {
     const { project, snapshot, snapshotBytes } = await example(stem);
@@ -113,6 +114,19 @@ test("iterator snapshots fail closed on graph, coverage, and structure drift", a
   );
 });
 
+test("provider media identities may begin with URL-safe punctuation", async () => {
+  const { snapshot } = await example("current-playlist");
+  for (const mediaId of ["-leading-dash", "_leading-underscore"]) {
+    const candidate = structuredClone(snapshot) as any;
+    candidate.items[0].media[0].media_id = mediaId;
+    candidate.structure_hash = iteratorSnapshotStructureSha256(candidate);
+    assert.equal(
+      parseCollectionIteratorSnapshot(candidate).items[0].media[0].media_id,
+      mediaId,
+    );
+  }
+});
+
 test("collection types and iterators are independently registered and compatibility checked", async () => {
   const { project } = await example("khan-course");
   const current = await example("current-playlist");
@@ -149,6 +163,89 @@ test("collection types and iterators are independently registered and compatibil
   assert.throws(
     () => validateCatalogCapabilityRegistry(duplicateRegistry),
     /identities must be unique/,
+  );
+});
+
+test("explicit membership supports flat and grouped video collections", async () => {
+  const { project } = await example("current-playlist");
+  const explicit = structuredClone(project) as any;
+  delete explicit.iterator.accepted_snapshot;
+  explicit.iterator = {
+    id: "watchcraft.explicit-membership",
+    version: "1",
+    configuration: {
+      canonical_url:
+        "https://collections.watchcraft.stream/collections/curated/collection.json",
+      nodes: [
+        {
+          node_id: "explicit-root",
+          node_type: "explicit-membership",
+          title: "Curated",
+          parent_node_id: null,
+          position: 1,
+        },
+      ],
+      entries: [
+        {
+          item_id: "youtube:abcdefghijk",
+          title: "Curated lesson",
+          canonical_url: "https://www.youtube.com/watch?v=abcdefghijk",
+          media: [
+            {
+              type: "youtube",
+              media_id: "abcdefghijk",
+              canonical_url: "https://www.youtube.com/watch?v=abcdefghijk",
+            },
+          ],
+          publisher: "Example Publisher",
+        },
+      ],
+      placements: [
+        {
+          placement_id: "explicit-entry:1",
+          item_id: "youtube:abcdefghijk",
+          parent_node_id: "explicit-root",
+          position: 1,
+        },
+      ],
+    },
+    access_profile: "public-anonymous",
+    refresh: { mode: "on-demand", stale_while_refresh: true },
+  };
+  assert.equal(
+    validateCatalogProjectCapabilities(explicit).iterator.id,
+    "watchcraft.explicit-membership",
+  );
+  assert.equal(
+    validateCatalogProjectForControl(explicit).iterator.id,
+    "watchcraft.explicit-membership",
+  );
+
+  const grouped = structuredClone(explicit);
+  grouped.collection_type = {
+    id: "watchcraft.grouped-video-collection",
+    version: "1",
+    configuration: { structure: "grouped-list" },
+  };
+  grouped.iterator.configuration.nodes.push({
+    node_id: "chapter-one",
+    node_type: "group",
+    title: "Chapter one",
+    parent_node_id: "explicit-root",
+    position: 1,
+  });
+  grouped.iterator.configuration.placements[0].parent_node_id = "chapter-one";
+  assert.equal(
+    validateCatalogProjectForControl(grouped).collection_type.id,
+    "watchcraft.grouped-video-collection",
+  );
+
+  explicit.iterator.configuration.entries.push(
+    explicit.iterator.configuration.entries[0],
+  );
+  assert.throws(
+    () => validateCatalogProjectCapabilities(explicit),
+    /item IDs must be unique/,
   );
 });
 

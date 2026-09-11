@@ -236,6 +236,16 @@ class QueuedAuthoringTests(unittest.TestCase):
         )
         Draft202012Validator.check_schema(schema)
         Draft202012Validator(schema).validate(registry)
+        handlers = {
+            (handler["id"], handler["version"]): handler
+            for handler in registry["handlers"]
+        }
+        self.assertEqual(
+            handlers[queued_authoring.EXPLICIT_MEMBERSHIP_ITERATOR_HANDLER],
+            queued_authoring.LOCAL_HANDLER_CONTRACTS[
+                queued_authoring.EXPLICIT_MEMBERSHIP_ITERATOR_HANDLER
+            ],
+        )
 
     def test_queue_parser_exposes_non_transcript_analysis_submission(self):
         args = build_parser().parse_args([
@@ -363,6 +373,14 @@ class QueuedAuthoringTests(unittest.TestCase):
             Path("../watchcraft-collections/collections"),
         )
         self.assertTrue(legacy_import.dry_run)
+        legacy_apply = build_parser().parse_args([
+            "queue", "import-legacy-projects", "../watchcraft-collections/collections",
+            "--apply", "--project-id", "marc-adamus-videos",
+            "--r2-write-credentials-source", "keychain",
+        ])
+        self.assertTrue(legacy_apply.apply)
+        self.assertEqual(legacy_apply.project_id, ["marc-adamus-videos"])
+        self.assertEqual(legacy_apply.r2_write_credentials_source, "keychain")
         project_accept = build_parser().parse_args([
             "queue", "project-accept-snapshot", "project-1", "job-1",
             "--r2-credentials-source", "keychain",
@@ -430,23 +448,56 @@ class QueuedAuthoringTests(unittest.TestCase):
                 "collection_id": "curated",
                 "revision": 1,
                 "title": "Curated",
+                "stats": {"video_count": 1},
             }), encoding="utf-8")
             (curated / "watchcraft-authoring.json").write_text(json.dumps({
                 "collection": {
                     "collection_id": "curated",
                     "source": {"type": "youtube", "publisher": "Multiple publishers"},
                 },
-                "sources": {},
+                "sources": {
+                    "abcdefghijk.youtube": {
+                        "type": "youtube",
+                        "video_id": "abcdefghijk",
+                        "url": "https://www.youtube.com/watch?v=abcdefghijk",
+                        "title": "Curated lesson",
+                        "publisher": "Example Publisher",
+                        "position": 1,
+                    }
+                },
+            }), encoding="utf-8")
+            davinci = root / "davinci-resolve"
+            davinci.mkdir()
+            (davinci / "collection.json").write_text(json.dumps({
+                "kind": "watchcraft.collection",
+                "schema_version": 4,
+                "collection_id": "davinci-resolve",
+                "revision": 1,
+                "title": "DaVinci Resolve",
+            }), encoding="utf-8")
+            (davinci / "watchcraft-authoring.json").write_text(json.dumps({
+                "collection": {
+                    "collection_id": "davinci-resolve",
+                    "source": {
+                        "type": "youtube-playlist",
+                        "playlist_id": "PLDAVINCI123",
+                        "url": "https://www.youtube.com/playlist?list=PLDAVINCI123",
+                    },
+                },
+                "sources": {
+                    "one.youtube": {"publisher": "Publisher One"},
+                    "two.youtube": {"publisher": "Publisher Two"},
+                },
             }), encoding="utf-8")
 
             report = queued_authoring.legacy_project_migration_report(root)
 
         self.assertEqual(report["summary"], {
-            "examined": 2,
-            "ready": 1,
+            "examined": 3,
+            "ready": 3,
             "review_required": 0,
             "blocked": 0,
-            "unsupported": 1,
+            "unsupported": 0,
             "invalid": 0,
             "network_requests": 0,
             "remote_writes": 0,
@@ -465,18 +516,282 @@ class QueuedAuthoringTests(unittest.TestCase):
             by_id["playlist"]["publisher"]["status"],
             "inferred-unanimous",
         )
-        self.assertEqual(by_id["curated"]["status"], "unsupported")
+        self.assertEqual(by_id["curated"]["status"], "ready")
         self.assertEqual(
-            by_id["curated"]["issues"][0]["code"],
-            "explicit-video-list-iterator-needed",
+            by_id["curated"]["project_candidate"]["iterator"]["id"],
+            "watchcraft.explicit-membership",
+        )
+        davinci_candidate = by_id["davinci-resolve"]["project_candidate"]
+        self.assertEqual(
+            davinci_candidate["metadata"]["publisher"],
+            {"name": "Multiple publishers"},
+        )
+        self.assertEqual(
+            davinci_candidate["metadata_basis"]["publisher"],
+            {"origin": "editorial"},
         )
 
-    def test_legacy_project_import_requires_explicit_dry_run(self):
+    def test_legacy_grouped_local_collection_preserves_structure_without_paths(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary) / "marc-adamus-videos"
+            directory.mkdir()
+            (directory / "watchcraft-authoring.json").write_text(json.dumps({
+                "collection": {
+                    "collection_id": "marc-adamus-videos",
+                    "listed": True,
+                },
+                "sources": {},
+            }), encoding="utf-8")
+            (directory / "collection.json").write_text(json.dumps({
+                "kind": "watchcraft.collection",
+                "schema_version": 4,
+                "collection_id": "marc-adamus-videos",
+                "revision": 1,
+                "title": "Marc Adamus Videos",
+                "root": {
+                    "type": "group",
+                    "group_id": "root",
+                    "title": "Marc Adamus Videos",
+                    "children": [{
+                        "type": "group",
+                        "group_id": "landscapes",
+                        "title": "Landscapes",
+                        "children": [{
+                            "type": "video",
+                            "item_id": "marc-lesson",
+                        }],
+                    }],
+                },
+                "items": {
+                    "marc-lesson": {
+                        "item_id": "marc-lesson",
+                        "title": "A landscape lesson",
+                        "publisher": "Marc Adamus",
+                        "media": [{
+                            "type": "local-file",
+                            "path": "private/video.mp4",
+                        }],
+                    },
+                },
+                "stats": {"video_count": 1},
+            }), encoding="utf-8")
+
+            candidate = queued_authoring.legacy_catalog_project_candidate(directory)
+            snapshot = queued_authoring.legacy_frozen_iterator_snapshot(
+                directory, candidate["project_candidate"]
+            )
+
+        project = candidate["project_candidate"]
+        self.assertEqual(candidate["status"], "ready")
+        self.assertEqual(project["metadata"]["publisher"], {"name": "Marc Adamus"})
+        self.assertEqual(
+            project["collection_type"]["id"],
+            "watchcraft.grouped-video-collection",
+        )
+        configuration = project["iterator"]["configuration"]
+        self.assertEqual(len(configuration["nodes"]), 2)
+        self.assertEqual(configuration["placements"][0]["parent_node_id"], "landscapes")
+        self.assertEqual(configuration["entries"][0]["media"], [{
+            "type": "local-file",
+            "media_id": "marc-lesson",
+        }])
+        self.assertNotIn("private/video.mp4", json.dumps(project))
+        self.assertEqual(len(snapshot["nodes"]), 2)
+        self.assertEqual(len(snapshot["items"]), 1)
+        self.assertEqual(snapshot["provenance"]["discovery_mode"], "legacy-import")
+        self.assertEqual(snapshot["provenance"]["retrieved_urls"], [])
+        self.assertNotIn("private/video.mp4", json.dumps(snapshot))
+
+    def test_explicit_membership_iterator_is_deterministic_and_offline(self):
+        project = {
+            "kind": "watchcraft.catalog-project",
+            "schema_version": 1,
+            "project_id": "curated",
+            "revision": 1,
+            "collection_type": {
+                "id": "watchcraft.video-collection",
+                "version": "1",
+                "configuration": {"structure": "ordered-list"},
+            },
+            "iterator": {
+                "id": "watchcraft.explicit-membership",
+                "version": "1",
+                "configuration": {
+                    "canonical_url": (
+                        "https://collections.watchcraft.stream/collections/"
+                        "curated/collection.json"
+                    ),
+                    "nodes": [{
+                        "node_id": "explicit-root",
+                        "node_type": "collection-root",
+                        "title": "Curated",
+                        "parent_node_id": None,
+                        "position": 1,
+                    }],
+                    "entries": [{
+                        "item_id": "youtube:abcdefghijk",
+                        "title": "Curated lesson",
+                        "canonical_url": "https://www.youtube.com/watch?v=abcdefghijk",
+                        "media": [{
+                            "type": "youtube",
+                            "media_id": "abcdefghijk",
+                            "canonical_url": "https://www.youtube.com/watch?v=abcdefghijk",
+                        }],
+                        "publisher": "Example Publisher",
+                    }],
+                    "placements": [{
+                        "placement_id": "explicit-placement:1",
+                        "item_id": "youtube:abcdefghijk",
+                        "parent_node_id": "explicit-root",
+                        "position": 1,
+                    }],
+                },
+                "access_profile": "public-anonymous",
+                "refresh": {"mode": "on-demand", "stale_while_refresh": True},
+            },
+            "metadata": {"title": "Curated"},
+            "metadata_basis": {"title": {"origin": "editorial"}},
+            "publication": {"collection_id": "curated", "listed": True},
+        }
+        spec = queued_authoring.explicit_membership_iterator_spec(
+            project,
+            observed_at="2026-09-10T12:00:00Z",
+        )
+        context = Mock()
+        context.job = {"spec_sha256": "a" * 64}
+
+        snapshot = queued_authoring.explicit_membership_iterator(
+            {"spec": spec}, context
+        )
+
+        self.assertEqual(snapshot["coverage"], {
+            "basis": "source-entries",
+            "expected": 1,
+            "resolved": 1,
+            "unresolved": [],
+        })
+        self.assertEqual(snapshot["items"][0]["item_id"], "youtube:abcdefghijk")
+        self.assertEqual(snapshot["placements"][0]["position"], 1)
+        queued_authoring.validate_iterator_snapshot(snapshot)
+
+    def test_legacy_project_import_requires_an_explicit_mode(self):
+        with redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                build_parser().parse_args([
+                    "queue", "import-legacy-projects", "/tmp/collections",
+                ])
+
+    def test_legacy_project_apply_skips_existing_projects_without_r2_writes(self):
+        examples = queued_authoring.CATALOG_PROJECT_SCHEMA_PATH.parent / "examples"
+        project = json.loads(
+            (examples / "current-playlist.project.json").read_text(encoding="utf-8")
+        )
+        del project["iterator"]["accepted_snapshot"]
+        snapshot = json.loads(
+            (examples / "current-playlist.snapshot.json").read_text(encoding="utf-8")
+        )
+        reference, _ = queued_authoring._json_artifact_reference(
+            snapshot,
+            artifact_kind="collection-iterator-snapshot",
+            schema=queued_authoring.COLLECTION_ITERATOR_SNAPSHOT_SCHEMA,
+        )
+        report = {
+            "collections_root": "/tmp/collections",
+            "summary": {
+                "examined": 1, "ready": 1, "review_required": 0,
+                "blocked": 0, "unsupported": 0, "invalid": 0,
+                "network_requests": 0, "remote_writes": 0, "local_writes": 0,
+            },
+            "collections": [{
+                "collection_id": project["project_id"],
+                "directory": "/tmp/collection",
+                "status": "ready",
+                "project_candidate": project,
+                "baseline": {"artifact": reference},
+            }],
+        }
+        control = Mock()
+        control.post.return_value = {"project": {"revision": 4}}
         args = build_parser().parse_args([
-            "queue", "import-legacy-projects", "/tmp/collections",
+            "queue", "import-legacy-projects", "/tmp/collections", "--apply",
         ])
-        with self.assertRaisesRegex(RuntimeError, "requires --dry-run"):
-            queued_authoring.run_import_legacy_projects(args)
+
+        with (
+            patch.object(queued_authoring, "legacy_project_migration_report", return_value=report),
+            patch.object(queued_authoring, "legacy_frozen_iterator_snapshot", return_value=snapshot),
+            patch.object(queued_authoring, "operator_client", return_value=control),
+            patch.object(queued_authoring, "r2_staging_writer") as writer,
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            result = queued_authoring.run_import_legacy_projects(args)
+
+        self.assertEqual(result, 0)
+        writer.assert_not_called()
+        self.assertEqual(json.loads(output.getvalue())["summary"], {
+            "already_imported": 0,
+            "examined": 1,
+            "imported": 0,
+            "skipped_existing": 1,
+        })
+
+    def test_legacy_project_apply_uploads_then_imports_absent_project(self):
+        examples = queued_authoring.CATALOG_PROJECT_SCHEMA_PATH.parent / "examples"
+        project = json.loads(
+            (examples / "current-playlist.project.json").read_text(encoding="utf-8")
+        )
+        del project["iterator"]["accepted_snapshot"]
+        snapshot = json.loads(
+            (examples / "current-playlist.snapshot.json").read_text(encoding="utf-8")
+        )
+        reference, payload = queued_authoring._json_artifact_reference(
+            snapshot,
+            artifact_kind="collection-iterator-snapshot",
+            schema=queued_authoring.COLLECTION_ITERATOR_SNAPSHOT_SCHEMA,
+        )
+        report = {
+            "collections_root": "/tmp/collections",
+            "summary": {
+                "examined": 1, "ready": 1, "review_required": 0,
+                "blocked": 0, "unsupported": 0, "invalid": 0,
+                "network_requests": 0, "remote_writes": 0, "local_writes": 0,
+            },
+            "collections": [{
+                "collection_id": project["project_id"],
+                "directory": "/tmp/collection",
+                "status": "ready",
+                "project_candidate": project,
+                "baseline": {"artifact": reference},
+            }],
+        }
+        control = Mock()
+        control.post.side_effect = [
+            RuntimeError(f"Unknown catalog project {project['project_id']}."),
+            {"created": True, "project": {"revision": 1}},
+        ]
+        writer = Mock()
+        writer.put_json.return_value = reference
+        args = build_parser().parse_args([
+            "queue", "import-legacy-projects", "/tmp/collections", "--apply",
+            "--operator-token-source", "keychain",
+            "--r2-write-credentials-source", "keychain",
+        ])
+
+        with (
+            patch.object(queued_authoring, "legacy_project_migration_report", return_value=report),
+            patch.object(queued_authoring, "legacy_frozen_iterator_snapshot", return_value=snapshot),
+            patch.object(queued_authoring, "operator_client", return_value=control),
+            patch.object(queued_authoring, "r2_staging_writer", return_value=writer),
+            redirect_stdout(io.StringIO()) as output,
+            redirect_stderr(io.StringIO()),
+        ):
+            result = queued_authoring.run_import_legacy_projects(args)
+
+        self.assertEqual(result, 0)
+        writer.put_json.assert_called_once()
+        import_payload = control.post.call_args_list[1].args[1]
+        self.assertEqual(import_payload["project"]["iterator"]["accepted_snapshot"], reference)
+        self.assertEqual(import_payload["accepted_snapshot_json"], payload.decode("utf-8"))
+        self.assertEqual(json.loads(output.getvalue())["summary"]["imported"], 1)
 
     def test_project_import_verifies_and_sends_the_bound_snapshot(self):
         examples = queued_authoring.CATALOG_PROJECT_SCHEMA_PATH.parent / "examples"

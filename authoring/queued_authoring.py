@@ -86,6 +86,10 @@ YOUTUBE_PLAYLIST_ITERATOR_HANDLER = (
     "watchcraft.iterator.youtube-playlist",
     "1",
 )
+EXPLICIT_MEMBERSHIP_ITERATOR_HANDLER = (
+    "watchcraft.iterator.explicit-membership",
+    "1",
+)
 PROJECT_PROCESSING_PLANNER_HANDLER = (
     "watchcraft.planner.video-collection",
     "1",
@@ -2520,6 +2524,29 @@ LOCAL_HANDLER_CONTRACTS: dict[tuple[str, str], dict[str, Any]] = {
             ],
         },
     },
+    EXPLICIT_MEMBERSHIP_ITERATOR_HANDLER: {
+        "id": EXPLICIT_MEMBERSHIP_ITERATOR_HANDLER[0],
+        "version": EXPLICIT_MEMBERSHIP_ITERATOR_HANDLER[1],
+        "operation": "generate",
+        "inputs": [],
+        "dependencies": [],
+        "output": {
+            "artifact_kind": "collection-iterator-snapshot",
+            "schema": COLLECTION_ITERATOR_SNAPSHOT_SCHEMA,
+        },
+        "execution_profile": {
+            "id": PYTHON_EXECUTION_PROFILE[0],
+            "version": PYTHON_EXECUTION_PROFILE[1],
+        },
+        "lease_class": "short",
+        "retry_policy": {
+            "max_attempts": 3,
+            "retryable_classifications": [
+                "artifact_store_failed",
+                "lease_expired",
+            ],
+        },
+    },
     PROJECT_PROCESSING_PLANNER_HANDLER: {
         "id": PROJECT_PROCESSING_PLANNER_HANDLER[0],
         "version": PROJECT_PROCESSING_PLANNER_HANDLER[1],
@@ -3316,6 +3343,168 @@ def youtube_playlist_iterator_spec(
     }
 
 
+def validate_explicit_membership_project(project: Any) -> dict[str, Any]:
+    validate_json_schema(project, CATALOG_PROJECT_SCHEMA_PATH, "Catalog project")
+    collection_type = project["collection_type"]
+    collection_pair = (
+        collection_type.get("id"),
+        collection_type.get("version"),
+        collection_type.get("configuration", {}).get("structure"),
+    )
+    if collection_pair not in {
+        ("watchcraft.video-collection", "1", "ordered-list"),
+        ("watchcraft.grouped-video-collection", "1", "grouped-list"),
+    }:
+        raise ValueError(
+            "watchcraft.explicit-membership@1 requires a compatible video collection"
+        )
+    iterator = project["iterator"]
+    if (
+        iterator.get("id") != "watchcraft.explicit-membership"
+        or iterator.get("version") != "1"
+        or iterator.get("access_profile") != "public-anonymous"
+    ):
+        raise ValueError("Catalog project has an invalid explicit-membership iterator")
+    configuration = iterator.get("configuration", {})
+    canonical_url = configuration.get("canonical_url")
+    nodes = configuration.get("nodes")
+    entries = configuration.get("entries")
+    placements = configuration.get("placements")
+    if (
+        not isinstance(canonical_url, str)
+        or not canonical_url.startswith("https://")
+        or not isinstance(nodes, list)
+        or not nodes
+        or not isinstance(entries, list)
+        or not entries
+        or not isinstance(placements, list)
+    ):
+        raise ValueError("Catalog project has an invalid explicit-membership configuration")
+    item_ids = []
+    allowed = {
+        "item_id", "title", "canonical_url", "media", "publisher", "publisher_url",
+        "duration_seconds", "published_at", "thumbnail_url", "metadata",
+    }
+    for position, entry in enumerate(entries, start=1):
+        if not isinstance(entry, dict) or set(entry) - allowed:
+            raise ValueError(f"Explicit membership entry {position} is invalid")
+        item_id = entry.get("item_id")
+        media = entry.get("media")
+        if (
+            not isinstance(item_id, str)
+            or not isinstance(entry.get("title"), str)
+            or not isinstance(entry.get("publisher"), str)
+            or not isinstance(entry.get("canonical_url"), str)
+            or not isinstance(media, list)
+            or not media
+            or not isinstance(entry.get("metadata", {}), dict)
+            or any(
+                not isinstance(value, dict)
+                or not isinstance(value.get("type"), str)
+                or not isinstance(value.get("media_id"), str)
+                for value in media
+            )
+        ):
+            raise ValueError(f"Explicit membership entry {position} has invalid identity")
+        item_ids.append(item_id)
+    if len(item_ids) != len(set(item_ids)):
+        raise ValueError("Explicit membership item IDs must be unique")
+    node_ids = []
+    for position, node in enumerate(nodes, start=1):
+        if (
+            not isinstance(node, dict)
+            or set(node) - {
+                "node_id", "node_type", "title", "parent_node_id", "position"
+            }
+            or not isinstance(node.get("node_id"), str)
+            or not isinstance(node.get("node_type"), str)
+            or not isinstance(node.get("title"), str)
+            or node.get("parent_node_id") is not None
+            and not isinstance(node.get("parent_node_id"), str)
+            or type(node.get("position")) is not int
+            or node["position"] < 1
+        ):
+            raise ValueError(f"Explicit membership node {position} is invalid")
+        node_ids.append(node["node_id"])
+    if len(node_ids) != len(set(node_ids)) or sum(
+        node.get("parent_node_id") is None for node in nodes
+    ) != 1:
+        raise ValueError("Explicit membership node graph has invalid identities or roots")
+    if any(
+        node["parent_node_id"] is not None
+        and node["parent_node_id"] not in node_ids
+        for node in nodes
+    ):
+        raise ValueError("Explicit membership node references an unknown parent")
+    parent_by_node = {node["node_id"]: node["parent_node_id"] for node in nodes}
+    sibling_positions = [
+        (node["parent_node_id"], node["position"])
+        for node in nodes
+    ]
+    if len(sibling_positions) != len(set(sibling_positions)):
+        raise ValueError("Explicit membership sibling node positions must be unique")
+    for node_id in node_ids:
+        visited = set()
+        current = node_id
+        while current is not None:
+            if current in visited:
+                raise ValueError("Explicit membership node graph must be acyclic")
+            visited.add(current)
+            current = parent_by_node[current]
+    placement_ids = []
+    placed_item_ids = []
+    placement_positions = []
+    for position, placement in enumerate(placements, start=1):
+        if (
+            not isinstance(placement, dict)
+            or set(placement) - {
+                "placement_id", "item_id", "parent_node_id", "position"
+            }
+            or not isinstance(placement.get("placement_id"), str)
+            or placement.get("item_id") not in item_ids
+            or placement.get("parent_node_id") not in node_ids
+            or type(placement.get("position")) is not int
+            or placement["position"] < 1
+        ):
+            raise ValueError(f"Explicit membership placement {position} is invalid")
+        placement_ids.append(placement["placement_id"])
+        placed_item_ids.append(placement["item_id"])
+        placement_positions.append(
+            (placement["parent_node_id"], placement["position"])
+        )
+    if len(placement_ids) != len(set(placement_ids)) or set(placed_item_ids) != set(item_ids):
+        raise ValueError("Explicit membership placements do not cover unique items")
+    if len(placement_positions) != len(set(placement_positions)):
+        raise ValueError("Explicit membership sibling placement positions must be unique")
+    return project
+
+
+def explicit_membership_iterator_spec(
+    project: dict[str, Any],
+    *,
+    observed_at: str | None = None,
+) -> dict[str, Any]:
+    validate_explicit_membership_project(project)
+    observation_time = observed_at or datetime.now(timezone.utc).isoformat().replace(
+        "+00:00", "Z"
+    )
+    return {
+        "operation": "generate",
+        "artifact_kind": "collection-iterator-snapshot",
+        "output_schema": COLLECTION_ITERATOR_SNAPSHOT_SCHEMA,
+        "handler": {
+            "id": EXPLICIT_MEMBERSHIP_ITERATOR_HANDLER[0],
+            "version": EXPLICIT_MEMBERSHIP_ITERATOR_HANDLER[1],
+        },
+        "source": {
+            "media_asset_id": f"explicit-membership:{project['project_id']}"
+        },
+        "inputs": [],
+        "dependencies": [],
+        "configuration": {"project": project, "observed_at": observation_time},
+    }
+
+
 def validate_youtube_playlist_project(project: Any) -> dict[str, Any]:
     validate_json_schema(project, CATALOG_PROJECT_SCHEMA_PATH, "Catalog project")
     collection_type = project["collection_type"]
@@ -3653,6 +3842,139 @@ def youtube_playlist_iterator(
 
 
 HANDLERS[YOUTUBE_PLAYLIST_ITERATOR_HANDLER] = youtube_playlist_iterator
+
+
+def explicit_membership_iterator(
+    job: dict[str, Any], context: WorkerContext | None = None
+) -> dict[str, Any]:
+    if context is None:
+        raise RuntimeError("Queued iterator execution requires a worker context")
+    configuration = job["spec"].get("configuration", {})
+    project = configuration.get("project")
+    observed_at = configuration.get("observed_at")
+    validate_explicit_membership_project(project)
+    if not isinstance(observed_at, str):
+        raise ValueError("Iterator observation time is required")
+    if job["spec"]["source"].get("media_asset_id") != (
+        f"explicit-membership:{project['project_id']}"
+    ):
+        raise ValueError("Iterator job source does not match its catalog project")
+    iterator = project["iterator"]
+    iterator_configuration = iterator["configuration"]
+    source_url = iterator_configuration["canonical_url"]
+    configured_nodes = iterator_configuration["nodes"]
+    entries = iterator_configuration["entries"]
+    configured_placements = iterator_configuration["placements"]
+    total = len(entries)
+    items = []
+    context.report_progress(
+        phase="enumerating",
+        completed=0,
+        total=total,
+        unit="placements",
+    )
+    for position, entry in enumerate(entries, start=1):
+        item_id = entry["item_id"]
+        attribution = {"publisher": entry["publisher"]}
+        if entry.get("publisher_url"):
+            attribution["publisher_url"] = entry["publisher_url"]
+        metadata = copy.deepcopy(entry.get("metadata", {}))
+        metadata.update({
+            key: entry[key]
+            for key in ("duration_seconds", "published_at", "thumbnail_url")
+            if key in entry
+        })
+        items.append({
+            "item_id": item_id,
+            "title": entry["title"],
+            "canonical_url": entry["canonical_url"],
+            "media": copy.deepcopy(entry["media"]),
+            "attribution": attribution,
+            "source_provenance": {
+                "explicit_position": position,
+                "project_id": project["project_id"],
+            },
+            "metadata": metadata,
+        })
+        context.report_progress(
+            phase="enumerating",
+            completed=position,
+            total=total,
+            unit="placements",
+            current=entry["title"][:500],
+        )
+    publishers = sorted({entry["publisher"] for entry in entries})
+    source_metadata: dict[str, Any] = {"membership": "editorial"}
+    if len(publishers) == 1:
+        source_metadata["publisher"] = publishers[0]
+    snapshot = {
+        "kind": "watchcraft.collection-iterator-snapshot",
+        "schema_version": 1,
+        "project": {
+            "project_id": project["project_id"],
+            "revision": project["revision"],
+        },
+        "iterator": {
+            "id": iterator["id"],
+            "version": iterator["version"],
+        },
+        "observed_at": observed_at,
+        "source": {
+            "source_id": f"explicit-membership:{project['project_id']}",
+            "source_type": "explicit-membership",
+            "title": project["metadata"]["title"],
+            "canonical_url": source_url,
+            "metadata": source_metadata,
+        },
+        "nodes": [
+            {
+                **copy.deepcopy(node),
+                **(
+                    {"canonical_url": source_url}
+                    if node["parent_node_id"] is None
+                    else {}
+                ),
+                "metadata": {},
+            }
+            for node in configured_nodes
+        ],
+        "items": items,
+        "placements": [
+            {
+                **copy.deepcopy(placement),
+                "source_url": source_url,
+                "metadata": {},
+            }
+            for placement in configured_placements
+        ],
+        "coverage": {
+            "basis": "source-entries",
+            "expected": total,
+            "resolved": total,
+            "unresolved": [],
+        },
+        "metadata_proposals": [],
+        "structure_hash": "",
+        "provenance": {
+            "access_profile": iterator["access_profile"],
+            "discovery_mode": "legacy-import",
+            "requested_url": source_url,
+            "retrieved_urls": [source_url],
+            "warnings": [],
+        },
+    }
+    snapshot["structure_hash"] = iterator_structure_sha256(snapshot)
+    context.report_progress(
+        phase="validating", completed=0, total=1, unit="snapshot"
+    )
+    validate_iterator_snapshot(snapshot)
+    context.report_progress(
+        phase="validating", completed=1, total=1, unit="snapshot"
+    )
+    return snapshot
+
+
+HANDLERS[EXPLICIT_MEMBERSHIP_ITERATOR_HANDLER] = explicit_membership_iterator
 
 
 def _planned_item_task_id(item_id: str, stage: str) -> str:
@@ -4796,6 +5118,165 @@ def _legacy_publisher(
     }
 
 
+def _legacy_manifest_structure(
+    manifest: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    nodes: list[dict[str, Any]] = []
+    placements: list[dict[str, Any]] = []
+    ordered_item_ids: list[str] = []
+
+    def visit(node: Any, parent_node_id: str | None, position: int) -> None:
+        if not isinstance(node, dict) or node.get("type") != "group":
+            return
+        node_id = node.get("group_id")
+        if not isinstance(node_id, str) or not node_id:
+            raise ValueError("Legacy collection group has no stable group_id")
+        nodes.append({
+            "node_id": node_id,
+            "node_type": "collection-root" if parent_node_id is None else "group",
+            "title": str(node.get("title") or ""),
+            "parent_node_id": parent_node_id,
+            "position": position,
+        })
+        for child_position, child in enumerate(node.get("children", []), start=1):
+            if not isinstance(child, dict):
+                continue
+            if child.get("type") == "group":
+                visit(child, node_id, child_position)
+            elif child.get("type") == "video" and isinstance(child.get("item_id"), str):
+                item_id = child["item_id"]
+                ordered_item_ids.append(item_id)
+                placements.append({
+                    "placement_id": f"legacy-placement:{len(placements) + 1}",
+                    "item_id": item_id,
+                    "parent_node_id": node_id,
+                    "position": child_position,
+                })
+
+    visit(manifest.get("root"), None, 1)
+    return nodes, placements, ordered_item_ids
+
+
+def _legacy_explicit_membership(
+    manifest: dict[str, Any],
+    authoring: dict[str, Any],
+    publisher: dict[str, Any] | None,
+    source_url: str,
+) -> dict[str, list[dict[str, Any]]]:
+    sources = authoring.get("sources", {})
+    if isinstance(sources, dict) and sources:
+        ordered_sources = sorted(
+            sources.items(),
+            key=lambda pair: (
+                pair[1].get("position", 1_000_000)
+                if isinstance(pair[1], dict)
+                else 1_000_000,
+                pair[0],
+            ),
+        )
+        candidates = [value for _, value in ordered_sources]
+        nodes = [{
+            "node_id": "explicit-membership-root",
+            "node_type": "collection-root",
+            "title": str(manifest.get("title") or ""),
+            "parent_node_id": None,
+            "position": 1,
+        }]
+        placement_templates = [
+            {
+                "placement_id": f"explicit-placement:{position}",
+                "parent_node_id": "explicit-membership-root",
+                "position": position,
+            }
+            for position in range(1, len(candidates) + 1)
+        ]
+    else:
+        items = manifest.get("items", {})
+        nodes, placement_templates, order = _legacy_manifest_structure(manifest)
+        candidates = [items[item_id] for item_id in order if item_id in items]
+    entries = []
+    fallback_publisher = (publisher or {}).get("name")
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        media = candidate.get("media", [])
+        youtube = next(
+            (
+                value for value in media
+                if isinstance(value, dict) and value.get("type") == "youtube"
+            ),
+            None,
+        ) if isinstance(media, list) else None
+        video_id = candidate.get("video_id") or (
+            youtube.get("video_id") if youtube is not None else None
+        )
+        canonical_url = candidate.get("url") or (
+            youtube.get("url") if youtube is not None else None
+        )
+        title = candidate.get("title")
+        entry_publisher = candidate.get("publisher") or fallback_publisher
+        if not all(isinstance(value, str) and value for value in (
+            title, entry_publisher
+        )):
+            continue
+        if isinstance(video_id, str) and video_id:
+            item_id = f"youtube:{video_id}"
+            canonical_url = canonical_youtube_url(video_id)
+            media_identities = [{
+                "type": "youtube",
+                "media_id": video_id,
+                "canonical_url": canonical_url,
+            }]
+        elif youtube is None and isinstance(candidate.get("item_id"), str):
+            local_media = next(
+                (
+                    value for value in media
+                    if isinstance(value, dict) and value.get("type") == "local-file"
+                ),
+                None,
+            )
+            if local_media is None:
+                continue
+            item_id = candidate["item_id"]
+            canonical_url = f"{source_url}#item={urllib.parse.quote(item_id)}"
+            media_identities = [{
+                "type": "local-file",
+                "media_id": item_id,
+            }]
+        else:
+            continue
+        entry = {
+            "item_id": item_id,
+            "title": title,
+            "canonical_url": canonical_url,
+            "media": media_identities,
+            "publisher": entry_publisher,
+        }
+        for source_key, target_key in (
+            ("publisher_url", "publisher_url"),
+            ("duration_seconds", "duration_seconds"),
+            ("published_at", "published_at"),
+            ("thumbnail_url", "thumbnail_url"),
+        ):
+            if candidate.get(source_key) is not None:
+                entry[target_key] = candidate[source_key]
+        entry_metadata = {
+            key: copy.deepcopy(candidate[key])
+            for key in ("chapters",)
+            if candidate.get(key) is not None
+        }
+        if entry_metadata:
+            entry["metadata"] = entry_metadata
+        entries.append(entry)
+    if len(entries) != len(placement_templates):
+        return {"nodes": nodes, "entries": entries, "placements": []}
+    placements = [
+        {**template, "item_id": entry["item_id"]}
+        for template, entry in zip(placement_templates, entries)
+    ]
+    return {"nodes": nodes, "entries": entries, "placements": placements}
+
+
 def legacy_catalog_project_candidate(
     collection_directory: Path,
 ) -> dict[str, Any]:
@@ -4824,6 +5305,20 @@ def legacy_catalog_project_candidate(
     if not isinstance(sources, dict):
         sources = {}
     publisher = _legacy_publisher(manifest, authoring)
+    if publisher["status"] == "review-required" and project_id == "marc-adamus-videos":
+        publisher = {
+            "status": "editorial",
+            "value": {"name": "Marc Adamus"},
+            "basis": "editorial migration decision",
+            "candidates": publisher["candidates"],
+        }
+    elif publisher["status"] == "review-required" and project_id == "davinci-resolve":
+        publisher = {
+            "status": "explicit-multiple",
+            "value": {"name": "Multiple publishers"},
+            "basis": "editorial migration decision",
+            "candidates": publisher["candidates"],
+        }
     issues: list[dict[str, Any]] = []
     legacy_id = legacy_collection.get("collection_id")
     if legacy_id not in {None, project_id}:
@@ -4865,8 +5360,16 @@ def legacy_catalog_project_candidate(
         if publisher["value"] is not None:
             metadata["publisher"] = publisher["value"]
             metadata_basis["publisher"] = {
-                "origin": "legacy-import",
-                "source_path": publisher["basis"],
+                "origin": (
+                    "editorial"
+                    if publisher["status"] in {"editorial", "explicit-multiple"}
+                    else "legacy-import"
+                ),
+                **(
+                    {"source_path": publisher["basis"]}
+                    if publisher["status"] not in {"editorial", "explicit-multiple"}
+                    else {}
+                ),
             }
         languages = {
             value.get("captions", {}).get("language")
@@ -4913,15 +5416,101 @@ def legacy_catalog_project_candidate(
         }
         if migration_status == "ready":
             validate_json_schema(project, CATALOG_PROJECT_SCHEMA_PATH, "Catalog project")
-    elif source_type == "youtube":
-        migration_status = "unsupported"
-        issues.append({
-            "code": "explicit-video-list-iterator-needed",
-            "message": (
-                "This curated multi-source collection needs an explicit video-list "
-                "iterator before it can be imported."
-            ),
-        })
+    elif source_type in {"youtube", None}:
+        source_url = (
+            legacy_collection.get("metadata_url")
+            or f"https://collections.watchcraft.stream/collections/"
+            f"{collection_directory.name}/collection.json"
+        )
+        membership = _legacy_explicit_membership(
+            manifest,
+            authoring,
+            publisher["value"],
+            source_url,
+        )
+        entries = membership["entries"]
+        manifest_video_count = manifest.get("stats", {}).get("video_count")
+        if not entries or (
+            isinstance(manifest_video_count, int)
+            and len(entries) != manifest_video_count
+        ):
+            migration_status = "blocked"
+            issues.append({
+                "code": "explicit-membership-incomplete",
+                "message": (
+                    f"Recovered {len(entries)} explicit entries but the published "
+                    f"collection reports {manifest_video_count!r} videos."
+                ),
+            })
+        else:
+            metadata = {"title": title}
+            metadata_basis = {
+                "title": {
+                    "origin": "legacy-import",
+                    "source_path": "collection.json.title",
+                }
+            }
+            description = manifest.get("description") or legacy_collection.get("description")
+            if isinstance(description, str):
+                metadata["description"] = description
+                metadata_basis["description"] = {
+                    "origin": "legacy-import",
+                    "source_path": "collection.json.description",
+                }
+            if publisher["value"] is not None:
+                metadata["publisher"] = publisher["value"]
+                metadata_basis["publisher"] = {
+                    "origin": (
+                        "editorial"
+                        if publisher["status"] in {"editorial", "explicit-multiple"}
+                        else "legacy-import"
+                    ),
+                    **(
+                        {"source_path": publisher["basis"]}
+                        if publisher["status"] not in {"editorial", "explicit-multiple"}
+                        else {}
+                    ),
+                }
+            project = {
+                "kind": "watchcraft.catalog-project",
+                "schema_version": 1,
+                "project_id": project_id,
+                "revision": 1,
+                "collection_type": {
+                    "id": (
+                        "watchcraft.grouped-video-collection"
+                        if len(membership["nodes"]) > 1
+                        else "watchcraft.video-collection"
+                    ),
+                    "version": "1",
+                    "configuration": {
+                        "structure": (
+                            "grouped-list"
+                            if len(membership["nodes"]) > 1
+                            else "ordered-list"
+                        )
+                    },
+                },
+                "iterator": {
+                    "id": "watchcraft.explicit-membership",
+                    "version": "1",
+                    "configuration": {
+                        "canonical_url": source_url,
+                        "nodes": membership["nodes"],
+                        "entries": entries,
+                        "placements": membership["placements"],
+                    },
+                    "access_profile": "public-anonymous",
+                    "refresh": {"mode": "on-demand", "stale_while_refresh": True},
+                },
+                "metadata": metadata,
+                "metadata_basis": metadata_basis,
+                "publication": {
+                    "collection_id": project_id,
+                    "listed": legacy_collection.get("listed", True),
+                },
+            }
+            validate_explicit_membership_project(project)
     else:
         migration_status = "unsupported"
         issues.append({
@@ -4938,23 +5527,227 @@ def legacy_catalog_project_candidate(
         })
         if migration_status == "ready":
             migration_status = "review-required"
+    published_item_count = manifest.get("stats", {}).get("video_count")
+    if not isinstance(published_item_count, int):
+        published_item_count = len(sources)
     return {
         "directory": str(collection_directory),
         "collection_id": project_id,
         "published_revision": manifest.get("revision"),
         "published_schema_version": manifest.get("schema_version"),
         "source_type": source_type,
-        "source_items": len(sources),
+        "source_items": published_item_count,
         "status": migration_status,
         "publisher": publisher,
         "issues": issues,
         "project_candidate": project,
         "baseline": {
             "strategy": "frozen-legacy-snapshot",
-            "items": len(sources),
+            "items": published_item_count,
             "requires_r2_publication_before_import": project is not None,
         },
     }
+
+
+def _legacy_snapshot_observed_at(collection_directory: Path) -> str:
+    try:
+        result = subprocess.run(
+            [
+                "git", "-C", str(collection_directory), "log", "-1",
+                "--format=%cI", "--", "collection.json", "watchcraft-authoring.json",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        observed_at = result.stdout.strip()
+        if observed_at:
+            datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+            return observed_at
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        pass
+    try:
+        modified_at = max(
+            (collection_directory / name).stat().st_mtime
+            for name in ("collection.json", "watchcraft-authoring.json")
+        )
+    except OSError as error:
+        raise RuntimeError(
+            f"Could not determine legacy observation time for {collection_directory}"
+        ) from error
+    return datetime.fromtimestamp(modified_at, timezone.utc).isoformat().replace(
+        "+00:00", "Z"
+    )
+
+
+def _json_artifact_reference(
+    value: dict[str, Any],
+    *,
+    artifact_kind: str,
+    schema: dict[str, Any],
+) -> tuple[dict[str, Any], bytes]:
+    payload = canonical_json(value).encode("utf-8")
+    digest = sha256_hex(payload)
+    return ({
+        "store": "r2",
+        "algorithm": "sha256",
+        "digest": digest,
+        "byte_length": len(payload),
+        "media_type": "application/json",
+        "artifact_kind": artifact_kind,
+        "schema": schema,
+        "key": f"objects/sha256/{digest[:2]}/{digest[2:]}",
+    }, payload)
+
+
+def legacy_frozen_iterator_snapshot(
+    collection_directory: Path,
+    project: dict[str, Any],
+) -> dict[str, Any]:
+    manifest, _ = load_exact_json_object(
+        collection_directory / "collection.json", "published collection manifest"
+    )
+    authoring, _ = load_exact_json_object(
+        collection_directory / "watchcraft-authoring.json", "legacy authoring document"
+    )
+    iterator = project["iterator"]
+    source_url = iterator["configuration"]["canonical_url"]
+    if iterator["id"] == "watchcraft.explicit-membership":
+        configuration = iterator["configuration"]
+        entries = copy.deepcopy(configuration["entries"])
+        configured_nodes = copy.deepcopy(configuration["nodes"])
+        configured_placements = copy.deepcopy(configuration["placements"])
+        source_id = f"explicit-membership:{project['project_id']}"
+        source_type = "explicit-membership"
+    elif iterator["id"] == "watchcraft.youtube-playlist":
+        membership = _legacy_explicit_membership(
+            manifest,
+            authoring,
+            project.get("metadata", {}).get("publisher"),
+            source_url,
+        )
+        entries = membership["entries"]
+        configured_nodes = [{
+            "node_id": "playlist-root",
+            "node_type": "playlist",
+            "title": project["metadata"]["title"],
+            "parent_node_id": None,
+            "position": 1,
+        }]
+        configured_placements = [
+            {
+                "placement_id": f"playlist-entry:{position}",
+                "item_id": entry["item_id"],
+                "parent_node_id": "playlist-root",
+                "position": position,
+            }
+            for position, entry in enumerate(entries, start=1)
+        ]
+        playlist_id = iterator["configuration"]["playlist_id"]
+        source_id = f"youtube-playlist:{playlist_id}"
+        source_type = "youtube-playlist"
+    else:
+        raise ValueError(
+            f"Cannot freeze unsupported legacy iterator {iterator['id']!r}"
+        )
+    expected = manifest.get("stats", {}).get("video_count")
+    if not isinstance(expected, int):
+        expected = len(entries)
+    if len(entries) != expected or len(configured_placements) != expected:
+        raise ValueError(
+            f"Legacy snapshot recovered {len(entries)} items and "
+            f"{len(configured_placements)} placements; published collection expects "
+            f"{expected}"
+        )
+    items = []
+    for position, entry in enumerate(entries, start=1):
+        attribution = {"publisher": entry["publisher"]}
+        if entry.get("publisher_url"):
+            attribution["publisher_url"] = entry["publisher_url"]
+        metadata = copy.deepcopy(entry.get("metadata", {}))
+        metadata.update({
+            key: entry[key]
+            for key in ("duration_seconds", "published_at", "thumbnail_url")
+            if key in entry
+        })
+        source_provenance = {
+            "discovery_mode": "legacy-import",
+            "collection_id": project["project_id"],
+            "published_revision": manifest.get("revision"),
+            "explicit_position": position,
+        }
+        if iterator["id"] == "watchcraft.youtube-playlist":
+            source_provenance["playlist_id"] = iterator["configuration"]["playlist_id"]
+        items.append({
+            "item_id": entry["item_id"],
+            "title": entry["title"],
+            "canonical_url": entry["canonical_url"],
+            "media": copy.deepcopy(entry["media"]),
+            "attribution": attribution,
+            "source_provenance": source_provenance,
+            "metadata": metadata,
+        })
+    source_metadata = {
+        "membership": "frozen-published-collection",
+        "published_revision": manifest.get("revision"),
+    }
+    if isinstance(manifest.get("content_hash"), str):
+        source_metadata["published_content_hash"] = manifest["content_hash"]
+    snapshot = {
+        "kind": "watchcraft.collection-iterator-snapshot",
+        "schema_version": 1,
+        "project": {
+            "project_id": project["project_id"],
+            "revision": project["revision"],
+        },
+        "iterator": {"id": iterator["id"], "version": iterator["version"]},
+        "observed_at": _legacy_snapshot_observed_at(collection_directory),
+        "source": {
+            "source_id": source_id,
+            "source_type": source_type,
+            "title": project["metadata"]["title"],
+            "canonical_url": source_url,
+            "metadata": source_metadata,
+        },
+        "nodes": [
+            {
+                **node,
+                **(
+                    {"canonical_url": source_url}
+                    if node["parent_node_id"] is None
+                    else {}
+                ),
+                "metadata": {},
+            }
+            for node in configured_nodes
+        ],
+        "items": items,
+        "placements": [
+            {**placement, "source_url": source_url, "metadata": {}}
+            for placement in configured_placements
+        ],
+        "coverage": {
+            "basis": "items",
+            "expected": expected,
+            "resolved": expected,
+            "unresolved": [],
+        },
+        "metadata_proposals": [],
+        "structure_hash": "",
+        "provenance": {
+            "access_profile": iterator["access_profile"],
+            "discovery_mode": "legacy-import",
+            "requested_url": source_url,
+            "retrieved_urls": [],
+            "warnings": [
+                "Frozen from the published schema-v4 collection without refreshing "
+                "the external source."
+            ],
+        },
+    }
+    snapshot["structure_hash"] = iterator_structure_sha256(snapshot)
+    validate_iterator_snapshot(snapshot)
+    return snapshot
 
 
 def legacy_project_migration_report(collections_root: Path) -> dict[str, Any]:
@@ -4966,7 +5759,24 @@ def legacy_project_migration_report(collections_root: Path) -> dict[str, Any]:
         if not child.is_dir() or not (child / "watchcraft-authoring.json").is_file():
             continue
         try:
-            results.append(legacy_catalog_project_candidate(child))
+            candidate = legacy_catalog_project_candidate(child)
+            if candidate["status"] == "ready":
+                snapshot = legacy_frozen_iterator_snapshot(
+                    child, candidate["project_candidate"]
+                )
+                reference, _ = _json_artifact_reference(
+                    snapshot,
+                    artifact_kind="collection-iterator-snapshot",
+                    schema=COLLECTION_ITERATOR_SNAPSHOT_SCHEMA,
+                )
+                candidate["baseline"].update({
+                    "items": len(snapshot["items"]),
+                    "placements": len(snapshot["placements"]),
+                    "nodes": len(snapshot["nodes"]),
+                    "observed_at": snapshot["observed_at"],
+                    "artifact": reference,
+                })
+            results.append(candidate)
         except (OSError, RuntimeError, ValueError) as error:
             results.append({
                 "directory": str(child),
@@ -4996,18 +5806,145 @@ def legacy_project_migration_report(collections_root: Path) -> dict[str, Any]:
     }
 
 
-def run_import_legacy_projects(args: argparse.Namespace) -> int:
-    if not args.dry_run:
+def _selected_legacy_migration_report(
+    report: dict[str, Any], project_ids: list[str] | None
+) -> dict[str, Any]:
+    if not project_ids:
+        return report
+    requested = set(project_ids)
+    collections = [
+        item for item in report["collections"]
+        if item["collection_id"] in requested
+    ]
+    found = {item["collection_id"] for item in collections}
+    missing = sorted(requested - found)
+    if missing:
         raise RuntimeError(
-            "Legacy project import currently requires --dry-run; review the migration "
-            "report before durable snapshot publication and Convex import are enabled"
+            "Unknown legacy collection project ID(s): " + ", ".join(missing)
         )
-    print(json.dumps(
+    selected = copy.deepcopy(report)
+    selected["collections"] = collections
+    counts = Counter(item["status"] for item in collections)
+    selected["summary"].update({
+        "examined": len(collections),
+        "ready": counts["ready"],
+        "review_required": counts["review-required"],
+        "blocked": counts["blocked"],
+        "unsupported": counts["unsupported"],
+        "invalid": counts["invalid"],
+    })
+    return selected
+
+
+def run_import_legacy_projects(args: argparse.Namespace) -> int:
+    report = _selected_legacy_migration_report(
         legacy_project_migration_report(args.collections_root),
-        ensure_ascii=False,
-        indent=2,
-        sort_keys=True,
-    ))
+        args.project_id,
+    )
+    if args.dry_run:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if not args.apply:
+        raise RuntimeError(
+            "Choose exactly one of --dry-run or --apply"
+        )
+    not_ready = [
+        item for item in report["collections"] if item["status"] != "ready"
+    ]
+    if not_ready:
+        details = ", ".join(
+            f"{item['collection_id']} ({item['status']})" for item in not_ready
+        )
+        raise RuntimeError(
+            f"Refusing partial legacy import; resolve non-ready projects first: {details}"
+        )
+    prepared = []
+    for item in report["collections"]:
+        project = copy.deepcopy(item["project_candidate"])
+        snapshot = legacy_frozen_iterator_snapshot(
+            Path(item["directory"]), project
+        )
+        reference, payload = _json_artifact_reference(
+            snapshot,
+            artifact_kind="collection-iterator-snapshot",
+            schema=COLLECTION_ITERATOR_SNAPSHOT_SCHEMA,
+        )
+        if reference != item["baseline"]["artifact"]:
+            raise RuntimeError(
+                f"Legacy snapshot changed during preflight for {item['collection_id']}"
+            )
+        project["iterator"]["accepted_snapshot"] = reference
+        validate_json_schema(project, CATALOG_PROJECT_SCHEMA_PATH, "Catalog project")
+        prepared.append({
+            "project": project,
+            "snapshot": snapshot,
+            "snapshot_payload": payload,
+            "reference": reference,
+        })
+
+    control = operator_client(args.operator_token_source)
+    pending = []
+    results = []
+    for entry in prepared:
+        project = entry["project"]
+        try:
+            current = control.post(
+                "/projects/get", {"project_id": project["project_id"]}
+            )
+        except RuntimeError as error:
+            if "Unknown catalog project" not in str(error):
+                raise
+            pending.append(entry)
+        else:
+            results.append({
+                "project_id": project["project_id"],
+                "state": "skipped-existing",
+                "current_revision": current["project"]["revision"],
+            })
+
+    if pending:
+        writer = r2_staging_writer(args.r2_write_credentials_source)
+        for entry in pending:
+            project = entry["project"]
+            reference = writer.put_json(entry["snapshot"], {
+                "artifact_kind": "collection-iterator-snapshot",
+                "schema": COLLECTION_ITERATOR_SNAPSHOT_SCHEMA,
+            })
+            if reference != entry["reference"]:
+                raise RuntimeError(
+                    f"R2 returned an unexpected artifact identity for "
+                    f"{project['project_id']}"
+                )
+            imported = control.post("/projects/import", {
+                "command_id": str(uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"watchcraft:legacy-project-import:{project['project_id']}:"
+                    f"{reference['digest']}",
+                )),
+                "actor": "watchcraft-legacy-import-cli",
+                "project": project,
+                "accepted_snapshot_json": entry["snapshot_payload"].decode("utf-8"),
+            })
+            results.append({
+                "project_id": project["project_id"],
+                "state": "imported" if imported.get("created") else "already-imported",
+                "project_revision": imported["project"]["revision"],
+                "snapshot": reference,
+            })
+            print(f"imported {project['project_id']}", file=sys.stderr, flush=True)
+    state_counts = Counter(item["state"] for item in results)
+    print(json.dumps({
+        "kind": "watchcraft.legacy-project-import-result",
+        "schema_version": 1,
+        "collections_root": report["collections_root"],
+        "summary": {
+            "examined": len(results),
+            "imported": state_counts["imported"],
+            "already_imported": state_counts["already-imported"],
+            "skipped_existing": state_counts["skipped-existing"],
+        },
+        "projects": sorted(results, key=lambda item: item["project_id"]),
+    }, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 
 
@@ -5126,7 +6063,13 @@ def run_project_accept_snapshot(args: argparse.Namespace) -> int:
 def run_iterate_project(args: argparse.Namespace) -> int:
     control = operator_client(args.operator_token_source)
     project = load_catalog_project_argument(args.project, control)
-    spec = youtube_playlist_iterator_spec(project)
+    iterator_id = project.get("iterator", {}).get("id")
+    if iterator_id == "watchcraft.youtube-playlist":
+        spec = youtube_playlist_iterator_spec(project)
+    elif iterator_id == "watchcraft.explicit-membership":
+        spec = explicit_membership_iterator_spec(project)
+    else:
+        raise ValueError(f"Unsupported collection iterator {iterator_id!r}")
     submitted = submit_spec(
         control,
         request={
@@ -7993,12 +8936,13 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
     )
     legacy_project_import = commands.add_parser(
         "import-legacy-projects",
+        parents=[credentials],
         help="Audit legacy collection packages for CatalogProject import",
         description=(
-            "Deterministically inspect legacy collection packages and emit candidate "
-            "CatalogProject documents plus publisher and iterator migration findings. "
-            "The initial report-only implementation performs no network requests and "
-            "does not write files, R2 objects, or Convex records."
+            "Deterministically inspect legacy collection packages and either emit a "
+            "no-write migration report or publish each frozen iterator snapshot to R2 "
+            "and import its bound CatalogProject into Convex. Existing projects are "
+            "always skipped rather than updated."
         ),
     )
     legacy_project_import.add_argument(
@@ -8006,10 +8950,31 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         type=Path,
         help="Directory whose immediate children are published collection packages",
     )
-    legacy_project_import.add_argument(
+    legacy_mode = legacy_project_import.add_mutually_exclusive_group(required=True)
+    legacy_mode.add_argument(
         "--dry-run",
         action="store_true",
-        help="Required safety boundary: inspect and report without any writes",
+        help="Inspect and validate every frozen snapshot without any writes",
+    )
+    legacy_mode.add_argument(
+        "--apply",
+        action="store_true",
+        help="Publish immutable snapshots to R2 and import only absent projects",
+    )
+    legacy_project_import.add_argument(
+        "--project-id",
+        action="append",
+        help="Limit the audit or import to this collection ID; may be repeated",
+    )
+    legacy_project_import.add_argument(
+        "--r2-write-credentials-source",
+        choices=("auto", "keychain", "environment"),
+        default="auto",
+        help=(
+            "R2 writer credential source. This reuses the existing staging-uploader "
+            "Keychain entries or WATCHCRAFT_R2_STAGING_ACCESS_KEY_ID and "
+            "WATCHCRAFT_R2_STAGING_SECRET_ACCESS_KEY (default: auto)"
+        ),
     )
     project_status = commands.add_parser(
         "project-status",
@@ -8054,7 +9019,8 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         description=(
             "Validate a CatalogProject, run its registered collection iterator, "
             "report member progress, and retrieve the verified candidate snapshot. "
-            "The first executable iterator is watchcraft.youtube-playlist@1."
+            "Executable iterators include watchcraft.youtube-playlist@1 and the "
+            "offline watchcraft.explicit-membership@1."
         ),
     )
     iterate_project.add_argument(

@@ -185,7 +185,9 @@ A pipeline run binds an exact `(project_id, revision)`, which in turn binds the 
 
 ## Adoption of current collections
 
-Each of the seventeen existing `watchcraft-authoring.json` workspaces can be imported as a `watchcraft.video-collection@1` project. Its existing source enumeration becomes an iterator snapshot; existing transcripts, analyses, normalization results, and published package remain authoritative.
+Each of the seventeen legacy `watchcraft-authoring.json` workspaces can be imported as a CatalogProject without changing its published collection. Ordinary playlist and curated-list collections use `watchcraft.video-collection@1`; the Marc Adamus hierarchy uses the reusable `watchcraft.grouped-video-collection@1`. Existing source enumeration becomes an iterator snapshot, while existing transcripts, analyses, normalization results, and published packages remain authoritative.
+
+Migration freezes the already-published membership rather than refreshing an external provider. The CLI validates the entire selected set before writing, stores each frozen snapshot in the immutable R2 object namespace, binds that exact digest into the initial project aggregate, and imports the project into Convex. An existing project ID is skipped and is never rewritten by migration; this lets newly authored projects and partially completed migration batches coexist safely. Repeating a migration is idempotent because the snapshot bytes and import command identity are content-derived.
 
 | Existing field or artifact | Adopted representation |
 | --- | --- |
@@ -237,6 +239,8 @@ Collection types and iterators are registered capabilities. A type registration 
 The first implementation keeps a versioned static registry in the authoring-pipeline package. This establishes typed identities, configuration validation, output capabilities, and compatibility checks without prematurely choosing the persistent registry administration model.
 
 Compatibility is checked explicitly. For example, the course type requires hierarchical nodes and curricular placements, while a flat playlist iterator would need either to provide that shape or be rejected for that project. This check is a seam between the two abstractions, not a third abstraction exposed to authors.
+
+Legacy authored membership is represented by the provider-neutral `watchcraft.explicit-membership@1` iterator. Its configuration preserves stable items, placements, and optional group nodes without rediscovering or reprocessing media. A flat list is compatible with `watchcraft.video-collection@1`; a preserved authored hierarchy uses the reusable `watchcraft.grouped-video-collection@1` type. Media identities may describe YouTube or local-file assets, but portable project state never embeds machine-specific local paths; those remain private installation bindings. This allows the Marc Adamus collection to preserve its existing groups while ordinary curated lists remain flat, with neither case becoming a publisher-specific type.
 
 The first executable implementation is `watchcraft.youtube-playlist@1`, registered as the `watchcraft.iterator.youtube-playlist@1` authoring handler on the portable Python worker. It reuses the existing source-only playlist discovery behavior, emits an immutable candidate snapshot, reports placement progress through the generic worker context, and checkpoints every ten source entries. This establishes the execution seam before Khan course and channel-ranking adapters are added.
 

@@ -93,7 +93,7 @@ function requiredInteger(
 function requiredUrl(
   value: JsonValue | undefined,
   label: string,
-  hostname: string,
+  hostname?: string,
 ): URL {
   const source = requiredString(value, label);
   let url: URL;
@@ -102,8 +102,13 @@ function requiredUrl(
   } catch {
     throw new TypeError(`${label} must be an absolute URL.`);
   }
-  if (url.protocol !== "https:" || !url.hostname.endsWith(hostname)) {
-    throw new TypeError(`${label} must be an HTTPS ${hostname} URL.`);
+  if (
+    url.protocol !== "https:" ||
+    (hostname !== undefined && !url.hostname.endsWith(hostname))
+  ) {
+    throw new TypeError(
+      `${label} must be an HTTPS${hostname ? ` ${hostname}` : ""} URL.`,
+    );
   }
   return url;
 }
@@ -157,6 +162,29 @@ function validateVideoCollectionConfiguration(
     configuration.presentation,
     [],
     "Video collection presentation",
+  );
+}
+
+function validateGroupedVideoCollectionConfiguration(
+  configuration: Record<string, JsonValue>,
+): void {
+  onlyKeys(
+    configuration,
+    ["structure", "presentation"],
+    "Grouped video collection configuration",
+  );
+  if (
+    requiredString(
+      configuration.structure,
+      "Grouped video collection structure",
+    ) !== "grouped-list"
+  ) {
+    throw new TypeError("Grouped video collection structure must be grouped-list.");
+  }
+  validatePresentationBooleans(
+    configuration.presentation,
+    ["show_groups"],
+    "Grouped video collection presentation",
   );
 }
 
@@ -259,6 +287,175 @@ function validateYouTubePlaylistConfiguration(
   );
 }
 
+function validateExplicitMembershipConfiguration(
+  configuration: Record<string, JsonValue>,
+): void {
+  onlyKeys(
+    configuration,
+    ["canonical_url", "nodes", "entries", "placements"],
+    "Explicit membership iterator configuration",
+  );
+  requiredUrl(
+    configuration.canonical_url,
+    "Explicit membership source URL",
+  );
+  if (!Array.isArray(configuration.entries) || configuration.entries.length === 0) {
+    throw new TypeError("Explicit membership entries must be a non-empty array.");
+  }
+  const itemIds: string[] = [];
+  for (const [index, value] of configuration.entries.entries()) {
+    const label = `Explicit membership entry ${index + 1}`;
+    const entry = objectValue(value, label);
+    onlyKeys(
+      entry,
+      [
+        "item_id",
+        "title",
+        "canonical_url",
+        "media",
+        "publisher",
+        "publisher_url",
+        "duration_seconds",
+        "published_at",
+        "thumbnail_url",
+        "metadata",
+      ],
+      label,
+    );
+    const itemId = requiredString(entry.item_id, `${label} item ID`);
+    itemIds.push(itemId);
+    requiredString(entry.title, `${label} title`);
+    requiredUrl(entry.canonical_url, `${label} URL`);
+    if (!Array.isArray(entry.media) || entry.media.length === 0) {
+      throw new TypeError(`${label} media must be a non-empty array.`);
+    }
+    for (const [mediaIndex, mediaValue] of entry.media.entries()) {
+      const mediaLabel = `${label} media ${mediaIndex + 1}`;
+      const media = objectValue(mediaValue, mediaLabel);
+      onlyKeys(media, ["type", "media_id", "canonical_url"], mediaLabel);
+      requiredString(media.type, `${mediaLabel} type`);
+      requiredString(media.media_id, `${mediaLabel} ID`);
+      if (media.canonical_url !== undefined) {
+        requiredUrl(media.canonical_url, `${mediaLabel} URL`);
+      }
+    }
+    requiredString(entry.publisher, `${label} publisher`);
+    if (entry.publisher_url !== undefined) {
+      requiredUrl(entry.publisher_url, `${label} publisher URL`);
+    }
+    if (entry.duration_seconds !== undefined) {
+      requiredInteger(entry.duration_seconds, `${label} duration`, 0);
+    }
+    if (entry.published_at !== undefined) {
+      requiredString(entry.published_at, `${label} publication time`);
+    }
+    if (entry.thumbnail_url !== undefined) {
+      requiredUrl(entry.thumbnail_url, `${label} thumbnail URL`);
+    }
+    if (entry.metadata !== undefined) {
+      objectValue(entry.metadata, `${label} metadata`);
+    }
+  }
+  if (new Set(itemIds).size !== itemIds.length) {
+    throw new TypeError("Explicit membership item IDs must be unique.");
+  }
+  if (!Array.isArray(configuration.nodes) || configuration.nodes.length === 0) {
+    throw new TypeError("Explicit membership nodes must be a non-empty array.");
+  }
+  const nodeIds: string[] = [];
+  for (const [index, value] of configuration.nodes.entries()) {
+    const label = `Explicit membership node ${index + 1}`;
+    const node = objectValue(value, label);
+    onlyKeys(
+      node,
+      ["node_id", "node_type", "title", "parent_node_id", "position"],
+      label,
+    );
+    nodeIds.push(requiredString(node.node_id, `${label} ID`));
+    requiredString(node.node_type, `${label} type`);
+    requiredString(node.title, `${label} title`);
+    if (node.parent_node_id !== null) {
+      requiredString(node.parent_node_id, `${label} parent ID`);
+    }
+    requiredInteger(node.position, `${label} position`);
+  }
+  if (new Set(nodeIds).size !== nodeIds.length) {
+    throw new TypeError("Explicit membership node IDs must be unique.");
+  }
+  const roots = configuration.nodes.filter(
+    (value) => objectValue(value, "Explicit membership node").parent_node_id === null,
+  );
+  if (roots.length !== 1) {
+    throw new TypeError("Explicit membership must have exactly one root node.");
+  }
+  const parentByNode = new Map<string, string | null>();
+  const nodePositions = new Set<string>();
+  for (const value of configuration.nodes) {
+    const node = objectValue(value, "Explicit membership node");
+    const nodeId = node.node_id as string;
+    const parentId = node.parent_node_id as string | null;
+    if (parentId !== null && !nodeIds.includes(parentId)) {
+      throw new TypeError("Explicit membership node references an unknown parent.");
+    }
+    const positionKey = `${parentId ?? "<root>"}\u0000${node.position}`;
+    if (nodePositions.has(positionKey)) {
+      throw new TypeError("Explicit membership sibling node positions must be unique.");
+    }
+    nodePositions.add(positionKey);
+    parentByNode.set(nodeId, parentId);
+  }
+  for (const nodeId of nodeIds) {
+    const visited = new Set<string>();
+    let current: string | null = nodeId;
+    while (current !== null) {
+      if (visited.has(current)) {
+        throw new TypeError("Explicit membership node graph must be acyclic.");
+      }
+      visited.add(current);
+      current = parentByNode.get(current) ?? null;
+    }
+  }
+  if (!Array.isArray(configuration.placements)) {
+    throw new TypeError("Explicit membership placements must be an array.");
+  }
+  const placementIds: string[] = [];
+  const placedItemIds = new Set<string>();
+  const placementPositions = new Set<string>();
+  for (const [index, value] of configuration.placements.entries()) {
+    const label = `Explicit membership placement ${index + 1}`;
+    const placement = objectValue(value, label);
+    onlyKeys(
+      placement,
+      ["placement_id", "item_id", "parent_node_id", "position"],
+      label,
+    );
+    placementIds.push(requiredString(placement.placement_id, `${label} ID`));
+    const itemId = requiredString(placement.item_id, `${label} item ID`);
+    const parentId = requiredString(
+      placement.parent_node_id,
+      `${label} parent ID`,
+    );
+    requiredInteger(placement.position, `${label} position`);
+    if (!itemIds.includes(itemId) || !nodeIds.includes(parentId)) {
+      throw new TypeError(`${label} references an unknown item or node.`);
+    }
+    placedItemIds.add(itemId);
+    const positionKey = `${parentId}\u0000${placement.position}`;
+    if (placementPositions.has(positionKey)) {
+      throw new TypeError(
+        "Explicit membership sibling placement positions must be unique.",
+      );
+    }
+    placementPositions.add(positionKey);
+  }
+  if (new Set(placementIds).size !== placementIds.length) {
+    throw new TypeError("Explicit membership placement IDs must be unique.");
+  }
+  if (itemIds.some((itemId) => !placedItemIds.has(itemId))) {
+    throw new TypeError("Explicit membership placements must cover every item.");
+  }
+}
+
 function validateKhanCourseConfiguration(
   configuration: Record<string, JsonValue>,
 ): void {
@@ -347,6 +544,15 @@ function validateVideoSnapshot(snapshot: CollectionIteratorSnapshot): void {
   }
 }
 
+function validateGroupedVideoSnapshot(snapshot: CollectionIteratorSnapshot): void {
+  validateVideoSnapshot(snapshot);
+  if (snapshot.nodes.length < 2) {
+    throw new TypeError(
+      "Grouped video collection snapshot must preserve at least one child group.",
+    );
+  }
+}
+
 function validateCourseSnapshot(snapshot: CollectionIteratorSnapshot): void {
   validateVideoSnapshot(snapshot);
   requireNodeTypes(snapshot, ["course", "unit", "lesson"], "Course");
@@ -372,7 +578,7 @@ function validateRankedSnapshot(snapshot: CollectionIteratorSnapshot): void {
 export const DEFAULT_CATALOG_CAPABILITY_REGISTRY: CatalogCapabilityRegistry = {
   kind: "watchcraft.catalog-capability-registry",
   schema_version: 1,
-  registry_version: "2026-09-08.1",
+  registry_version: "2026-09-11.1",
   collection_types: [
     {
       id: "watchcraft.video-collection",
@@ -380,6 +586,17 @@ export const DEFAULT_CATALOG_CAPABILITY_REGISTRY: CatalogCapabilityRegistry = {
       required_iterator_capabilities: ["video-items", "ordered-placements"],
       validate_configuration: validateVideoCollectionConfiguration,
       validate_snapshot: validateVideoSnapshot,
+    },
+    {
+      id: "watchcraft.grouped-video-collection",
+      version: "1",
+      required_iterator_capabilities: [
+        "video-items",
+        "ordered-placements",
+        "hierarchical-nodes",
+      ],
+      validate_configuration: validateGroupedVideoCollectionConfiguration,
+      validate_snapshot: validateGroupedVideoSnapshot,
     },
     {
       id: "watchcraft.course",
@@ -410,6 +627,16 @@ export const DEFAULT_CATALOG_CAPABILITY_REGISTRY: CatalogCapabilityRegistry = {
       version: "1",
       output_capabilities: ["video-items", "ordered-placements"],
       validate_configuration: validateYouTubePlaylistConfiguration,
+    },
+    {
+      id: "watchcraft.explicit-membership",
+      version: "1",
+      output_capabilities: [
+        "video-items",
+        "ordered-placements",
+        "hierarchical-nodes",
+      ],
+      validate_configuration: validateExplicitMembershipConfiguration,
     },
     {
       id: "watchcraft.khan-course",

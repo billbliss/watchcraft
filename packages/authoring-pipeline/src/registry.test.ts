@@ -186,6 +186,12 @@ const playlistIteratorSpec = {
   configuration: { project: { project_id: "example" } },
 };
 
+const explicitMembershipIteratorSpec = {
+  ...playlistIteratorSpec,
+  handler: { id: "watchcraft.iterator.explicit-membership", version: "1" },
+  source: { media_asset_id: "explicit-membership:example" },
+};
+
 const iteratorSnapshotDigest = "f".repeat(64);
 const iteratorSnapshotArtifact = {
   store: "r2" as const,
@@ -271,7 +277,7 @@ test("the checked-in registry is valid, stable, and fully resolves an approved j
   const registry = parseCapabilityRegistry(DEFAULT_CAPABILITY_REGISTRY);
   const spec = resolveJobSpecAgainstRegistry(lexicalSpec, registry);
 
-  assert.equal(spec.registry_snapshot?.registry_version, "2026-09-10.9");
+  assert.equal(spec.registry_snapshot?.registry_version, "2026-09-10.10");
   assert.equal(spec.registry_snapshot?.registry_sha256, capabilityRegistrySha256(registry));
   assert.equal(spec.registry_snapshot?.execution_profile.id, "python-portable");
   assert.equal(spec.registry_snapshot?.execution_profile.dispatcher.workflow, "authoring-worker.yml");
@@ -406,6 +412,22 @@ test("playlist iteration is routed to the portable Python worker", () => {
   assert.equal(
     spec.registry_snapshot?.handler.id,
     "watchcraft.iterator.youtube-playlist",
+  );
+  assert.equal(spec.registry_snapshot?.execution_profile.id, "python-portable");
+  assert.equal(
+    spec.registry_snapshot?.execution_profile.dispatcher.workflow,
+    "authoring-worker.yml",
+  );
+});
+
+test("explicit membership iteration is routed to the portable Python worker", () => {
+  const spec = resolveJobSpecAgainstRegistry(
+    explicitMembershipIteratorSpec,
+    DEFAULT_CAPABILITY_REGISTRY,
+  );
+  assert.equal(
+    spec.registry_snapshot?.handler.id,
+    "watchcraft.iterator.explicit-membership",
   );
   assert.equal(spec.registry_snapshot?.execution_profile.id, "python-portable");
   assert.equal(

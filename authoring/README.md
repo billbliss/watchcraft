@@ -467,12 +467,32 @@ locally:
   --dry-run
 ```
 
-The report includes a schema-valid candidate `CatalogProject` for each supported
-YouTube-playlist collection, identifies how publisher metadata was preserved or
-inferred, and flags collections that need an explicit-video-list or legacy-static
-iterator. It makes no network requests and performs no local or remote writes. The
-command intentionally requires `--dry-run` until the next migration phase can publish
-each frozen legacy snapshot to R2 before importing its bound project into Convex.
+The report includes a schema-valid candidate `CatalogProject` and a validated,
+content-addressed frozen iterator-snapshot identity for every supported legacy
+collection. It identifies how publisher metadata was preserved or inferred and
+reconstructs curated or grouped legacy membership with
+`watchcraft.explicit-membership@1`. Dry-run makes no network requests and performs no
+local or remote writes.
+
+After reviewing the report, migrate all absent projects with one idempotent command:
+
+```bash
+./authoring/watchcraft-author queue import-legacy-projects \
+  /Users/billbliss/dev/watchcraft-collections/collections \
+  --apply \
+  --operator-token-source keychain \
+  --r2-write-credentials-source keychain
+```
+
+Use `--project-id COLLECTION_ID` one or more times for a bounded rollout. Apply first
+validates the complete selected set, queries Convex, and skips every existing project;
+it never updates one. For each absent project it uploads the exact frozen snapshot to
+the immutable R2 object namespace, verifies the round trip, binds that reference into
+the initial CatalogProject revision, and imports the aggregate. The R2 write option
+reuses the already provisioned `Watchcraft R2 staging uploader` Keychain credential.
+Its permission must include object read and write access to the authoring bucket.
+Reruns are safe: object keys, project aggregates, and import command IDs are derived
+from immutable content.
 
 Accept a completed iterator candidate by its authoritative job ID:
 
@@ -644,7 +664,7 @@ related pairs, and timing; the printed `queue result` command retrieves the comp
 normalization artifact.
 
 Terminology application, stable-baseline normalization, and revised compilation are registered
-in capability registry `2026-09-10.9`. After committing and pushing, publish and activate the
+in capability registry `2026-09-10.10`. After committing and pushing, publish and activate the
 checked-in registry before running either downstream command:
 
 ```bash
