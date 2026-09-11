@@ -92,7 +92,7 @@ PROJECT_PROCESSING_PLANNER_HANDLER = (
 )
 TOPIC_NORMALIZATION_HANDLER = (
     "watchcraft.normalize.collection-topics",
-    "5",
+    "6",
 )
 PRE_TERMINOLOGY_TOPIC_NORMALIZATION_HANDLER = (
     "watchcraft.normalize.collection-topics",
@@ -100,7 +100,7 @@ PRE_TERMINOLOGY_TOPIC_NORMALIZATION_HANDLER = (
 )
 COLLECTION_COMPILATION_HANDLER = (
     "watchcraft.compile.video-collection",
-    "6",
+    "7",
 )
 PYTHON_EXECUTION_PROFILE = ("python-portable", "1")
 PYTHON_EXECUTION_WORKFLOW = "authoring-worker.yml"
@@ -1307,7 +1307,7 @@ def apply_automatic_terminology_to_display_labels(
             isinstance(observed, str)
             and observed.casefold() != display.casefold()
             for observed in observed_forms
-        )
+        ) and len(desired_tokens) <= 2
         patterns = []
         for variant in variants:
             if not isinstance(variant, str):

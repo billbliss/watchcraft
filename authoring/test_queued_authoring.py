@@ -30,7 +30,7 @@ def registry_snapshot(
 ):
     if terminology_resolution:
         return {
-            "registry_version": "2026-09-10.8",
+            "registry_version": "2026-09-10.9",
             "registry_sha256": "c" * 64,
             "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
                 queued_authoring.TERMINOLOGY_RESOLUTION_HANDLER
@@ -41,7 +41,7 @@ def registry_snapshot(
         }
     if collection_compilation:
         return {
-            "registry_version": "2026-09-10.8",
+            "registry_version": "2026-09-10.9",
             "registry_sha256": "c" * 64,
             "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
                 queued_authoring.COLLECTION_COMPILATION_HANDLER
@@ -52,7 +52,7 @@ def registry_snapshot(
         }
     if topic_normalization:
         return {
-            "registry_version": "2026-09-10.8",
+            "registry_version": "2026-09-10.9",
             "registry_sha256": "c" * 64,
             "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
                 queued_authoring.TOPIC_NORMALIZATION_HANDLER
@@ -2638,6 +2638,10 @@ class QueuedAuthoringTests(unittest.TestCase):
                     "canonical_key": "matrix encoding of linear transformations",
                     "canonical_label": "matrix encoding of linear transformations",
                 },
+                "right-hand rule for cross-product direction": {
+                    "canonical_key": "right-hand rule for cross-product direction",
+                    "canonical_label": "right-hand rule for cross-product direction",
+                },
             },
             "display_labels": {
                 "basis vectors i-hat and j-hat": "basis vectors i Hat & j Hat",
@@ -2651,6 +2655,7 @@ class QueuedAuthoringTests(unittest.TestCase):
                 "matrix encoding of linear transformations": (
                     "Linear Transformation Encoding"
                 ),
+                "right-hand rule for cross-product direction": "Cross-Product Direction",
             },
         }
         terminology = {
@@ -2658,6 +2663,13 @@ class QueuedAuthoringTests(unittest.TestCase):
                 {
                     "observed_forms": ["i_hat"],
                     "display_label": "i-hat",
+                    "disposition": "automatic-safe",
+                },
+                {
+                    "observed_forms": [
+                        "right-hand rule for cross product direction",
+                    ],
+                    "display_label": "right-hand rule for cross-product direction",
                     "disposition": "automatic-safe",
                 },
                 {
@@ -2701,6 +2713,10 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertEqual(
             labels["matrix encoding of linear transformations"],
             "Linear Transformation Encoding",
+        )
+        self.assertEqual(
+            labels["right-hand rule for cross-product direction"],
+            "Cross-Product Direction",
         )
 
     def test_collection_topic_normalizer_uses_the_existing_normalization_core(self):
