@@ -215,25 +215,22 @@ named `Watchcraft authoring registry admin token`, account
 After deploying registry-aware control-plane code, bootstrap production explicitly:
 
 ```bash
-./authoring/watchcraft-author queue registry-publish \
-  --registry-admin-token-source keychain
-
-./authoring/watchcraft-author queue registry-activate \
+./authoring/watchcraft-author queue registry-deploy \
   --registry-admin-token-source keychain
 
 ./authoring/watchcraft-author queue registry-status \
   --operator-token-source keychain
 ```
 
-`registry-publish` and `registry-activate` default to the checked-in document; an
-alternate JSON path may be supplied as their positional argument. Before activation,
-the CLI uses the registry-admin credential to read the current activation-pointer
-revision and supplies it to the compare-and-set mutation. This preserves stale-write
-protection without requiring the operator to copy a revision manually. The immutable
-registry document version (for example `2026-09-05.5`) and the activation-pointer
-revision (for example `2`) are separate values. Advanced scripts may explicitly pass
-`--expected-active-revision`; the older `--expected-revision` spelling remains an
-alias. Publishing the same version with different content is rejected.
+`registry-deploy` publishes the checked-in immutable document, observes the current
+activation-pointer revision, and activates that exact digest with compare-and-set protection.
+It is safe to repeat when the same digest is already active. The lower-level
+`registry-publish` and `registry-activate` commands remain available; all three accept an
+alternate registry JSON path. The immutable registry document version (for example
+`2026-09-05.5`) and activation-pointer revision (for example `2`) are separate values.
+Advanced activation scripts may explicitly pass `--expected-active-revision`; the older
+`--expected-revision` spelling remains an alias. Publishing the same version with different
+content is rejected.
 
 The first Python worker handler produces a deterministic lexical-analysis artifact.
 It is an infrastructure and protocol proof, not the model-backed instructional-video
@@ -635,10 +632,7 @@ in capability registry `2026-09-10.9`. After committing and pushing, publish and
 checked-in registry before running either downstream command:
 
 ```bash
-./authoring/watchcraft-author queue registry-publish \
-  --registry-admin-token-source keychain
-
-./authoring/watchcraft-author queue registry-activate \
+./authoring/watchcraft-author queue registry-deploy \
   --registry-admin-token-source keychain
 ```
 

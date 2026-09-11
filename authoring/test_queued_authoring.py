@@ -1664,6 +1664,12 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertIsNone(activate.expected_revision)
         self.assertEqual(activate.registry_admin_token_source, "keychain")
         self.assertEqual(activate.registry_file, queued_authoring.DEFAULT_REGISTRY_PATH)
+        deploy = build_parser().parse_args([
+            "queue", "registry-deploy", "--registry-admin-token-source", "keychain",
+        ])
+        self.assertEqual(deploy.environment, "production")
+        self.assertEqual(deploy.registry_admin_token_source, "keychain")
+        self.assertEqual(deploy.registry_file, queued_authoring.DEFAULT_REGISTRY_PATH)
 
         client = Mock()
         client.post.side_effect = [
@@ -1703,6 +1709,67 @@ class QueuedAuthoringTests(unittest.TestCase):
             override_client.post.call_args.args[1]["expected_revision"],
             0,
         )
+
+    def test_registry_deploy_publishes_activates_and_is_safe_to_repeat(self):
+        registry = {"registry_version": "2026-09-10.test"}
+        digest = queued_authoring.sha256_hex(queued_authoring.canonical_json(registry))
+        args = build_parser().parse_args([
+            "queue", "registry-deploy", "--registry-admin-token-source", "keychain",
+        ])
+        published = {
+            "registry_version": registry["registry_version"],
+            "registry_sha256": digest,
+        }
+        client = Mock()
+        client.post.side_effect = [
+            published,
+            {"active": {
+                "environment": "production",
+                "revision": 4,
+                "registry_sha256": "a" * 64,
+            }},
+            {
+                "environment": "production",
+                "revision": 5,
+                "registry_version": registry["registry_version"],
+                "registry_sha256": digest,
+            },
+        ]
+        with patch("queued_authoring.load_registry_document", return_value=registry), patch(
+            "queued_authoring.registry_admin_client", return_value=client
+        ), redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(queued_authoring.run_queue_command(args), 0)
+        self.assertEqual(json.loads(output.getvalue()), {
+            "active_revision": 5,
+            "environment": "production",
+            "registry_sha256": digest,
+            "registry_version": registry["registry_version"],
+            "state": "activated",
+        })
+        self.assertEqual(
+            [call.args[0] for call in client.post.call_args_list],
+            ["/registry/publish", "/registry/get-active", "/registry/activate"],
+        )
+        self.assertEqual(
+            client.post.call_args_list[-1].args[1]["expected_revision"], 4
+        )
+
+        repeated = Mock()
+        repeated.post.side_effect = [
+            published,
+            {"active": {
+                "environment": "production",
+                "revision": 5,
+                "registry_version": registry["registry_version"],
+                "registry_sha256": digest,
+            }},
+        ]
+        with patch("queued_authoring.load_registry_document", return_value=registry), patch(
+            "queued_authoring.registry_admin_client", return_value=repeated
+        ), redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(queued_authoring.run_queue_command(args), 0)
+        self.assertEqual(json.loads(output.getvalue())["state"], "already-active")
+        self.assertEqual(repeated.post.call_count, 2)
 
         no_active_registry = Mock()
         no_active_registry.post.return_value = {"active": None, "registry": None}

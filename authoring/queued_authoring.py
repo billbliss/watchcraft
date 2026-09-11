@@ -7711,6 +7711,7 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
     for name, help_text in {
         "registry-publish": "Publish an immutable capability registry version",
         "registry-activate": "Activate a published capability registry version",
+        "registry-deploy": "Publish and activate a capability registry version",
     }.items():
         command = commands.add_parser(
             name,
@@ -7725,8 +7726,9 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
             default=DEFAULT_REGISTRY_PATH,
             help=f"Registry JSON document (default: {DEFAULT_REGISTRY_PATH})",
         )
-        if name == "registry-activate":
+        if name in {"registry-activate", "registry-deploy"}:
             command.add_argument("--environment", default="production")
+        if name == "registry-activate":
             command.add_argument(
                 "--expected-active-revision",
                 "--expected-revision",
@@ -7797,7 +7799,10 @@ def active_registry_revision(
     environment: str,
 ) -> int:
     observed = control.post("/registry/get-active", {"environment": environment})
-    active = observed.get("active")
+    return active_registry_revision_from_pointer(observed.get("active"), environment)
+
+
+def active_registry_revision_from_pointer(active: Any, environment: str) -> int:
     if active is None:
         return 0
     if not isinstance(active, dict):
@@ -7810,6 +7815,62 @@ def active_registry_revision(
     ):
         raise RuntimeError("Authoring control returned an invalid active registry pointer")
     return revision
+
+
+def deploy_registry(
+    control: AuthoringHttpClient,
+    registry: dict[str, Any],
+    environment: str,
+) -> dict[str, Any]:
+    digest = sha256_hex(canonical_json(registry))
+    published = control.post("/registry/publish", {
+        "command_id": str(uuid.uuid4()),
+        "actor": "watchcraft-author-cli",
+        "registry": registry,
+    })
+    if (
+        not isinstance(published, dict)
+        or published.get("registry_version") != registry["registry_version"]
+        or published.get("registry_sha256") != digest
+    ):
+        raise RuntimeError("Authoring control returned an invalid published registry")
+
+    observed = control.post("/registry/get-active", {"environment": environment})
+    active = observed.get("active")
+    if active is not None and not isinstance(active, dict):
+        raise RuntimeError("Authoring control returned an invalid active registry pointer")
+    if isinstance(active, dict) and active.get("registry_sha256") == digest:
+        return {
+            "state": "already-active",
+            "environment": environment,
+            "registry_version": registry["registry_version"],
+            "registry_sha256": digest,
+            "active_revision": active.get("revision"),
+        }
+    expected_revision = active_registry_revision_from_pointer(active, environment)
+    activated = control.post("/registry/activate", {
+        "environment": environment,
+        "command_id": str(uuid.uuid4()),
+        "actor": "watchcraft-author-cli",
+        "registry_version": registry["registry_version"],
+        "registry_sha256": digest,
+        "expected_revision": expected_revision,
+    })
+    if (
+        not isinstance(activated, dict)
+        or activated.get("registry_version") != registry["registry_version"]
+        or activated.get("registry_sha256") != digest
+        or activated.get("environment") != environment
+        or type(activated.get("revision")) is not int
+    ):
+        raise RuntimeError("Authoring control returned an invalid registry activation")
+    return {
+        "state": "activated",
+        "environment": environment,
+        "registry_version": registry["registry_version"],
+        "registry_sha256": digest,
+        "active_revision": activated["revision"],
+    }
 
 
 def run_queue_command(args: argparse.Namespace) -> int:
@@ -7837,7 +7898,11 @@ def run_queue_command(args: argparse.Namespace) -> int:
             })
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
-    if args.queue_command in {"registry-publish", "registry-activate"}:
+    if args.queue_command in {
+        "registry-publish",
+        "registry-activate",
+        "registry-deploy",
+    }:
         registry = load_registry_document(args.registry_file)
         control = registry_admin_client(args.registry_admin_token_source)
         if args.queue_command == "registry-publish":
@@ -7846,7 +7911,7 @@ def run_queue_command(args: argparse.Namespace) -> int:
                 "actor": "watchcraft-author-cli",
                 "registry": registry,
             })
-        else:
+        elif args.queue_command == "registry-activate":
             expected_revision = args.expected_revision
             revision_source = "override"
             if expected_revision is None:
@@ -7866,6 +7931,8 @@ def run_queue_command(args: argparse.Namespace) -> int:
                 "registry_sha256": sha256_hex(canonical_json(registry)),
                 "expected_revision": expected_revision,
             })
+        else:
+            result = deploy_registry(control, registry, args.environment)
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
 
