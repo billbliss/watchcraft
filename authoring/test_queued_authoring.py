@@ -821,10 +821,16 @@ class QueuedAuthoringTests(unittest.TestCase):
 
         self.assertEqual(project["project_id"], "useful-lessons")
         self.assertEqual(project["metadata"]["title"], "Useful Lessons!")
-        self.assertEqual(project["metadata_basis"]["title"], {
-            "origin": "source-observation",
-            "source_path": "youtube.playlist.title",
-        })
+        self.assertEqual(
+            project["metadata_basis"]["title"], {"origin": "editorial"}
+        )
+        self.assertEqual(
+            project["metadata_basis"]["description"], {"origin": "editorial"}
+        )
+        self.assertTrue(all(
+            basis["origin"] != "source-observation"
+            for basis in project["metadata_basis"].values()
+        ))
         self.assertEqual(project["metadata"]["publisher"], {
             "name": "Example Publisher",
             "canonical_url": "https://www.youtube.com/@example",
@@ -887,14 +893,22 @@ class QueuedAuthoringTests(unittest.TestCase):
             "--from-youtube-playlist", "PL1234567890",
             "--operator-token-source", "keychain",
         ])
+        handoff = io.StringIO()
 
         with (
             patch.object(queued_authoring, "discover_youtube_playlist", return_value=playlist),
             patch.object(queued_authoring, "operator_client", return_value=control),
             redirect_stdout(io.StringIO()),
+            redirect_stderr(handoff),
         ):
             queued_authoring.run_create_project(args)
         first_payload = control.post.call_args.args[1]
+        self.assertIn("Created catalog project useful-lessons revision 1", handoff.getvalue())
+        self.assertIn("The next step discovers membership only", handoff.getvalue())
+        self.assertIn(
+            "Next: ./authoring/watchcraft-author queue iterate-project",
+            handoff.getvalue(),
+        )
         control.reset_mock()
         control.post.return_value = {
             "created": False,
@@ -1044,6 +1058,7 @@ class QueuedAuthoringTests(unittest.TestCase):
             "--r2-credentials-source", "keychain",
         ])
         output = io.StringIO()
+        handoff = io.StringIO()
         with patch("queued_authoring.operator_client", return_value=control), patch(
             "queued_authoring.submit_spec", side_effect=submit
         ), patch(
@@ -1055,7 +1070,7 @@ class QueuedAuthoringTests(unittest.TestCase):
         ), patch(
             "queued_authoring.validate_project_processing_plan"
         ):
-            with redirect_stdout(output):
+            with redirect_stdout(output), redirect_stderr(handoff):
                 self.assertEqual(queued_authoring.run_queue_command(args), 0)
         self.assertEqual(captured["request"]["kind"], "project-processing-plan")
         self.assertEqual(captured["spec"]["inputs"], [project["iterator"]["accepted_snapshot"]])
@@ -1064,6 +1079,12 @@ class QueuedAuthoringTests(unittest.TestCase):
             queued_authoring.PROJECT_PROCESSING_PLANNER_HANDLER[0],
         )
         self.assertIn("Full plan:", output.getvalue())
+        self.assertIn("Plan job ID: plan-job-1", handoff.getvalue())
+        self.assertIn("No project processing has started", handoff.getvalue())
+        self.assertIn(
+            "If approved: ./authoring/watchcraft-author queue process-project",
+            handoff.getvalue(),
+        )
 
     def test_process_project_executes_one_plan_item_with_deterministic_context(self):
         snapshot = {

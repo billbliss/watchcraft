@@ -806,6 +806,90 @@ def format_elapsed(milliseconds: int) -> str:
     return f"{minutes}m {seconds:02d}s" if minutes else f"{seconds}s"
 
 
+def format_duration_seconds(seconds: int | float) -> str:
+    total_seconds = max(0, round(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    if minutes:
+        return f"{minutes}m {seconds:02d}s"
+    return f"{seconds}s"
+
+
+def print_operator_handoff(
+    outcome: str,
+    *,
+    details: list[str] | None = None,
+    next_command: str | None = None,
+    next_label: str = "Next",
+) -> None:
+    """Print stable human guidance without contaminating JSON stdout."""
+    print(f"\n{outcome}", file=sys.stderr)
+    for detail in details or []:
+        print(f"  {detail}", file=sys.stderr)
+    if next_command:
+        print(f"{next_label}: {next_command}", file=sys.stderr)
+    sys.stderr.flush()
+
+
+def compact_project_estimate(estimate: dict[str, Any]) -> dict[str, Any]:
+    projection = estimate.get("projection")
+    if not isinstance(projection, dict):
+        return estimate
+    return {
+        "status": estimate["status"],
+        "known_media_duration_seconds": estimate["known_media_duration_seconds"],
+        "unknown_duration_items": estimate["unknown_duration_items"],
+        "confidence": projection["confidence"],
+        "scope": projection["scope"],
+        "projected_media_duration_seconds": projection["media_duration_seconds"]["projected"],
+        "assumed_concurrency": projection["time"]["assumed_concurrency"],
+        "expected_seconds": projection["time"]["expected_seconds"],
+        "high_seconds": projection["time"]["high_seconds"],
+        "expected_cost_usd": projection["cost"]["expected_usd"],
+        "high_cost_usd": projection["cost"]["high_usd"],
+        "policy": {
+            "id": projection["policy"]["id"],
+            "version": projection["policy"]["version"],
+        },
+        "caveats": estimate["caveats"],
+    }
+
+
+def next_submission_command(job: dict[str, Any]) -> tuple[str, str] | None:
+    job_id = job.get("job_id")
+    state = job.get("state")
+    if not isinstance(job_id, str):
+        return None
+    prefix = "./authoring/watchcraft-author queue"
+    credentials = "--operator-token-source keychain"
+    if state == "awaiting_approval":
+        return "If approved", f"{prefix} approve {credentials} {job_id}"
+    if state == "ready":
+        return "Next", f"{prefix} dispatch {credentials} {job_id}"
+    if state in {"dispatch_pending", "running"}:
+        return "Check", f"{prefix} status {credentials} {job_id}"
+    if state == "succeeded":
+        return (
+            "Result",
+            f"{prefix} result {credentials} --r2-credentials-source keychain {job_id}",
+        )
+    if state == "retryable_failed":
+        return "Retry", f"{prefix} retry {credentials} {job_id}"
+    return None
+
+
+def print_submission_handoff(job: dict[str, Any], *, outcome: str | None = None) -> None:
+    next_step = next_submission_command(job)
+    print_operator_handoff(
+        outcome or f"Job {job.get('job_id', 'unknown')} is {job.get('state', 'unknown')}.",
+        details=[f"Run ID: {job['run_id']}"] if isinstance(job.get("run_id"), str) else None,
+        next_label=next_step[0] if next_step is not None else "Next",
+        next_command=next_step[1] if next_step is not None else None,
+    )
+
+
 class AnalysisDependencyError(RuntimeError):
     """An authoritative transcript dependency cannot be analyzed."""
 
@@ -6304,7 +6388,15 @@ def run_project_import(args: argparse.Namespace) -> int:
             else {}
         ),
     })
-    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True), flush=True)
+    print_operator_handoff(
+        f"Imported catalog project {project['project_id']} revision {project['revision']}.",
+        next_command=(
+            "./authoring/watchcraft-author queue iterate-project "
+            "--operator-token-source keychain --r2-credentials-source keychain "
+            f"{project['project_id']}"
+        ),
+    )
     return 0
 
 
@@ -6346,14 +6438,10 @@ def youtube_playlist_catalog_project(
         raise ValueError("--publisher-url requires --publisher")
     metadata: dict[str, Any] = {"title": accepted_title, "language": language}
     metadata_basis: dict[str, Any] = {
-        "title": {
-            "origin": "editorial" if title is not None else "source-observation",
-            **(
-                {}
-                if title is not None
-                else {"source_path": "youtube.playlist.title"}
-            ),
-        },
+        # Creation has no accepted iterator snapshot to bind source provenance to.
+        # Running this command is the operator's editorial acceptance of the
+        # bootstrap values; later iterator snapshots may propose sourced changes.
+        "title": {"origin": "editorial"},
         "language": {"origin": "editorial"},
     }
     accepted_description = (
@@ -6363,14 +6451,7 @@ def youtube_playlist_catalog_project(
     )
     if accepted_description:
         metadata["description"] = accepted_description
-        metadata_basis["description"] = {
-            "origin": "editorial" if description is not None else "source-observation",
-            **(
-                {}
-                if description is not None
-                else {"source_path": "youtube.playlist.description"}
-            ),
-        }
+        metadata_basis["description"] = {"origin": "editorial"}
     if publisher:
         publisher_value = {"name": publisher.strip()}
         if not publisher_value["name"]:
@@ -6455,7 +6536,19 @@ def run_create_project(args: argparse.Namespace) -> int:
             f"{project['project_id']}"
         ),
     }
-    print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+    print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True), flush=True)
+    print_operator_handoff(
+        (
+            f"Prepared catalog project {project['project_id']} (dry run; not created)."
+            if args.dry_run
+            else f"Created catalog project {project['project_id']} revision 1."
+        ),
+        details=[
+            f"Playlist contains {output['discovery']['unique_videos']} unique videos.",
+            "The next step discovers membership only; it does not acquire audio or invoke AI.",
+        ],
+        next_command=output["next_command"] if not args.dry_run else None,
+    )
     return 0
 
 
@@ -6493,7 +6586,16 @@ def run_project_accept_snapshot(args: argparse.Namespace) -> int:
         "actor": "watchcraft-author-cli",
         "snapshot_json": snapshot_bytes.decode("utf-8"),
     })
-    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True), flush=True)
+    accepted_project = result["project"]
+    print_operator_handoff(
+        f"Accepted iterator snapshot for {args.project_id}; project is now revision {accepted_project['revision']}.",
+        next_command=(
+            "./authoring/watchcraft-author queue plan-project "
+            "--operator-token-source keychain --r2-credentials-source keychain "
+            f"{args.project_id}"
+        ),
+    )
     return 0
 
 
@@ -6507,6 +6609,12 @@ def run_iterate_project(args: argparse.Namespace) -> int:
         spec = explicit_membership_iterator_spec(project)
     else:
         raise ValueError(f"Unsupported collection iterator {iterator_id!r}")
+    print(
+        "Discovery-only preflight: enumerating project membership; no audio, "
+        "transcription, or AI processing will run.",
+        file=sys.stderr,
+        flush=True,
+    )
     submitted = submit_spec(
         control,
         request={
@@ -6551,12 +6659,21 @@ def run_iterate_project(args: argparse.Namespace) -> int:
         "items": len(snapshot["items"]),
         "placements": len(snapshot["placements"]),
         "structure_hash": snapshot["structure_hash"],
-    }, ensure_ascii=False, indent=2, sort_keys=True))
+    }, ensure_ascii=False, indent=2, sort_keys=True), flush=True)
     print(
         "Full snapshot: ./authoring/watchcraft-author queue result "
         "--operator-token-source keychain --r2-credentials-source keychain "
         f"{completed['job']['job_id']}",
         flush=True,
+    )
+    print_operator_handoff(
+        f"Discovered {len(snapshot['items'])} unique items in {len(snapshot['placements'])} placements.",
+        details=[f"Iterator job ID: {completed['job']['job_id']}"],
+        next_command=(
+            "./authoring/watchcraft-author queue project-accept-snapshot "
+            "--operator-token-source keychain --r2-credentials-source keychain "
+            f"{project['project_id']} {completed['job']['job_id']}"
+        ),
     )
     return 0
 
@@ -6609,12 +6726,49 @@ def run_plan_project(args: argparse.Namespace) -> int:
         "plan_hash": plan["plan_hash"],
         "summary": plan["summary"],
         "estimate": plan["estimate"],
-    }, ensure_ascii=False, indent=2, sort_keys=True))
+    }, ensure_ascii=False, indent=2, sort_keys=True), flush=True)
     print(
         "Full plan: ./authoring/watchcraft-author queue result "
         "--operator-token-source keychain --r2-credentials-source keychain "
         f"{completed['job']['job_id']}",
         flush=True,
+    )
+    estimate = compact_project_estimate(plan["estimate"])
+    details = [
+        f"Plan job ID: {completed['job']['job_id']}",
+    ]
+    if "projected_media_duration_seconds" in estimate:
+        details.extend([
+            (
+                f"Items: {plan['summary']['unique_items']}; projected media: "
+                f"{format_duration_seconds(estimate['projected_media_duration_seconds'])}."
+            ),
+            (
+                f"Estimate ({estimate['confidence']} confidence): "
+                f"{format_duration_seconds(estimate['expected_seconds'])} expected; "
+                f"{format_duration_seconds(estimate['high_seconds'])} conservative."
+            ),
+            (
+                f"OpenAI cost: ${estimate['expected_cost_usd']:.2f} expected; "
+                f"${estimate['high_cost_usd']:.2f} conservative."
+            ),
+            "No project processing has started.",
+        ])
+    else:
+        details.extend([
+            f"Items: {plan['summary']['unique_items']}.",
+            "No project processing has started.",
+        ])
+    print_operator_handoff(
+        f"Created processing plan for {project['project_id']} revision {project['revision']}.",
+        details=details,
+        next_command=(
+            "./authoring/watchcraft-author queue process-project "
+            f"--plan-job-id {completed['job']['job_id']} --all --concurrency 2 "
+            "--operator-token-source keychain --r2-staging-credentials-source keychain "
+            "--r2-credentials-source keychain"
+        ),
+        next_label="If approved",
     )
     return 0
 
@@ -7373,12 +7527,32 @@ def run_process_project(args: argparse.Namespace) -> int:
             if item["item_id"] in failures
         ],
     }
-    print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
+    print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True), flush=True)
     if failures:
+        print_operator_handoff(
+            f"Processed {len(completed)} of {len(items)} selected items; {len(failures)} failed.",
+            details=[
+                f"Plan job ID: {args.plan_job_id}",
+                f"Elapsed: {format_elapsed(summary['command_total_ms'])}.",
+                "Rerun this command after addressing the reported failures; completed items are resumable.",
+            ],
+        )
         raise RuntimeError(
             f"Project processing completed with {len(failures)} failed item(s); "
             "rerun after addressing the reported failures"
         )
+    print_operator_handoff(
+        f"Processed all {len(completed)} selected items for {plan['project']['project_id']}.",
+        details=[
+            f"Plan job ID: {args.plan_job_id}",
+            f"Already complete: {summary['already_complete']}; elapsed: {format_elapsed(summary['command_total_ms'])}.",
+        ],
+        next_command=(
+            "./authoring/watchcraft-author queue resolve-project-terminology "
+            f"--plan-job-id {args.plan_job_id} --operator-token-source keychain "
+            "--r2-credentials-source keychain"
+        ),
+    )
     return 0
 
 
@@ -7547,12 +7721,25 @@ def run_resolve_project_terminology(args: argparse.Namespace) -> int:
         result,
         local_timing={"command_total_ms": elapsed_milliseconds(command_started_at)},
     )
-    print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
+    print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True), flush=True)
     print(
         "Full resolution: ./authoring/watchcraft-author queue result "
         "--operator-token-source keychain --r2-credentials-source keychain "
         f"{job_id}",
         flush=True,
+    )
+    print_operator_handoff(
+        f"Resolved project terminology for {project['project_id']}.",
+        details=[
+            f"Terminology job ID: {job_id}",
+            f"Automatic safe: {len(summary['automatic_safe'])}; needs review: {len(summary['needs_review'])}.",
+            f"Elapsed: {format_elapsed(summary['timing']['local']['command_total_ms'])}.",
+        ],
+        next_command=(
+            "./authoring/watchcraft-author queue normalize-project-topics "
+            f"--plan-job-id {args.plan_job_id} --operator-token-source keychain "
+            "--r2-credentials-source keychain"
+        ),
     )
     return 0
 
@@ -7729,7 +7916,7 @@ def run_normalize_project(args: argparse.Namespace) -> int:
         raise RuntimeError("Project topic normalization returned an invalid result")
     total_ms = elapsed_milliseconds(command_started_at)
     print(f"completed topic normalization {job_id} in {format_elapsed(total_ms)}", flush=True)
-    print(json.dumps({
+    summary = {
         "job_id": job_id,
         "run_id": run_id,
         "state": completed["job"]["state"],
@@ -7744,12 +7931,29 @@ def run_normalize_project(args: argparse.Namespace) -> int:
             "ledger": completed_job_timing(completed["job"]),
             "worker": provenance.get("timing", {}),
         },
-    }, ensure_ascii=False, indent=2, sort_keys=True))
+    }
+    print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True), flush=True)
     print(
         "Full normalization: ./authoring/watchcraft-author queue result "
         "--operator-token-source keychain --r2-credentials-source keychain "
         f"{job_id}",
         flush=True,
+    )
+    stats = result["stats"]
+    canonical_topics = stats.get("canonical_topic_count", stats.get("raw_topic_count", 0))
+    families = stats.get("family_count", 0)
+    print_operator_handoff(
+        f"Normalized topics across {len(bindings)} analyses for {plan['project']['project_id']}.",
+        details=[
+            f"Normalization job ID: {job_id}",
+            f"Canonical topics: {canonical_topics}; families: {families}.",
+            f"Elapsed: {format_elapsed(total_ms)}.",
+        ],
+        next_command=(
+            "./authoring/watchcraft-author queue compile-project "
+            f"--plan-job-id {args.plan_job_id} --operator-token-source keychain "
+            "--r2-credentials-source keychain --compare-to PUBLISHED_COLLECTION_JSON"
+        ),
     )
     return 0
 
@@ -8005,7 +8209,7 @@ def run_materialize_project(args: argparse.Namespace) -> int:
             shutil.rmtree(temporary)
         raise
 
-    print(json.dumps({
+    summary = {
         "state": "materialized",
         "compilation_job_id": job["job_id"],
         "destination": str(destination),
@@ -8016,10 +8220,26 @@ def run_materialize_project(args: argparse.Namespace) -> int:
         "content_changed": content_changed,
         "resources": len(resource_payloads),
         "comparison": collection_comparison(candidate, published),
-    }, ensure_ascii=False, indent=2, sort_keys=True))
+    }
+    print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True), flush=True)
     print(
         f"Review with: git apply --stat {diff_path}",
         flush=True,
+    )
+    print_operator_handoff(
+        f"Materialized {candidate['collection_id']} revision {candidate['revision']} for review.",
+        details=[
+            f"Candidate directory: {destination}",
+            f"Review diff: {diff_path}",
+            f"Analysis resources: {len(resource_payloads)}.",
+        ],
+        next_command=(
+            "./authoring/watchcraft-author queue publish-project "
+            f"{job['job_id']} --candidate-directory {destination} "
+            f"--published-collection {published_collection_path} "
+            "--operator-token-source keychain --r2-credentials-source keychain"
+        ),
+        next_label="After review",
     )
     return 0
 
@@ -8270,7 +8490,7 @@ def run_publish_project(args: argparse.Namespace) -> int:
         raise
 
     changed = git_path_status(repository, [published_root])
-    print(json.dumps({
+    publication = {
         "state": "published-to-worktree",
         "compilation_job_id": job["job_id"],
         "compilation_artifact": validated_artifact_reference(job.get("result")),
@@ -8305,11 +8525,24 @@ def run_publish_project(args: argparse.Namespace) -> int:
             ],
             "compilation_timing": provenance.get("timing", {}),
         },
-    }, ensure_ascii=False, indent=2, sort_keys=True))
+    }
+    print(json.dumps(publication, ensure_ascii=False, indent=2, sort_keys=True), flush=True)
     print(
         f"Review with: git -C {repository} diff -- "
         f"{published_root.relative_to(repository)}",
         flush=True,
+    )
+    print_operator_handoff(
+        f"Published {candidate['collection_id']} revision {candidate['revision']} to the Git worktree.",
+        details=[
+            f"Collection: {published_root}",
+            f"Analysis resources: {len(expected_resource_payloads)}.",
+            "No commit, push, or deployment was performed.",
+        ],
+        next_command=(
+            f"git -C {repository} diff -- {published_root.relative_to(repository)}"
+        ),
+        next_label="Review",
     )
     return 0
 
@@ -8498,12 +8731,46 @@ def run_compile_project(args: argparse.Namespace) -> int:
         if published["collection_id"] != manifest["collection_id"]:
             raise RuntimeError("Comparison collection has a different collection_id")
         summary["comparison"] = collection_comparison(manifest, published)
-    print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
+    print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True), flush=True)
     print(
         "Full compilation: ./authoring/watchcraft-author queue result "
         "--operator-token-source keychain --r2-credentials-source keychain "
         f"{job_id}",
         flush=True,
+    )
+    stats = manifest["stats"]
+    details = [
+        f"Compilation job ID: {job_id}",
+        f"Items: {stats['video_count']}; topics: {stats['topic_count']}; families: {stats['topic_family_count']}.",
+        f"Elapsed: {format_elapsed(summary['timing']['local']['command_total_ms'])}.",
+    ]
+    if "comparison" in summary:
+        comparison = summary["comparison"]
+        details.append(
+            f"Compared with revision {comparison['published_revision']}; proposed revision {comparison['proposed_revision']}."
+        )
+        published_collection = args.compare_to.resolve()
+        review_directory = published_collection.parents[1] / (
+            f"{manifest['collection_id']}-revision-"
+            f"{comparison['proposed_revision']}-review"
+        )
+        materialize_command = (
+            "./authoring/watchcraft-author queue materialize-project "
+            f"{job_id} --published-collection {published_collection} "
+            f"--output-directory {review_directory} "
+            "--operator-token-source keychain --r2-credentials-source keychain"
+        )
+    else:
+        materialize_command = (
+            "./authoring/watchcraft-author queue materialize-project "
+            f"{job_id} --published-collection PUBLISHED_COLLECTION_JSON "
+            "--output-directory REVIEW_DIRECTORY --operator-token-source keychain "
+            "--r2-credentials-source keychain"
+        )
+    print_operator_handoff(
+        f"Compiled candidate collection {manifest['collection_id']}.",
+        details=details,
+        next_command=materialize_command,
     )
     return 0
 
@@ -9965,7 +10232,17 @@ def run_queue_command(args: argparse.Namespace) -> int:
                 "command_id": str(uuid.uuid4()),
                 "actor": "watchcraft-author-cli",
             })
-        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True), flush=True)
+        if args.queue_command == "cleanup-list":
+            candidates = result.get("candidates", result.get("runs", []))
+            count = len(candidates) if isinstance(candidates, list) else "unknown"
+            print_operator_handoff(f"Found {count} cleanup candidate(s).")
+        else:
+            target = args.run_id if args.queue_command == "cleanup-run" else args.job_id
+            print_operator_handoff(
+                f"Cleanup completed for {target}.",
+                details=["R2 artifacts were retained."],
+            )
         return 0
     if args.queue_command in {
         "registry-publish",
@@ -10002,7 +10279,23 @@ def run_queue_command(args: argparse.Namespace) -> int:
             })
         else:
             result = deploy_registry(control, registry, args.environment)
-        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True), flush=True)
+        environment = getattr(args, "environment", None)
+        print_operator_handoff(
+            f"Registry {registry['registry_version']} {result.get('state', args.queue_command.removeprefix('registry-'))}.",
+            details=[
+                *(
+                    [f"Environment: {result.get('environment', environment)}."]
+                    if environment is not None
+                    else ["Published but not activated by this command."]
+                ),
+                *(
+                    [f"Active-pointer revision: {result['active_revision']}."]
+                    if result.get("active_revision") is not None
+                    else []
+                ),
+            ],
+        )
         return 0
 
     if args.queue_command in {
@@ -10054,11 +10347,28 @@ def run_queue_command(args: argparse.Namespace) -> int:
     control = operator_client(args.operator_token_source)
     if args.queue_command == "registry-status":
         result = control.post("/registry/get-active", {"environment": args.environment})
-        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True), flush=True)
+        active = result.get("active")
+        print_operator_handoff(
+            (
+                f"Active {args.environment} registry: {active.get('registry_version')} "
+                f"(pointer revision {active.get('revision')})."
+                if isinstance(active, dict)
+                else f"No active registry is configured for {args.environment}."
+            )
+        )
         return 0
     if args.queue_command == "project-status":
         result = control.post("/projects/get", {"project_id": args.project_id})
-        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True), flush=True)
+        project = result.get("project")
+        print_operator_handoff(
+            (
+                f"Catalog project {project.get('project_id')} is at revision {project.get('revision')}."
+                if isinstance(project, dict)
+                else f"Catalog project {args.project_id} was not found."
+            )
+        )
         return 0
     if args.queue_command == "project-history":
         if not 1 <= args.limit <= 100:
@@ -10067,7 +10377,12 @@ def run_queue_command(args: argparse.Namespace) -> int:
             "project_id": args.project_id,
             "limit": args.limit,
         })
-        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True), flush=True)
+        history = result.get("history", result.get("revisions", []))
+        count = len(history) if isinstance(history, list) else "unknown"
+        print_operator_handoff(
+            f"Found {count} recorded revision(s) for {args.project_id}."
+        )
         return 0
     if args.queue_command == "submit-analysis":
         if not 1 <= args.max_topics <= 20:
@@ -10075,7 +10390,8 @@ def run_queue_command(args: argparse.Namespace) -> int:
         result = submit_spec(control, request={
             "kind": "lexical-analysis", "source_id": args.source_id,
         }, spec=analysis_spec(args))
-        print(canonical_json({"job": result["job"], "run": result["run"]}))
+        print(canonical_json({"job": result["job"], "run": result["run"]}), flush=True)
+        print_submission_handoff(result["job"], outcome=f"Submitted job {result['job']['job_id']}.")
         return 0
     if args.queue_command == "submit-transcription-smoke":
         result = submit_spec(control, request=ephemeral_request(
@@ -10083,7 +10399,8 @@ def run_queue_command(args: argparse.Namespace) -> int:
             "synthetic:mlx-audio-smoke",
             args.retention_days,
         ), spec=transcription_smoke_spec(args.fixture_text))
-        print(canonical_json({"job": result["job"], "run": result["run"]}))
+        print(canonical_json({"job": result["job"], "run": result["run"]}), flush=True)
+        print_submission_handoff(result["job"], outcome=f"Submitted job {result['job']['job_id']}.")
         return 0
     if args.queue_command == "submit-transcription-http-smoke":
         spec = http_transcription_smoke_spec()
@@ -10092,12 +10409,14 @@ def run_queue_command(args: argparse.Namespace) -> int:
             spec["source"]["media_asset_id"],
             args.retention_days,
         ), spec=spec)
-        print(canonical_json({"job": result["job"], "run": result["run"]}))
+        print(canonical_json({"job": result["job"], "run": result["run"]}), flush=True)
+        print_submission_handoff(result["job"], outcome=f"Submitted job {result['job']['job_id']}.")
         return 0
     submission = control.post("/submissions/get", {"job_id": args.job_id})
     job = submission["job"]
     if args.queue_command == "status":
-        print(json.dumps(submission, ensure_ascii=False, indent=2, sort_keys=True))
+        print(json.dumps(submission, ensure_ascii=False, indent=2, sort_keys=True), flush=True)
+        print_submission_handoff(job)
         return 0
     if args.queue_command == "result":
         if job.get("state") != "succeeded" or job.get("result") is None:
@@ -10129,7 +10448,13 @@ def run_queue_command(args: argparse.Namespace) -> int:
             result = json.loads(payload.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise RuntimeError("The verified artifact is not valid UTF-8 JSON") from error
-        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True), flush=True)
+        print_operator_handoff(
+            f"Retrieved and verified result for job {job['job_id']}.",
+            details=[
+                f"Artifact: {reference['artifact_kind']} ({reference['byte_length']} bytes)."
+            ],
+        )
         return 0
     if args.queue_command == "approve":
         result = control.post("/submissions/approve", {
@@ -10139,11 +10464,28 @@ def run_queue_command(args: argparse.Namespace) -> int:
             "actor": "watchcraft-author-cli",
             "spec_sha256": job["spec_sha256"],
         })
-        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True), flush=True)
+        print_submission_handoff(result["job"], outcome=f"Approved job {job['job_id']}.")
         return 0
     if args.queue_command == "dispatch":
         pending = dispatch_submission(control, job)
         print(f"dispatched {pending['job_id']} generation {pending['dispatch']['generation']}")
+        print_operator_handoff(
+            f"Dispatched job {pending['job_id']}.",
+            details=[
+                f"Generation: {pending['dispatch']['generation']}.",
+                *(
+                    [f"GitHub run: {pending['dispatch']['github_run_url']}"]
+                    if pending["dispatch"].get("github_run_url")
+                    else []
+                ),
+            ],
+            next_command=(
+                "./authoring/watchcraft-author queue status "
+                f"--operator-token-source keychain {pending['job_id']}"
+            ),
+            next_label="Check",
+        )
         return 0
     endpoint = "/submissions/cancel" if args.queue_command == "cancel" else "/submissions/retry"
     result = control.post(endpoint, {
@@ -10151,5 +10493,11 @@ def run_queue_command(args: argparse.Namespace) -> int:
         "command_id": str(uuid.uuid4()),
         "expected_revision": job["revision"],
     })
-    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True), flush=True)
+    result_job = result.get("job")
+    if isinstance(result_job, dict):
+        print_submission_handoff(
+            result_job,
+            outcome=f"{args.queue_command.capitalize()} completed for job {job['job_id']}.",
+        )
     return 0
