@@ -354,6 +354,15 @@ class QueuedAuthoringTests(unittest.TestCase):
         ])
         self.assertEqual(project_import.project_file, Path("project.json"))
         self.assertIsNone(project_import.accepted_snapshot_file)
+        legacy_import = build_parser().parse_args([
+            "queue", "import-legacy-projects", "../watchcraft-collections/collections",
+            "--dry-run",
+        ])
+        self.assertEqual(
+            legacy_import.collections_root,
+            Path("../watchcraft-collections/collections"),
+        )
+        self.assertTrue(legacy_import.dry_run)
         project_accept = build_parser().parse_args([
             "queue", "project-accept-snapshot", "project-1", "job-1",
             "--r2-credentials-source", "keychain",
@@ -374,6 +383,100 @@ class QueuedAuthoringTests(unittest.TestCase):
         ])
         self.assertEqual(orphan.job_id, "job-1")
         self.assertEqual(orphan.confirm, "job-1")
+
+    def test_legacy_project_migration_report_is_local_and_flags_unsupported_sources(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            playlist = root / "playlist"
+            playlist.mkdir()
+            (playlist / "collection.json").write_text(json.dumps({
+                "kind": "watchcraft.collection",
+                "schema_version": 4,
+                "collection_id": "playlist",
+                "revision": 3,
+                "title": "Playlist",
+                "description": "A legacy playlist.",
+            }), encoding="utf-8")
+            (playlist / "watchcraft-authoring.json").write_text(json.dumps({
+                "kind": "watchcraft.authoring",
+                "schema_version": 1,
+                "collection": {
+                    "collection_id": "playlist",
+                    "title": "Playlist",
+                    "source": {
+                        "type": "youtube-playlist",
+                        "playlist_id": "PL1234567890",
+                        "url": "https://www.youtube.com/playlist?list=PL1234567890",
+                    },
+                },
+                "sources": {
+                    "one.youtube": {
+                        "publisher": "Example Publisher",
+                        "publisher_url": "https://www.youtube.com/@example",
+                        "captions": {"language": "en"},
+                    },
+                    "two.youtube": {
+                        "publisher": "Example Publisher",
+                        "publisher_url": "https://www.youtube.com/@example",
+                        "captions": {"language": "en"},
+                    },
+                },
+            }), encoding="utf-8")
+            curated = root / "curated"
+            curated.mkdir()
+            (curated / "collection.json").write_text(json.dumps({
+                "kind": "watchcraft.collection",
+                "schema_version": 4,
+                "collection_id": "curated",
+                "revision": 1,
+                "title": "Curated",
+            }), encoding="utf-8")
+            (curated / "watchcraft-authoring.json").write_text(json.dumps({
+                "collection": {
+                    "collection_id": "curated",
+                    "source": {"type": "youtube", "publisher": "Multiple publishers"},
+                },
+                "sources": {},
+            }), encoding="utf-8")
+
+            report = queued_authoring.legacy_project_migration_report(root)
+
+        self.assertEqual(report["summary"], {
+            "examined": 2,
+            "ready": 1,
+            "review_required": 0,
+            "blocked": 0,
+            "unsupported": 1,
+            "invalid": 0,
+            "network_requests": 0,
+            "remote_writes": 0,
+            "local_writes": 0,
+        })
+        by_id = {item["collection_id"]: item for item in report["collections"]}
+        candidate = by_id["playlist"]["project_candidate"]
+        self.assertEqual(candidate["revision"], 1)
+        self.assertEqual(candidate["publication"]["collection_id"], "playlist")
+        self.assertEqual(candidate["metadata"]["publisher"], {
+            "name": "Example Publisher",
+            "canonical_url": "https://www.youtube.com/@example",
+        })
+        self.assertEqual(candidate["metadata"]["language"], "en")
+        self.assertEqual(
+            by_id["playlist"]["publisher"]["status"],
+            "inferred-unanimous",
+        )
+        self.assertEqual(by_id["curated"]["status"], "unsupported")
+        self.assertEqual(
+            by_id["curated"]["issues"][0]["code"],
+            "explicit-video-list-iterator-needed",
+        )
+
+    def test_legacy_project_import_requires_explicit_dry_run(self):
+        args = build_parser().parse_args([
+            "queue", "import-legacy-projects", "/tmp/collections",
+        ])
+        with self.assertRaisesRegex(RuntimeError, "requires --dry-run"):
+            queued_authoring.run_import_legacy_projects(args)
 
     def test_project_import_verifies_and_sends_the_bound_snapshot(self):
         examples = queued_authoring.CATALOG_PROJECT_SCHEMA_PATH.parent / "examples"

@@ -458,6 +458,22 @@ the CLI finds the sibling `*.snapshot.json` file automatically:
   packages/authoring-pipeline/project/examples/current-playlist.project.json
 ```
 
+Before importing existing published collections, audit their legacy authoring metadata
+locally:
+
+```bash
+./authoring/watchcraft-author queue import-legacy-projects \
+  /Users/billbliss/dev/watchcraft-collections/collections \
+  --dry-run
+```
+
+The report includes a schema-valid candidate `CatalogProject` for each supported
+YouTube-playlist collection, identifies how publisher metadata was preserved or
+inferred, and flags collections that need an explicit-video-list or legacy-static
+iterator. It makes no network requests and performs no local or remote writes. The
+command intentionally requires `--dry-run` until the next migration phase can publish
+each frozen legacy snapshot to R2 before importing its bound project into Convex.
+
 Accept a completed iterator candidate by its authoritative job ID:
 
 ```bash

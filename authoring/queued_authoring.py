@@ -4723,6 +4723,294 @@ def load_catalog_project(path: Path) -> dict[str, Any]:
     return project
 
 
+def _legacy_publisher(
+    manifest: dict[str, Any], authoring: dict[str, Any]
+) -> dict[str, Any]:
+    collection = authoring.get("collection", {})
+    source = collection.get("source", {}) if isinstance(collection, dict) else {}
+    configured = manifest.get("publisher")
+    configured_basis = "collection.json.publisher"
+    if not configured:
+        configured = collection.get("publisher")
+        configured_basis = "watchcraft-authoring.json.collection.publisher"
+    configured_url = None
+    if not configured and isinstance(source, dict):
+        configured = source.get("publisher")
+        configured_url = source.get("publisher_url")
+        configured_basis = "watchcraft-authoring.json.collection.source.publisher"
+    elif (
+        isinstance(source, dict)
+        and isinstance(configured, str)
+        and source.get("publisher") == configured
+    ):
+        configured_url = source.get("publisher_url")
+    if isinstance(configured, dict) and isinstance(configured.get("name"), str):
+        return {
+            "status": "preserved",
+            "value": dict(configured),
+            "basis": configured_basis,
+            "candidates": [],
+        }
+    if isinstance(configured, str) and configured.strip():
+        value = {"name": configured.strip()}
+        if isinstance(configured_url, str) and configured_url:
+            value["canonical_url"] = configured_url
+        return {
+            "status": (
+                "explicit-multiple"
+                if configured.casefold() == "multiple publishers"
+                else "preserved"
+            ),
+            "value": value,
+            "basis": configured_basis,
+            "candidates": [],
+        }
+    candidates: dict[tuple[str, str | None], int] = {}
+    sources = authoring.get("sources", {})
+    if isinstance(sources, dict):
+        for value in sources.values():
+            if not isinstance(value, dict):
+                continue
+            name = value.get("publisher")
+            url = value.get("publisher_url")
+            if isinstance(name, str) and name.strip():
+                key = (name.strip(), url if isinstance(url, str) and url else None)
+                candidates[key] = candidates.get(key, 0) + 1
+    rendered = [
+        {"name": name, **({"canonical_url": url} if url else {}), "items": count}
+        for (name, url), count in sorted(candidates.items())
+    ]
+    if len(rendered) == 1:
+        value = {key: item for key, item in rendered[0].items() if key != "items"}
+        return {
+            "status": "inferred-unanimous",
+            "value": value,
+            "basis": "watchcraft-authoring.json.sources[*].publisher",
+            "candidates": rendered,
+        }
+    return {
+        "status": "review-required",
+        "value": None,
+        "basis": None,
+        "candidates": rendered,
+    }
+
+
+def legacy_catalog_project_candidate(
+    collection_directory: Path,
+) -> dict[str, Any]:
+    authoring_path = collection_directory / "watchcraft-authoring.json"
+    manifest_path = collection_directory / "collection.json"
+    authoring, _ = load_exact_json_object(authoring_path, "legacy authoring document")
+    manifest, _ = load_exact_json_object(manifest_path, "published collection manifest")
+    if (
+        manifest.get("kind") != "watchcraft.collection"
+        or manifest.get("schema_version") != 4
+    ):
+        raise ValueError("Published collection must use watchcraft.collection schema 4")
+    project_id = manifest.get("collection_id")
+    title = manifest.get("title")
+    if not isinstance(project_id, str) or not project_id:
+        raise ValueError("Published collection has no collection_id")
+    if not isinstance(title, str) or not title:
+        raise ValueError("Published collection has no title")
+    legacy_collection = authoring.get("collection", {})
+    if not isinstance(legacy_collection, dict):
+        legacy_collection = {}
+    source = legacy_collection.get("source", {})
+    if not isinstance(source, dict):
+        source = {}
+    sources = authoring.get("sources", {})
+    if not isinstance(sources, dict):
+        sources = {}
+    publisher = _legacy_publisher(manifest, authoring)
+    issues: list[dict[str, Any]] = []
+    legacy_id = legacy_collection.get("collection_id")
+    if legacy_id not in {None, project_id}:
+        issues.append({
+            "code": "collection-id-mismatch",
+            "message": f"Legacy collection_id is {legacy_id!r}; manifest uses {project_id!r}.",
+        })
+    source_type = source.get("type")
+    playlist_id = source.get("playlist_id")
+    source_url = source.get("url")
+    project = None
+    migration_status = "ready"
+    if (
+        source_type == "youtube-playlist"
+        and isinstance(playlist_id, str)
+        and isinstance(source_url, str)
+    ):
+        try:
+            if youtube_playlist_id(source_url) != playlist_id:
+                raise ValueError("playlist URL and ID differ")
+        except ValueError as error:
+            issues.append({"code": "invalid-playlist-identity", "message": str(error)})
+            migration_status = "blocked"
+        metadata: dict[str, Any] = {"title": title}
+        metadata_basis: dict[str, Any] = {
+            "title": {"origin": "legacy-import", "source_path": "collection.json.title"}
+        }
+        description = manifest.get("description") or legacy_collection.get("description")
+        if isinstance(description, str):
+            metadata["description"] = description
+            metadata_basis["description"] = {
+                "origin": "legacy-import",
+                "source_path": (
+                    "collection.json.description"
+                    if manifest.get("description")
+                    else "watchcraft-authoring.json.collection.description"
+                ),
+            }
+        if publisher["value"] is not None:
+            metadata["publisher"] = publisher["value"]
+            metadata_basis["publisher"] = {
+                "origin": "legacy-import",
+                "source_path": publisher["basis"],
+            }
+        languages = {
+            value.get("captions", {}).get("language")
+            for value in sources.values()
+            if isinstance(value, dict) and isinstance(value.get("captions"), dict)
+        }
+        languages.discard(None)
+        if len(languages) == 1:
+            metadata["language"] = next(iter(languages))
+            metadata_basis["language"] = {
+                "origin": "legacy-import",
+                "source_path": "watchcraft-authoring.json.sources[*].captions.language",
+            }
+        project = {
+            "kind": "watchcraft.catalog-project",
+            "schema_version": 1,
+            "project_id": project_id,
+            "revision": 1,
+            "collection_type": {
+                "id": "watchcraft.video-collection",
+                "version": "1",
+                "configuration": {"structure": "ordered-list"},
+            },
+            "iterator": {
+                "id": "watchcraft.youtube-playlist",
+                "version": "1",
+                "configuration": {
+                    "canonical_url": source_url,
+                    "playlist_id": playlist_id,
+                    "selection": {
+                        "kind": "published-order",
+                        "excluded_item_ids": source.get("excluded_video_ids", []),
+                    },
+                },
+                "access_profile": "public-anonymous",
+                "refresh": {"mode": "on-demand", "stale_while_refresh": True},
+            },
+            "metadata": metadata,
+            "metadata_basis": metadata_basis,
+            "publication": {
+                "collection_id": project_id,
+                "listed": legacy_collection.get("listed", True),
+            },
+        }
+        if migration_status == "ready":
+            validate_json_schema(project, CATALOG_PROJECT_SCHEMA_PATH, "Catalog project")
+    elif source_type == "youtube":
+        migration_status = "unsupported"
+        issues.append({
+            "code": "explicit-video-list-iterator-needed",
+            "message": (
+                "This curated multi-source collection needs an explicit video-list "
+                "iterator before it can be imported."
+            ),
+        })
+    else:
+        migration_status = "unsupported"
+        issues.append({
+            "code": "legacy-static-iterator-needed",
+            "message": (
+                "This collection has no supported source iterator and needs a "
+                "legacy-static migration path."
+            ),
+        })
+    if publisher["status"] == "review-required":
+        issues.append({
+            "code": "publisher-review-required",
+            "message": "Publisher metadata is missing or ambiguous.",
+        })
+        if migration_status == "ready":
+            migration_status = "review-required"
+    return {
+        "directory": str(collection_directory),
+        "collection_id": project_id,
+        "published_revision": manifest.get("revision"),
+        "published_schema_version": manifest.get("schema_version"),
+        "source_type": source_type,
+        "source_items": len(sources),
+        "status": migration_status,
+        "publisher": publisher,
+        "issues": issues,
+        "project_candidate": project,
+        "baseline": {
+            "strategy": "frozen-legacy-snapshot",
+            "items": len(sources),
+            "requires_r2_publication_before_import": project is not None,
+        },
+    }
+
+
+def legacy_project_migration_report(collections_root: Path) -> dict[str, Any]:
+    root = collections_root.expanduser().resolve()
+    if not root.is_dir():
+        raise RuntimeError(f"Collections root does not exist: {root}")
+    results = []
+    for child in sorted(root.iterdir(), key=lambda path: path.name):
+        if not child.is_dir() or not (child / "watchcraft-authoring.json").is_file():
+            continue
+        try:
+            results.append(legacy_catalog_project_candidate(child))
+        except (OSError, RuntimeError, ValueError) as error:
+            results.append({
+                "directory": str(child),
+                "collection_id": child.name,
+                "status": "invalid",
+                "issues": [{"code": "invalid-legacy-collection", "message": str(error)}],
+                "project_candidate": None,
+            })
+    counts = Counter(result["status"] for result in results)
+    return {
+        "kind": "watchcraft.legacy-project-migration-report",
+        "schema_version": 1,
+        "dry_run": True,
+        "collections_root": str(root),
+        "summary": {
+            "examined": len(results),
+            "ready": counts["ready"],
+            "review_required": counts["review-required"],
+            "blocked": counts["blocked"],
+            "unsupported": counts["unsupported"],
+            "invalid": counts["invalid"],
+            "network_requests": 0,
+            "remote_writes": 0,
+            "local_writes": 0,
+        },
+        "collections": results,
+    }
+
+
+def run_import_legacy_projects(args: argparse.Namespace) -> int:
+    if not args.dry_run:
+        raise RuntimeError(
+            "Legacy project import currently requires --dry-run; review the migration "
+            "report before durable snapshot publication and Convex import are enabled"
+        )
+    print(json.dumps(
+        legacy_project_migration_report(args.collections_root),
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    ))
+    return 0
+
+
 def load_catalog_project_argument(
     value: str, control: AuthoringHttpClient
 ) -> dict[str, Any]:
@@ -7703,6 +7991,26 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
             "*.snapshot.json file"
         ),
     )
+    legacy_project_import = commands.add_parser(
+        "import-legacy-projects",
+        help="Audit legacy collection packages for CatalogProject import",
+        description=(
+            "Deterministically inspect legacy collection packages and emit candidate "
+            "CatalogProject documents plus publisher and iterator migration findings. "
+            "The initial report-only implementation performs no network requests and "
+            "does not write files, R2 objects, or Convex records."
+        ),
+    )
+    legacy_project_import.add_argument(
+        "collections_root",
+        type=Path,
+        help="Directory whose immediate children are published collection packages",
+    )
+    legacy_project_import.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Required safety boundary: inspect and report without any writes",
+    )
     project_status = commands.add_parser(
         "project-status",
         parents=[credentials],
@@ -8276,6 +8584,8 @@ def run_queue_command(args: argparse.Namespace) -> int:
         return run_youtube_video_pipeline(args)
     if args.queue_command == "project-import":
         return run_project_import(args)
+    if args.queue_command == "import-legacy-projects":
+        return run_import_legacy_projects(args)
     if args.queue_command == "project-accept-snapshot":
         return run_project_accept_snapshot(args)
     if args.queue_command == "iterate-project":
