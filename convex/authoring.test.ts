@@ -259,6 +259,169 @@ test("catalog project snapshot acceptance is verified, revisioned, and queryable
 
 });
 
+test("project executions bind approval and reserve concurrent item pipelines", async () => {
+  const t = convexTest(schema, modules);
+  const projectBytes = await readFile(new URL(
+    "../packages/authoring-pipeline/project/examples/current-playlist.project.json",
+    import.meta.url,
+  ));
+  const snapshotBytes = await readFile(new URL(
+    "../packages/authoring-pipeline/project/examples/current-playlist.snapshot.json",
+    import.meta.url,
+  ));
+  const project = JSON.parse(projectBytes.toString("utf8"));
+  const imported = await post(t, "/authoring/operator/projects/import", {
+    command_id: "execution-project-import",
+    actor: "test-operator",
+    project,
+    accepted_snapshot_json: snapshotBytes.toString("utf8"),
+  }, operatorToken);
+  expect(imported.status).toBe(200);
+
+  const planDigest = "e".repeat(64);
+  const planArtifact = {
+    store: "r2",
+    algorithm: "sha256",
+    digest: planDigest,
+    byte_length: 4096,
+    media_type: "application/json",
+    artifact_kind: "project-processing-plan",
+    schema: { id: "watchcraft.project-processing-plan", version: 1 },
+    key: artifactKey(planDigest),
+  };
+  const planSpec = {
+    operation: "generate",
+    artifact_kind: "project-processing-plan",
+    output_schema: { id: "watchcraft.project-processing-plan", version: 1 },
+    handler: { id: "watchcraft.project.plan", version: "1" },
+    source: { media_asset_id: `catalog-project:${project.project_id}` },
+    inputs: [project.iterator.accepted_snapshot],
+    dependencies: [],
+    configuration: { project, planned_at: "2026-09-11T00:00:00Z" },
+  };
+  let planJob = await t.mutation(internal.authoringInternal.createJob, {
+    job_id: "execution-plan-job", run_id: "execution-plan-run",
+    command_id: "execution-plan-create", spec: planSpec,
+  }) as any;
+  planJob = await t.mutation(internal.authoringInternal.requestApproval, {
+    job_id: planJob.job_id, command_id: "execution-plan-request-approval",
+    expected_revision: planJob.revision,
+  }) as any;
+  planJob = await t.mutation(internal.authoringInternal.approveJob, {
+    job_id: planJob.job_id, command_id: "execution-plan-approve",
+    expected_revision: planJob.revision, actor: "test-operator", spec_sha256: planJob.spec_sha256,
+  }) as any;
+  planJob = await t.mutation(internal.authoringInternal.requestDispatch, {
+    job_id: planJob.job_id, command_id: "execution-plan-request-dispatch",
+    expected_revision: planJob.revision,
+  }) as any;
+  planJob = await t.mutation(internal.authoringInternal.recordDispatch, {
+    job_id: planJob.job_id, command_id: "execution-plan-record-dispatch",
+    expected_revision: planJob.revision, generation: 1, github_run_id: "plan-run",
+    github_run_url: "https://github.com/billbliss/watchcraft/actions/runs/1",
+  }) as any;
+  planJob = await t.mutation(internal.authoringInternal.claimJob, {
+    job_id: planJob.job_id, command_id: "execution-plan-claim",
+    expected_revision: planJob.revision, attempt_id: "execution-plan-attempt",
+    owner: "github-actions:plan", spec_sha256: planJob.spec_sha256,
+    dispatch_generation: 1, lease_duration_ms: 300_000, github_run_id: "plan-run",
+  }) as any;
+  planJob = await t.mutation(internal.authoringInternal.startJob, {
+    job_id: planJob.job_id, command_id: "execution-plan-start",
+    expected_revision: planJob.revision, attempt_id: "execution-plan-attempt",
+  }) as any;
+  planJob = await t.mutation(internal.authoringInternal.succeedJob, {
+    job_id: planJob.job_id, command_id: "execution-plan-succeed",
+    expected_revision: planJob.revision, attempt_id: "execution-plan-attempt", artifact: planArtifact,
+  }) as any;
+  expect(planJob.state).toBe("succeeded");
+
+  const proposal = {
+    execution_id: "project-execution-1",
+    project: { project_id: project.project_id, revision: project.revision },
+    plan: { job_id: planJob.job_id, artifact: planArtifact, plan_hash: "plan-hash" },
+    selection: { item_ids: ["youtube:first", "youtube:second"] },
+    policy: { recipe: { id: "watchcraft.youtube-video", version: "1" }, concurrency: 2 },
+    estimate: { expected_seconds: 120, expected_cost_usd: 0.25 },
+    items: [
+      { item_id: "youtube:first", run_id: "item-run-1", job_ids: ["transcript-1", "analysis-1"] },
+      { item_id: "youtube:second", run_id: "item-run-2", job_ids: ["transcript-2", "analysis-2"] },
+    ],
+  };
+  const createdResponse = await post(t, "/authoring/operator/project-executions/create", {
+    command_id: "execution-create", execution: proposal,
+  }, operatorToken);
+  expect(createdResponse.status).toBe(200);
+  const created = await createdResponse.json() as any;
+  expect(created).toMatchObject({ created: true, execution: { state: "awaiting_approval", revision: 1 } });
+  const incompatibleReplay = await post(t, "/authoring/operator/project-executions/create", {
+    command_id: "execution-create",
+    execution: { ...proposal, policy: { ...proposal.policy, concurrency: 1 } },
+  }, operatorToken);
+  expect(incompatibleReplay.status).toBe(409);
+  await expect(incompatibleReplay.json()).resolves.toEqual({
+    error: "Project execution command execution-create was already used.",
+  });
+
+  const approvedResponse = await post(t, "/authoring/operator/project-executions/approve", {
+    execution_id: proposal.execution_id, command_id: "execution-approve",
+    expected_revision: 1, actor: "test-operator",
+    approval_sha256: created.execution.approval_sha256,
+  }, operatorToken);
+  expect(approvedResponse.status).toBe(200);
+  await expect(approvedResponse.json()).resolves.toMatchObject({ execution: { state: "approved", revision: 2 } });
+
+  const claims = await Promise.all(proposal.items.map((item, index) => post(
+    t, "/authoring/operator/project-executions/items/claim", {
+      execution_id: proposal.execution_id, item_id: item.item_id,
+      command_id: `execution-claim-${index}`, owner: `operator-${index}`,
+      lease_duration_ms: 60_000,
+    }, operatorToken,
+  )));
+  expect(claims.map((response) => response.status)).toEqual([200, 200]);
+
+  const failed = await post(t, "/authoring/operator/project-executions/items/fail", {
+    execution_id: proposal.execution_id, item_id: proposal.items[0].item_id,
+    command_id: "execution-fail-0", owner: "operator-0", message: "interrupted",
+  }, operatorToken);
+  expect(failed.status).toBe(200);
+  const completedSibling = await post(t, "/authoring/operator/project-executions/items/complete", {
+    execution_id: proposal.execution_id, item_id: proposal.items[1].item_id,
+    command_id: "execution-complete-1", owner: "operator-1",
+    run_id: proposal.items[1].run_id, job_ids: proposal.items[1].job_ids,
+  }, operatorToken);
+  await expect(completedSibling.json()).resolves.toMatchObject({ execution: { state: "failed" } });
+  const reclaimed = await post(t, "/authoring/operator/project-executions/items/claim", {
+    execution_id: proposal.execution_id, item_id: proposal.items[0].item_id,
+    command_id: "execution-reclaim-0", owner: "operator-retry", lease_duration_ms: 60_000,
+  }, operatorToken);
+  expect(reclaimed.status).toBe(200);
+  const completedRetry = await post(t, "/authoring/operator/project-executions/items/complete", {
+    execution_id: proposal.execution_id, item_id: proposal.items[0].item_id,
+    command_id: "execution-complete-0", owner: "operator-retry",
+    run_id: proposal.items[0].run_id, job_ids: proposal.items[0].job_ids,
+  }, operatorToken);
+  expect(completedRetry.status).toBe(200);
+  const status = await post(t, "/authoring/operator/project-executions/get", {
+    execution_id: proposal.execution_id,
+  }, operatorToken);
+  await expect(status.json()).resolves.toMatchObject({
+    execution: { state: "complete", items: [{ state: "succeeded" }, { state: "succeeded" }] },
+  });
+
+  const second = await post(t, "/authoring/operator/project-executions/create", {
+    command_id: "execution-create-2",
+    execution: { ...proposal, execution_id: "project-execution-2" },
+  }, operatorToken);
+  expect(second.status).toBe(200);
+  const listed = await post(t, "/authoring/operator/project-executions/list", {
+    project_id: project.project_id, limit: 10,
+  }, operatorToken);
+  await expect(listed.json()).resolves.toMatchObject({
+    executions: [{ execution_id: "project-execution-2" }, { execution_id: "project-execution-1" }],
+  });
+});
+
 test("the persisted smoke lifecycle is transactional and command-idempotent", async () => {
   const t = convexTest(schema, modules);
   const prepareBody = {

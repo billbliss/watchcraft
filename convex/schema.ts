@@ -83,4 +83,23 @@ export default defineSchema({
   })
     .index("by_project_revision", ["project_id", "revision"])
     .index("by_project_command", ["project_id", "command_id"]),
+  authoring_project_executions: defineTable({
+    execution_id: v.string(),
+    project_id: v.string(),
+    aggregate: v.any(),
+    updated_at: v.number(),
+  })
+    .index("by_execution_id", ["execution_id"])
+    .index("by_updated", ["updated_at"])
+    .index("by_project_updated", ["project_id", "updated_at"]),
+  authoring_project_execution_events: defineTable({
+    execution_id: v.string(),
+    command_id: v.string(),
+    command_sha256: v.string(),
+    from_state: v.optional(v.string()),
+    to_state: v.string(),
+    revision: v.number(),
+    recorded_at: v.number(),
+    result: v.any(),
+  }).index("by_execution_command", ["execution_id", "command_id"]),
 });

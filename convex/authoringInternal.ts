@@ -36,6 +36,12 @@ import {
   validateCatalogProjectForControl,
 } from "../packages/authoring-pipeline/src/project-control-contracts.ts";
 import { activeRegistry } from "./authoringRegistry.ts";
+import {
+  createProjectExecution,
+  parseProjectExecution,
+  type ProjectExecution,
+  type ProjectExecutionInput,
+} from "../packages/authoring-pipeline/src/project-execution.ts";
 
 type RunCommandWithoutRevision = RunCommand extends infer Command
   ? Command extends RunCommand
@@ -91,6 +97,114 @@ async function catalogProjectCommand(
     .withIndex("by_project_command", (query) =>
       query.eq("project_id", projectId).eq("command_id", commandId))
     .unique();
+}
+
+async function projectExecutionDocument(ctx: MutationCtx | QueryCtx, executionId: string) {
+  return ctx.db
+    .query("authoring_project_executions")
+    .withIndex("by_execution_id", (query) => query.eq("execution_id", executionId))
+    .unique();
+}
+
+async function projectExecutionCommand(ctx: MutationCtx, executionId: string, commandId: string) {
+  return ctx.db
+    .query("authoring_project_execution_events")
+    .withIndex("by_execution_command", (query) => (
+      query.eq("execution_id", executionId).eq("command_id", commandId)
+    ))
+    .unique();
+}
+
+async function persistProjectExecution(
+  ctx: MutationCtx,
+  stored: Awaited<ReturnType<typeof projectExecutionDocument>>,
+  previous: ProjectExecution | null,
+  next: ProjectExecution,
+  commandId: string,
+  commandSha256: string,
+  now: number,
+) {
+  if (stored) {
+    await ctx.db.replace(stored._id, {
+      execution_id: next.execution_id,
+      project_id: next.project.project_id,
+      aggregate: next,
+      updated_at: now,
+    });
+  } else {
+    await ctx.db.insert("authoring_project_executions", {
+      execution_id: next.execution_id,
+      project_id: next.project.project_id,
+      aggregate: next,
+      updated_at: now,
+    });
+  }
+  await ctx.db.insert("authoring_project_execution_events", {
+    execution_id: next.execution_id,
+    command_id: commandId,
+    command_sha256: commandSha256,
+    from_state: previous?.state,
+    to_state: next.state,
+    revision: next.revision,
+    recorded_at: now,
+    result: next,
+  });
+}
+
+function projectExecutionCommandSha256(type: string, payload: unknown): string {
+  return sha256Hex(canonicalJson({ type, payload } as unknown as JsonValue));
+}
+
+function changedProjectExecution(
+  current: ProjectExecution,
+  commandId: string,
+  now: number,
+  changes: Partial<ProjectExecution>,
+): ProjectExecution {
+  return parseProjectExecution({
+    ...current,
+    ...changes,
+    revision: current.revision + 1,
+    updated_at: now,
+    last_command_id: commandId,
+  });
+}
+
+async function validateProjectExecutionAuthority(
+  ctx: MutationCtx,
+  input: Pick<ProjectExecutionInput, "project" | "plan">,
+) {
+  const storedProject = await catalogProjectDocument(ctx, input.project.project_id);
+  if (!storedProject) throw new Error(`Unknown catalog project ${input.project.project_id}.`);
+  const project = validateCatalogProjectForControl(storedProject.aggregate);
+  if (project.revision !== input.project.revision) {
+    throw new Error(
+      `Project execution revision ${input.project.revision} is stale; current revision is ${project.revision}.`,
+    );
+  }
+  const storedPlan = await jobDocument(ctx, input.plan.job_id);
+  if (!storedPlan) throw new Error(`Unknown plan job ${input.plan.job_id}.`);
+  const plan = parseAuthoringJob(storedPlan.aggregate);
+  if (plan.state !== "succeeded" || !plan.result) {
+    throw new Error(`Plan job ${plan.job_id} is ${plan.state}; expected succeeded.`);
+  }
+  if (
+    canonicalJson(plan.result as unknown as JsonValue)
+      !== canonicalJson(input.plan.artifact as unknown as JsonValue)
+  ) throw new Error(`Plan artifact does not match successful job ${plan.job_id}.`);
+  if (
+    plan.spec.artifact_kind !== "project-processing-plan"
+    || plan.spec.output_schema.id !== "watchcraft.project-processing-plan"
+    || plan.spec.output_schema.version !== 1
+  ) throw new Error(`Job ${plan.job_id} is not a project processing plan.`);
+  const plannedProject = plan.spec.configuration.project;
+  if (
+    !plannedProject
+    || typeof plannedProject !== "object"
+    || Array.isArray(plannedProject)
+    || (plannedProject as { project_id?: unknown }).project_id !== project.project_id
+    || (plannedProject as { revision?: unknown }).revision !== project.revision
+  ) throw new Error(`Plan job ${plan.job_id} does not bind the current project revision.`);
 }
 
 function parsedJsonBytes(source: string, label: string): {
@@ -328,6 +442,285 @@ async function assertResolvedJobDependencies(
     }
   }
 }
+
+export const getProjectExecution = internalQuery({
+  args: { execution_id: v.string() },
+  returns: v.any(),
+  handler: async (ctx, args) => {
+    const stored = await projectExecutionDocument(ctx, args.execution_id);
+    if (!stored) throw new Error(`Unknown project execution ${args.execution_id}.`);
+    return { execution: parseProjectExecution(stored.aggregate) };
+  },
+});
+
+export const listProjectExecutions = internalQuery({
+  args: { project_id: v.optional(v.string()), limit: v.number() },
+  returns: v.any(),
+  handler: async (ctx, args) => {
+    if (!Number.isSafeInteger(args.limit) || args.limit < 1 || args.limit > 100) {
+      throw new TypeError("Project execution list limit must be between 1 and 100.");
+    }
+    const records = args.project_id
+      ? await ctx.db.query("authoring_project_executions")
+          .withIndex("by_project_updated", (query) => query.eq("project_id", args.project_id!))
+          .order("desc")
+          .take(args.limit)
+      : await ctx.db.query("authoring_project_executions")
+          .withIndex("by_updated")
+          .order("desc")
+          .take(args.limit);
+    return { executions: records.map((record) => parseProjectExecution(record.aggregate)) };
+  },
+});
+
+export const createProjectExecutionRecord = internalMutation({
+  args: { command_id: v.string(), execution: v.any() },
+  returns: v.any(),
+  handler: async (ctx, args) => {
+    const input = args.execution as ProjectExecutionInput;
+    const executionId = input?.execution_id;
+    if (typeof executionId !== "string" || executionId.length === 0) {
+      throw new TypeError("Execution ID is required.");
+    }
+    const commandSha256 = projectExecutionCommandSha256("create", { execution: input });
+    const replay = await projectExecutionCommand(ctx, executionId, args.command_id);
+    if (replay) {
+      if (replay.command_sha256 !== commandSha256) {
+        throw new Error(`Project execution command ${args.command_id} was already used.`);
+      }
+      return { execution: parseProjectExecution(replay.result) };
+    }
+    const existing = await projectExecutionDocument(ctx, executionId);
+    if (existing) {
+      const current = parseProjectExecution(existing.aggregate);
+      const candidate = createProjectExecution(input, args.command_id, current.created_at);
+      if (candidate.approval_sha256 !== current.approval_sha256) {
+        throw new Error(`Project execution ${executionId} already exists with different work.`);
+      }
+      return { execution: current, created: false };
+    }
+    await validateProjectExecutionAuthority(ctx, input);
+    const now = Date.now();
+    const execution = createProjectExecution(input, args.command_id, now);
+    await persistProjectExecution(ctx, null, null, execution, args.command_id, commandSha256, now);
+    return { execution, created: true };
+  },
+});
+
+export const approveProjectExecution = internalMutation({
+  args: {
+    execution_id: v.string(),
+    command_id: v.string(),
+    expected_revision: v.number(),
+    actor: v.string(),
+    approval_sha256: v.string(),
+  },
+  returns: v.any(),
+  handler: async (ctx, args) => {
+    const commandSha256 = projectExecutionCommandSha256("approve", {
+      expected_revision: args.expected_revision,
+      actor: args.actor,
+      approval_sha256: args.approval_sha256,
+    });
+    const replay = await projectExecutionCommand(ctx, args.execution_id, args.command_id);
+    if (replay) {
+      if (replay.command_sha256 !== commandSha256) {
+        throw new Error(`Project execution command ${args.command_id} was already used.`);
+      }
+      return { execution: parseProjectExecution(replay.result) };
+    }
+    const stored = await projectExecutionDocument(ctx, args.execution_id);
+    if (!stored) throw new Error(`Unknown project execution ${args.execution_id}.`);
+    const current = parseProjectExecution(stored.aggregate);
+    if (current.revision !== args.expected_revision) {
+      throw new Error(`Stale project execution revision ${args.expected_revision}; current revision is ${current.revision}.`);
+    }
+    if (current.state !== "awaiting_approval") {
+      throw new Error(`Project execution ${current.execution_id} is ${current.state}; expected awaiting_approval.`);
+    }
+    if (args.approval_sha256 !== current.approval_sha256) {
+      throw new Error("Project execution approval digest does not match the proposed work.");
+    }
+    if (!args.actor) throw new TypeError("Approval actor is required.");
+    await validateProjectExecutionAuthority(ctx, current);
+    const now = Date.now();
+    const next = changedProjectExecution(current, args.command_id, now, {
+      state: "approved",
+      approval: { actor: args.actor, approved_at: now, approval_sha256: args.approval_sha256 },
+    });
+    await persistProjectExecution(ctx, stored, current, next, args.command_id, commandSha256, now);
+    return { execution: next };
+  },
+});
+
+export const claimProjectExecutionItem = internalMutation({
+  args: {
+    execution_id: v.string(), item_id: v.string(), command_id: v.string(),
+    owner: v.string(), lease_duration_ms: v.number(),
+  },
+  returns: v.any(),
+  handler: async (ctx, args) => {
+    const commandSha256 = projectExecutionCommandSha256("claim-item", {
+      item_id: args.item_id, owner: args.owner, lease_duration_ms: args.lease_duration_ms,
+    });
+    const replay = await projectExecutionCommand(ctx, args.execution_id, args.command_id);
+    if (replay) {
+      if (replay.command_sha256 !== commandSha256) {
+        throw new Error(`Project execution command ${args.command_id} was already used.`);
+      }
+      const execution = parseProjectExecution(replay.result);
+      return { execution, item: execution.items.find((item) => item.item_id === args.item_id) };
+    }
+    if (!args.owner) throw new TypeError("Claim owner is required.");
+    if (!Number.isSafeInteger(args.lease_duration_ms) || args.lease_duration_ms < 1 || args.lease_duration_ms > 14_400_000) {
+      throw new TypeError("Execution item lease must be between 1 ms and 4 hours.");
+    }
+    const stored = await projectExecutionDocument(ctx, args.execution_id);
+    if (!stored) throw new Error(`Unknown project execution ${args.execution_id}.`);
+    const current = parseProjectExecution(stored.aggregate);
+    if (!["approved", "running", "failed"].includes(current.state)) {
+      throw new Error(`Project execution ${current.execution_id} cannot be claimed from ${current.state}.`);
+    }
+    const index = current.items.findIndex((item) => item.item_id === args.item_id);
+    if (index < 0) throw new Error(`Execution ${current.execution_id} has no item ${args.item_id}.`);
+    const item = current.items[index];
+    if (item.state === "succeeded") return { execution: current, item };
+    const now = Date.now();
+    if (item.state === "claimed" && item.claim && item.claim.expires_at > now && item.claim.owner !== args.owner) {
+      throw new Error(`Execution item ${item.item_id} is already claimed by ${item.claim.owner}.`);
+    }
+    const items = structuredClone(current.items);
+    items[index] = {
+      ...item,
+      state: "claimed",
+      claim: { owner: args.owner, claimed_at: now, expires_at: now + args.lease_duration_ms },
+      failure: null,
+      completed_at: null,
+    };
+    const next = changedProjectExecution(current, args.command_id, now, { state: "running", items });
+    await persistProjectExecution(ctx, stored, current, next, args.command_id, commandSha256, now);
+    return { execution: next, item: next.items[index] };
+  },
+});
+
+export const completeProjectExecutionItem = internalMutation({
+  args: {
+    execution_id: v.string(), item_id: v.string(), command_id: v.string(),
+    owner: v.string(), run_id: v.string(), job_ids: v.array(v.string()),
+  },
+  returns: v.any(),
+  handler: async (ctx, args) => {
+    const commandSha256 = projectExecutionCommandSha256("complete-item", {
+      item_id: args.item_id, owner: args.owner, run_id: args.run_id, job_ids: args.job_ids,
+    });
+    const replay = await projectExecutionCommand(ctx, args.execution_id, args.command_id);
+    if (replay) {
+      if (replay.command_sha256 !== commandSha256) {
+        throw new Error(`Project execution command ${args.command_id} was already used.`);
+      }
+      const execution = parseProjectExecution(replay.result);
+      return { execution, item: execution.items.find((item) => item.item_id === args.item_id) };
+    }
+    const stored = await projectExecutionDocument(ctx, args.execution_id);
+    if (!stored) throw new Error(`Unknown project execution ${args.execution_id}.`);
+    const current = parseProjectExecution(stored.aggregate);
+    const index = current.items.findIndex((item) => item.item_id === args.item_id);
+    if (index < 0) throw new Error(`Execution ${current.execution_id} has no item ${args.item_id}.`);
+    const item = current.items[index];
+    if (item.state === "succeeded") return { execution: current, item };
+    const now = Date.now();
+    if (
+      item.state !== "claimed" || !item.claim || item.claim.owner !== args.owner
+      || item.claim.expires_at <= now
+    ) throw new Error(`Execution item ${item.item_id} does not have a live claim for ${args.owner}.`);
+    if (
+      item.run_id !== args.run_id
+      || canonicalJson(item.job_ids as unknown as JsonValue) !== canonicalJson(args.job_ids as unknown as JsonValue)
+    ) throw new Error(`Execution item ${item.item_id} completed with unexpected child identities.`);
+    const items = structuredClone(current.items);
+    items[index] = { ...item, state: "succeeded", claim: null, failure: null, completed_at: now };
+    const state = items.every((candidate) => candidate.state === "succeeded")
+      ? "complete"
+      : items.some((candidate) => candidate.state === "failed")
+        ? "failed"
+        : "running";
+    const next = changedProjectExecution(current, args.command_id, now, { state, items });
+    await persistProjectExecution(ctx, stored, current, next, args.command_id, commandSha256, now);
+    return { execution: next, item: next.items[index] };
+  },
+});
+
+export const failProjectExecutionItem = internalMutation({
+  args: {
+    execution_id: v.string(), item_id: v.string(), command_id: v.string(),
+    owner: v.string(), message: v.string(),
+  },
+  returns: v.any(),
+  handler: async (ctx, args) => {
+    const commandSha256 = projectExecutionCommandSha256("fail-item", {
+      item_id: args.item_id, owner: args.owner, message: args.message,
+    });
+    const replay = await projectExecutionCommand(ctx, args.execution_id, args.command_id);
+    if (replay) {
+      if (replay.command_sha256 !== commandSha256) {
+        throw new Error(`Project execution command ${args.command_id} was already used.`);
+      }
+      const execution = parseProjectExecution(replay.result);
+      return { execution, item: execution.items.find((item) => item.item_id === args.item_id) };
+    }
+    const stored = await projectExecutionDocument(ctx, args.execution_id);
+    if (!stored) throw new Error(`Unknown project execution ${args.execution_id}.`);
+    const current = parseProjectExecution(stored.aggregate);
+    const index = current.items.findIndex((item) => item.item_id === args.item_id);
+    if (index < 0) throw new Error(`Execution ${current.execution_id} has no item ${args.item_id}.`);
+    const item = current.items[index];
+    const now = Date.now();
+    if (
+      item.state !== "claimed" || !item.claim || item.claim.owner !== args.owner
+      || item.claim.expires_at <= now
+    ) throw new Error(`Execution item ${item.item_id} does not have a live claim for ${args.owner}.`);
+    if (!args.message) throw new TypeError("Execution item failure message is required.");
+    const items = structuredClone(current.items);
+    items[index] = {
+      ...item, state: "failed", claim: null,
+      failure: { message: args.message.slice(0, 1000), occurred_at: now }, completed_at: null,
+    };
+    const next = changedProjectExecution(current, args.command_id, now, { state: "failed", items });
+    await persistProjectExecution(ctx, stored, current, next, args.command_id, commandSha256, now);
+    return { execution: next, item: next.items[index] };
+  },
+});
+
+export const cancelProjectExecution = internalMutation({
+  args: { execution_id: v.string(), command_id: v.string(), expected_revision: v.number() },
+  returns: v.any(),
+  handler: async (ctx, args) => {
+    const commandSha256 = projectExecutionCommandSha256("cancel", {
+      expected_revision: args.expected_revision,
+    });
+    const replay = await projectExecutionCommand(ctx, args.execution_id, args.command_id);
+    if (replay) {
+      if (replay.command_sha256 !== commandSha256) {
+        throw new Error(`Project execution command ${args.command_id} was already used.`);
+      }
+      return { execution: parseProjectExecution(replay.result) };
+    }
+    const stored = await projectExecutionDocument(ctx, args.execution_id);
+    if (!stored) throw new Error(`Unknown project execution ${args.execution_id}.`);
+    const current = parseProjectExecution(stored.aggregate);
+    if (current.revision !== args.expected_revision) {
+      throw new Error(`Stale project execution revision ${args.expected_revision}; current revision is ${current.revision}.`);
+    }
+    if (["complete", "cancelled"].includes(current.state)) return { execution: current };
+    const now = Date.now();
+    const items = current.items.map((item) => item.state === "succeeded" ? item : {
+      ...item, state: "cancelled" as const, claim: null, failure: null, completed_at: null,
+    });
+    const next = changedProjectExecution(current, args.command_id, now, { state: "cancelled", items });
+    await persistProjectExecution(ctx, stored, current, next, args.command_id, commandSha256, now);
+    return { execution: next };
+  },
+});
 
 export const getCatalogProject = internalQuery({
   args: { project_id: v.string() },

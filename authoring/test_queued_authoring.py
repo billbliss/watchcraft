@@ -344,6 +344,25 @@ class QueuedAuthoringTests(unittest.TestCase):
         ])
         self.assertTrue(all_project_processing.process_all)
         self.assertEqual(all_project_processing.concurrency, 3)
+        execution_proposal = build_parser().parse_args([
+            "queue", "create-project-execution",
+            "--plan-job-id", "plan-job-1",
+            "--all",
+            "--concurrency", "3",
+            "--r2-credentials-source", "keychain",
+        ])
+        self.assertEqual(execution_proposal.plan_job_id, "plan-job-1")
+        self.assertTrue(execution_proposal.process_all)
+        self.assertEqual(execution_proposal.concurrency, 3)
+        execution_process = build_parser().parse_args([
+            "queue", "process-project",
+            "--execution-id", "execution-1",
+        ])
+        self.assertEqual(execution_process.execution_id, "execution-1")
+        execution_approval = build_parser().parse_args([
+            "queue", "approve-project-execution", "execution-1",
+        ])
+        self.assertEqual(execution_approval.execution_id, "execution-1")
         terminology = build_parser().parse_args([
             "queue", "resolve-project-terminology",
             "--plan-job-id", "plan-job-1",
@@ -1082,9 +1101,133 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertIn("Plan job ID: plan-job-1", handoff.getvalue())
         self.assertIn("No project processing has started", handoff.getvalue())
         self.assertIn(
-            "If approved: ./authoring/watchcraft-author queue process-project",
+            "If approved: ./authoring/watchcraft-author queue create-project-execution",
             handoff.getvalue(),
         )
+
+    def test_create_project_execution_reserves_exact_selected_child_work(self):
+        plan_reference = {"digest": "d" * 64}
+        plan = {
+            "project": {"project_id": "linear-algebra", "revision": 2},
+            "plan_hash": "c" * 64,
+            "items": [{"item_id": "youtube:first"}, {"item_id": "youtube:second"}],
+            "estimate": {"status": "duration-informed"},
+        }
+        control = Mock()
+        captured = {}
+
+        def post(path, payload):
+            self.assertEqual(path, "/project-executions/create")
+            captured.update(payload)
+            return {
+                "created": True,
+                "execution": {
+                    **payload["execution"],
+                    "state": "awaiting_approval",
+                    "approval_sha256": "a" * 64,
+                },
+            }
+
+        control.post.side_effect = post
+        args = build_parser().parse_args([
+            "queue", "create-project-execution",
+            "--plan-job-id", "plan-job-1", "--all", "--concurrency", "2",
+        ])
+        with patch("queued_authoring.operator_client", return_value=control), patch(
+            "queued_authoring.load_authoritative_project_plan",
+            return_value=({}, plan_reference, plan),
+        ), patch(
+            "queued_authoring.executable_project_plan_items",
+            return_value=plan["items"],
+        ), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(queued_authoring.run_create_project_execution(args), 0)
+        execution = captured["execution"]
+        self.assertEqual(execution["selection"]["item_ids"], [
+            "youtube:first", "youtube:second",
+        ])
+        self.assertEqual(execution["policy"]["concurrency"], 2)
+        self.assertEqual(
+            execution["items"],
+            queued_authoring.project_execution_work(plan_reference, plan["items"]),
+        )
+
+    def test_process_project_claims_and_completes_durable_execution_item(self):
+        plan_reference = {"digest": "d" * 64}
+        item = {
+            "item_id": "youtube:first",
+            "title": "First",
+            "source": {"canonical_url": "https://www.youtube.com/watch?v=abcdefghijk"},
+        }
+        plan = {
+            "project": {"project_id": "linear-algebra", "revision": 2},
+            "plan_hash": "c" * 64,
+            "items": [item],
+        }
+        reserved = queued_authoring.project_execution_work(plan_reference, [item])[0]
+        execution = {
+            "execution_id": "execution-1",
+            "state": "approved",
+            "project": plan["project"],
+            "plan": {
+                "job_id": "plan-job-1", "artifact": plan_reference,
+                "plan_hash": plan["plan_hash"],
+            },
+            "selection": {"item_ids": [item["item_id"]]},
+            "policy": {
+                "recipe": {"id": "watchcraft.youtube-video-processing", "version": "1"},
+                "concurrency": 1,
+            },
+            "items": [{**reserved, "state": "pending"}],
+        }
+        calls = []
+        control = Mock()
+
+        def post(path, payload):
+            calls.append((path, payload))
+            if path == "/project-executions/get":
+                return {"execution": execution}
+            if path == "/project-executions/items/claim":
+                return {"item": {**reserved, "state": "claimed"}}
+            if path == "/project-executions/items/complete":
+                return {"item": {**reserved, "state": "succeeded"}}
+            raise AssertionError(path)
+
+        control.post.side_effect = post
+        args = build_parser().parse_args([
+            "queue", "process-project", "--execution-id", "execution-1",
+        ])
+        pipeline_result = {
+            "run_id": reserved["run_id"],
+            "state": "complete",
+            "jobs": {
+                "transcription": {"job_id": reserved["job_ids"][0]},
+                "analysis": {"job_id": reserved["job_ids"][1]},
+            },
+            "timing": {"local": {"command_total_ms": 1}},
+            "plan_execution": {"disposition": "executed"},
+        }
+        with patch("queued_authoring.operator_client", return_value=control), patch(
+            "queued_authoring.load_authoritative_project_plan",
+            return_value=({}, plan_reference, plan),
+        ), patch(
+            "queued_authoring.validate_executable_project_plan_item", side_effect=lambda value: value,
+        ), patch(
+            "queued_authoring.project_item_execution_context", return_value={"item_id": "youtube:first"},
+        ), patch(
+            "queued_authoring.run_youtube_video_pipeline", return_value=pipeline_result,
+        ), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(queued_authoring.run_process_project(args), 0)
+        paths = [path for path, _ in calls]
+        self.assertLess(
+            paths.index("/project-executions/items/claim"),
+            paths.index("/project-executions/items/complete"),
+        )
+        completion = next(
+            payload for path, payload in calls
+            if path == "/project-executions/items/complete"
+        )
+        self.assertEqual(completion["run_id"], reserved["run_id"])
+        self.assertEqual(completion["job_ids"], reserved["job_ids"])
 
     def test_process_project_executes_one_plan_item_with_deterministic_context(self):
         snapshot = {

@@ -84,6 +84,14 @@ http.route({ path: "/authoring/operator/projects/get", method: "POST", handler: 
 http.route({ path: "/authoring/operator/projects/history", method: "POST", handler: queryRoute(internal.authoringInternal.getCatalogProjectHistory, operatorVerifier) });
 http.route({ path: "/authoring/operator/projects/import", method: "POST", handler: mutationRoute(internal.authoringInternal.importCatalogProject, operatorVerifier) });
 http.route({ path: "/authoring/operator/projects/accept-snapshot", method: "POST", handler: mutationRoute(internal.authoringInternal.acceptCatalogProjectSnapshot, operatorVerifier) });
+http.route({ path: "/authoring/operator/project-executions/get", method: "POST", handler: queryRoute(internal.authoringInternal.getProjectExecution, operatorVerifier) });
+http.route({ path: "/authoring/operator/project-executions/list", method: "POST", handler: queryRoute(internal.authoringInternal.listProjectExecutions, operatorVerifier) });
+http.route({ path: "/authoring/operator/project-executions/create", method: "POST", handler: mutationRoute(internal.authoringInternal.createProjectExecutionRecord, operatorVerifier) });
+http.route({ path: "/authoring/operator/project-executions/approve", method: "POST", handler: mutationRoute(internal.authoringInternal.approveProjectExecution, operatorVerifier) });
+http.route({ path: "/authoring/operator/project-executions/items/claim", method: "POST", handler: mutationRoute(internal.authoringInternal.claimProjectExecutionItem, operatorVerifier) });
+http.route({ path: "/authoring/operator/project-executions/items/complete", method: "POST", handler: mutationRoute(internal.authoringInternal.completeProjectExecutionItem, operatorVerifier) });
+http.route({ path: "/authoring/operator/project-executions/items/fail", method: "POST", handler: mutationRoute(internal.authoringInternal.failProjectExecutionItem, operatorVerifier) });
+http.route({ path: "/authoring/operator/project-executions/cancel", method: "POST", handler: mutationRoute(internal.authoringInternal.cancelProjectExecution, operatorVerifier) });
 
 http.route({ path: "/authoring/admin/registry/get-active", method: "POST", handler: queryRoute(internal.authoringRegistry.getActiveRegistry, registryAdminVerifier) });
 http.route({ path: "/authoring/admin/registry/publish", method: "POST", handler: mutationRoute(internal.authoringRegistry.publishRegistry, registryAdminVerifier) });

@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -6763,10 +6764,9 @@ def run_plan_project(args: argparse.Namespace) -> int:
         f"Created processing plan for {project['project_id']} revision {project['revision']}.",
         details=details,
         next_command=(
-            "./authoring/watchcraft-author queue process-project "
+            "./authoring/watchcraft-author queue create-project-execution "
             f"--plan-job-id {completed['job']['job_id']} --all --concurrency 2 "
-            "--operator-token-source keychain --r2-staging-credentials-source keychain "
-            "--r2-credentials-source keychain"
+            "--operator-token-source keychain --r2-credentials-source keychain"
         ),
         next_label="If approved",
     )
@@ -7404,14 +7404,12 @@ def compact_project_item_execution(
     }
 
 
-def run_process_project(args: argparse.Namespace) -> int:
-    if args.concurrency < 1 or args.concurrency > 8:
-        raise ValueError("--concurrency must be between 1 and 8")
-    command_started_at = time.monotonic()
-    control = operator_client(args.operator_token_source)
-    plan_submission = control.post(
-        "/submissions/get", {"job_id": args.plan_job_id}
-    )
+def load_authoritative_project_plan(
+    control: AuthoringHttpClient,
+    plan_job_id: str,
+    r2_credentials_source: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    plan_submission = control.post("/submissions/get", {"job_id": plan_job_id})
     plan_job = plan_submission.get("job")
     if (
         not isinstance(plan_job, dict)
@@ -7419,7 +7417,7 @@ def run_process_project(args: argparse.Namespace) -> int:
         or not is_supported_project_processing_plan_job(plan_job)
     ):
         raise RuntimeError(
-            f"Job {args.plan_job_id} is not a successful project processing plan"
+            f"Job {plan_job_id} is not a successful project processing plan"
         )
     plan_reference = validated_artifact_reference(plan_job.get("result"))
     if (
@@ -7427,9 +7425,9 @@ def run_process_project(args: argparse.Namespace) -> int:
         or plan_reference.get("schema") != PROJECT_PROCESSING_PLAN_SCHEMA
     ):
         raise RuntimeError(
-            f"Job {args.plan_job_id} is not a successful project processing plan"
+            f"Job {plan_job_id} is not a successful project processing plan"
         )
-    plan = verified_json_result(plan_job, args.r2_credentials_source)
+    plan = verified_json_result(plan_job, r2_credentials_source)
     validate_project_processing_plan(plan)
     current = control.post(
         "/projects/get", {"project_id": plan["project"]["project_id"]}
@@ -7443,6 +7441,38 @@ def run_process_project(args: argparse.Namespace) -> int:
         raise RuntimeError(
             "Processing plan is stale relative to the authoritative catalog project"
         )
+    return plan_job, plan_reference, plan
+
+
+def project_execution_work(
+    plan_reference: dict[str, Any], items: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "item_id": item["item_id"],
+            "run_id": stable_project_execution_id(
+                plan_reference["digest"], item["item_id"], "run"
+            ),
+            "job_ids": [
+                stable_project_execution_id(
+                    plan_reference["digest"], item["item_id"], "transcription"
+                ),
+                stable_project_execution_id(
+                    plan_reference["digest"], item["item_id"], "analysis"
+                ),
+            ],
+        }
+        for item in items
+    ]
+
+
+def run_create_project_execution(args: argparse.Namespace) -> int:
+    if args.concurrency < 1 or args.concurrency > 8:
+        raise ValueError("--concurrency must be between 1 and 8")
+    control = operator_client(args.operator_token_source)
+    _, plan_reference, plan = load_authoritative_project_plan(
+        control, args.plan_job_id, args.r2_credentials_source
+    )
     items = executable_project_plan_items(
         plan,
         item_id=args.item_id,
@@ -7450,28 +7480,274 @@ def run_process_project(args: argparse.Namespace) -> int:
         process_all=args.process_all,
     )
     concurrency = min(args.concurrency, len(items))
+    selection = [item["item_id"] for item in items]
+    execution_basis = {
+        "plan_artifact_sha256": plan_reference["digest"],
+        "plan_hash": plan["plan_hash"],
+        "selection": selection,
+        "recipe": {"id": "watchcraft.youtube-video-processing", "version": "1"},
+        "concurrency": concurrency,
+    }
+    execution_id = str(uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"https://watchcraft.dev/authoring/project-executions/{sha256_hex(canonical_json(execution_basis))}",
+    ))
+    result = control.post("/project-executions/create", {
+        "command_id": str(uuid.uuid4()),
+        "execution": {
+            "execution_id": execution_id,
+            "project": plan["project"],
+            "plan": {
+                "job_id": args.plan_job_id,
+                "artifact": plan_reference,
+                "plan_hash": plan["plan_hash"],
+            },
+            "selection": {"item_ids": selection},
+            "policy": {
+                "recipe": execution_basis["recipe"],
+                "concurrency": concurrency,
+            },
+            "estimate": {
+                "selected_items": len(items),
+                "planned_items": len(plan["items"]),
+                "plan_estimate": plan["estimate"],
+            },
+            "items": project_execution_work(plan_reference, items),
+        },
+    })
+    execution = result["execution"]
+    compact_estimate = compact_project_estimate(plan["estimate"])
+    estimate_details = [
+        f"Estimate basis: full {len(plan['items'])}-item plan; selected: {len(items)}."
+    ]
+    if "expected_seconds" in compact_estimate:
+        estimate_details.append(
+            "Full-plan estimate: "
+            f"{format_duration_seconds(compact_estimate['expected_seconds'])} expected, "
+            f"{format_duration_seconds(compact_estimate['high_seconds'])} conservative; "
+            f"${compact_estimate['expected_cost_usd']:.2f}–${compact_estimate['high_cost_usd']:.2f}."
+        )
+    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True), flush=True)
+    print_operator_handoff(
+        f"Created project execution {execution_id} for {len(items)} item(s).",
+        details=[
+            f"State: {execution['state']}; concurrency: {concurrency}.",
+            *estimate_details,
+            f"Approval digest: {execution['approval_sha256']}",
+            "No media acquisition or processing has started.",
+        ],
+        next_command=(
+            "./authoring/watchcraft-author queue approve-project-execution "
+            f"--operator-token-source keychain {execution_id}"
+        ),
+        next_label="If approved",
+    )
+    return 0
+
+
+def run_approve_project_execution(args: argparse.Namespace) -> int:
+    control = operator_client(args.operator_token_source)
+    current = control.post(
+        "/project-executions/get", {"execution_id": args.execution_id}
+    )["execution"]
+    if current["state"] == "awaiting_approval":
+        result = control.post("/project-executions/approve", {
+            "execution_id": args.execution_id,
+            "command_id": str(uuid.uuid4()),
+            "expected_revision": current["revision"],
+            "actor": "watchcraft-author-cli",
+            "approval_sha256": current["approval_sha256"],
+        })
+    else:
+        result = {"execution": current}
+    execution = result["execution"]
+    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True), flush=True)
+    print_operator_handoff(
+        f"Project execution {args.execution_id} is {execution['state']}.",
+        details=[
+            f"Project: {execution['project']['project_id']} revision {execution['project']['revision']}.",
+            f"Selected items: {len(execution['selection']['item_ids'])}.",
+        ],
+        next_command=(
+            "./authoring/watchcraft-author queue process-project "
+            f"--execution-id {args.execution_id} --operator-token-source keychain "
+            "--r2-staging-credentials-source keychain --r2-credentials-source keychain"
+        ),
+    )
+    return 0
+
+
+def run_process_project(args: argparse.Namespace) -> int:
+    requested_concurrency = args.concurrency if args.concurrency is not None else 2
+    if requested_concurrency < 1 or requested_concurrency > 8:
+        raise ValueError("--concurrency must be between 1 and 8")
+    command_started_at = time.monotonic()
+    control = operator_client(args.operator_token_source)
+    execution = None
+    if args.execution_id is not None:
+        if args.plan_job_id is not None or any((args.item_id, args.limit, args.process_all)):
+            raise ValueError("--execution-id cannot be combined with plan or selection options")
+        execution = control.post(
+            "/project-executions/get", {"execution_id": args.execution_id}
+        )["execution"]
+        if execution["state"] == "awaiting_approval":
+            raise RuntimeError(
+                "Project execution is awaiting approval; run approve-project-execution first"
+            )
+        if execution["state"] in {"cancelled", "complete"}:
+            print(json.dumps({"execution": execution}, ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+        args.plan_job_id = execution["plan"]["job_id"]
+        _, plan_reference, plan = load_authoritative_project_plan(
+            control, args.plan_job_id, args.r2_credentials_source
+        )
+        if (
+            execution["project"] != plan["project"]
+            or execution["plan"]["artifact"] != plan_reference
+            or execution["plan"]["plan_hash"] != plan["plan_hash"]
+        ):
+            raise RuntimeError("Project execution does not match its authoritative plan")
+        planned = {item["item_id"]: item for item in plan["items"]}
+        items = [
+            validate_executable_project_plan_item(planned[item_id])
+            for item_id in execution["selection"]["item_ids"]
+            if item_id in planned
+        ]
+        if len(items) != len(execution["selection"]["item_ids"]):
+            raise RuntimeError("Project execution selection is not covered by its plan")
+        if execution["policy"].get("recipe") != {
+            "id": "watchcraft.youtube-video-processing",
+            "version": "1",
+        }:
+            raise RuntimeError("Project execution recipe is not supported by this CLI")
+        expected_work = project_execution_work(plan_reference, items)
+        actual_work = [
+            {
+                "item_id": item["item_id"],
+                "run_id": item["run_id"],
+                "job_ids": item["job_ids"],
+            }
+            for item in execution["items"]
+        ]
+        if actual_work != expected_work:
+            raise RuntimeError("Project execution has unexpected child run or job identities")
+        concurrency = min(execution["policy"]["concurrency"], len(items))
+    else:
+        if args.plan_job_id is None:
+            raise ValueError("Choose --execution-id or --plan-job-id")
+        if not any((args.item_id, args.limit, args.process_all)):
+            raise ValueError("Direct plan processing requires --all, --limit, or --item")
+        _, plan_reference, plan = load_authoritative_project_plan(
+            control, args.plan_job_id, args.r2_credentials_source
+        )
+        items = executable_project_plan_items(
+            plan,
+            item_id=args.item_id,
+            limit=args.limit,
+            process_all=args.process_all,
+        )
+        concurrency = min(requested_concurrency, len(items))
     print(
         f"executing {len(items)} of {len(plan['items'])} planned items "
         f"with concurrency {concurrency}",
         flush=True,
     )
 
+    execution_owner = f"watchcraft-author-cli:{uuid.uuid4()}"
+    reserved = (
+        {item["item_id"]: item for item in execution["items"]}
+        if execution is not None else {}
+    )
+
     def execute(item: dict[str, Any]) -> dict[str, Any]:
+        reserved_item = reserved.get(item["item_id"])
+        claim_stop = threading.Event()
+        claim_heartbeat: threading.Thread | None = None
+        if execution is not None:
+            claimed = control.post("/project-executions/items/claim", {
+                "execution_id": execution["execution_id"],
+                "item_id": item["item_id"],
+                "command_id": str(uuid.uuid4()),
+                "owner": execution_owner,
+                "lease_duration_ms": 300_000,
+            })["item"]
+            if claimed["state"] == "succeeded":
+                return {
+                    "run_id": claimed["run_id"],
+                    "state": "complete",
+                    "plan_execution": {"disposition": "already-complete"},
+                    "jobs": {
+                        "transcription": {"job_id": claimed["job_ids"][0]},
+                        "analysis": {"job_id": claimed["job_ids"][1]},
+                    },
+                    "timing": {"local": {"command_total_ms": 0}},
+                }
+            def renew_execution_claim() -> None:
+                while not claim_stop.wait(60):
+                    try:
+                        control.post("/project-executions/items/claim", {
+                            "execution_id": execution["execution_id"],
+                            "item_id": item["item_id"],
+                            "command_id": str(uuid.uuid4()),
+                            "owner": execution_owner,
+                            "lease_duration_ms": 300_000,
+                        })
+                    except Exception:
+                        # Completion remains fenced by the last accepted lease. A
+                        # persistent control-plane outage will surface there.
+                        pass
+            claim_heartbeat = threading.Thread(
+                target=renew_execution_claim,
+                name=f"project-execution-{item['item_id']}",
+                daemon=True,
+            )
+            claim_heartbeat.start()
         item_args = argparse.Namespace(**vars(args))
         item_args.youtube_url = item["source"]["canonical_url"]
-        result = run_youtube_video_pipeline(
-            item_args,
-            project_execution=project_item_execution_context(
-                args=args,
-                plan=plan,
-                plan_reference=plan_reference,
-                item=item,
-            ),
-            emit_result=False,
-        )
-        if not isinstance(result, dict):
-            raise RuntimeError(f"Processing {item['item_id']} returned no summary")
-        return result
+        try:
+            result = run_youtube_video_pipeline(
+                item_args,
+                project_execution=project_item_execution_context(
+                    args=args,
+                    plan=plan,
+                    plan_reference=plan_reference,
+                    item=item,
+                ),
+                emit_result=False,
+            )
+            if not isinstance(result, dict):
+                raise RuntimeError(f"Processing {item['item_id']} returned no summary")
+            if execution is not None and reserved_item is not None:
+                claim_stop.set()
+                claim_heartbeat.join(timeout=1)
+                control.post("/project-executions/items/complete", {
+                    "execution_id": execution["execution_id"],
+                    "item_id": item["item_id"],
+                    "command_id": str(uuid.uuid4()),
+                    "owner": execution_owner,
+                    "run_id": result["run_id"],
+                    "job_ids": [
+                        result["jobs"]["transcription"]["job_id"],
+                        result["jobs"]["analysis"]["job_id"],
+                    ],
+                })
+            return result
+        except Exception as error:
+            if execution is not None:
+                claim_stop.set()
+                if claim_heartbeat is not None:
+                    claim_heartbeat.join(timeout=1)
+                try:
+                    control.post("/project-executions/items/fail", {
+                        "execution_id": execution["execution_id"],
+                        "item_id": item["item_id"],
+                        "command_id": str(uuid.uuid4()),
+                        "owner": execution_owner,
+                        "message": str(error),
+                    })
+                except Exception:
+                    pass
+            raise
 
     completed: dict[str, dict[str, Any]] = {}
     failures: dict[str, str] = {}
@@ -7502,6 +7778,7 @@ def run_process_project(args: argparse.Namespace) -> int:
         if item["item_id"] in completed
     ]
     summary = {
+        "execution_id": execution["execution_id"] if execution is not None else None,
         "plan_job_id": args.plan_job_id,
         "plan_artifact_sha256": plan_reference["digest"],
         "plan_hash": plan["plan_hash"],
@@ -9806,8 +10083,15 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
             "queue identities make reruns resume the same pipelines."
         ),
     )
-    process_project.add_argument("--plan-job-id", required=True)
-    selection = process_project.add_mutually_exclusive_group(required=True)
+    process_project.add_argument(
+        "--execution-id",
+        help="Process or resume an approved durable project execution",
+    )
+    process_project.add_argument(
+        "--plan-job-id",
+        help="Compatibility path: process directly from an immutable plan",
+    )
+    selection = process_project.add_mutually_exclusive_group()
     selection.add_argument(
         "--limit",
         type=int,
@@ -9828,7 +10112,7 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         "--concurrency",
         type=int,
         default=2,
-        help="Maximum simultaneous item pipelines, from 1 to 8 (default: 2)",
+        help="Direct-plan maximum concurrency, from 1 to 8 (default: 2)",
     )
     process_project.add_argument(
         "--transcription-timeout-seconds", type=int, default=3600
@@ -9846,6 +10130,52 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         default="auto",
         help="Temporary source-media uploader credential source (default: auto)",
     )
+    create_execution = commands.add_parser(
+        "create-project-execution",
+        parents=[credentials],
+        help="Create an approval-bound execution from an immutable project plan",
+        description=(
+            "Select exact project-plan items, reserve their deterministic child runs "
+            "and jobs, and persist the estimate and execution policy before approval. "
+            "This command does not acquire media or start processing."
+        ),
+    )
+    create_execution.add_argument("--plan-job-id", required=True)
+    execution_selection = create_execution.add_mutually_exclusive_group(required=True)
+    execution_selection.add_argument("--limit", type=int, help="Select the first N plan items")
+    execution_selection.add_argument("--item", dest="item_id", help="Select one exact plan item ID")
+    execution_selection.add_argument(
+        "--all", dest="process_all", action="store_true", help="Select every plan item"
+    )
+    create_execution.add_argument(
+        "--concurrency", type=int, default=2,
+        help="Approved maximum simultaneous item pipelines, from 1 to 8 (default: 2)",
+    )
+    create_execution.add_argument(
+        "--r2-credentials-source",
+        choices=("auto", "keychain", "environment"),
+        default="auto",
+        help="Read-only plan credential source (default: auto)",
+    )
+    approve_execution = commands.add_parser(
+        "approve-project-execution",
+        parents=[credentials],
+        help="Approve the exact immutable project execution proposal",
+    )
+    approve_execution.add_argument("execution_id")
+    execution_status = commands.add_parser(
+        "project-execution-status",
+        parents=[credentials],
+        help="Show one durable project execution",
+    )
+    execution_status.add_argument("execution_id")
+    execution_list = commands.add_parser(
+        "project-execution-list",
+        parents=[credentials],
+        help="List recent durable project executions",
+    )
+    execution_list.add_argument("--project-id")
+    execution_list.add_argument("--limit", type=int, default=20)
     resolve_terminology = commands.add_parser(
         "resolve-project-terminology",
         parents=[credentials],
@@ -10329,6 +10659,10 @@ def run_queue_command(args: argparse.Namespace) -> int:
         return run_iterate_project(args)
     if args.queue_command == "plan-project":
         return run_plan_project(args)
+    if args.queue_command == "create-project-execution":
+        return run_create_project_execution(args)
+    if args.queue_command == "approve-project-execution":
+        return run_approve_project_execution(args)
     if args.queue_command == "process-project":
         return run_process_project(args)
     if args.queue_command == "resolve-project-terminology":
@@ -10368,6 +10702,36 @@ def run_queue_command(args: argparse.Namespace) -> int:
                 if isinstance(project, dict)
                 else f"Catalog project {args.project_id} was not found."
             )
+        )
+        return 0
+    if args.queue_command == "project-execution-status":
+        result = control.post(
+            "/project-executions/get", {"execution_id": args.execution_id}
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True), flush=True)
+        execution = result["execution"]
+        counts = Counter(item["state"] for item in execution["items"])
+        print_operator_handoff(
+            f"Project execution {execution['execution_id']} is {execution['state']}.",
+            details=[
+                f"Project: {execution['project']['project_id']} revision {execution['project']['revision']}.",
+                ", ".join(f"{state}: {count}" for state, count in sorted(counts.items())),
+            ],
+        )
+        return 0
+    if args.queue_command == "project-execution-list":
+        body: dict[str, Any] = {"limit": args.limit}
+        if args.project_id is not None:
+            body["project_id"] = args.project_id
+        result = control.post("/project-executions/list", body)
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True), flush=True)
+        executions = result["executions"]
+        print_operator_handoff(
+            f"Found {len(executions)} recent project execution(s).",
+            details=[
+                f"{item['execution_id']}: {item['project']['project_id']} r{item['project']['revision']} — {item['state']}"
+                for item in executions[:10]
+            ],
         )
         return 0
     if args.queue_command == "project-history":

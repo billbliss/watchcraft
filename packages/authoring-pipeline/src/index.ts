@@ -4,6 +4,7 @@ export * from "./control-client.ts";
 export * from "./project-contracts.ts";
 export * from "./project-control-contracts.ts";
 export * from "./project-registry.ts";
+export * from "./project-execution.ts";
 export * from "./registry.ts";
 export * from "./run-state-machine.ts";
 export * from "./state-machine.ts";

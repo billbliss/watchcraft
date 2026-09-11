@@ -48,9 +48,8 @@ R2 upload silently changes published collection content.
 Each independently changing state machine is stored as one versioned JSON-like
 Convex document rather than being normalized by field across SQL-style tables:
 
-- an `AuthoringRun` represents a requested collection-level outcome and binds the
-  source snapshot, plan, approval, task graph, completeness result, and publication
-  result; and
+- an `AuthoringRun` represents one requested pipeline outcome and binds its request,
+  approval, ordered or concurrent jobs, completeness result, and failure result; and
 - an `AuthoringJob` represents one leaseable task that produces or validates one
   typed artifact.
 
@@ -92,6 +91,45 @@ Convex mutations perform compare-and-swap validation and atomically either:
 An append-only event record may be written in the same Convex transaction for audit
 and diagnostics. It is a projection of an accepted transition, not a second source of
 current state and not something that must be replayed to understand the aggregate.
+
+### Durable project executions
+
+An immutable project-processing plan is a proposal, not authority to execute it. A
+`ProjectExecution` is the durable approval and coordination boundary between planning
+and item processing. It binds, in one revisioned aggregate:
+
+- the exact `CatalogProject` ID and revision;
+- the successful plan job, content-addressed plan artifact, and internal plan hash;
+- the ordered item selection;
+- the recipe version and maximum concurrency;
+- the estimate shown to the approving operator;
+- deterministic child run and job IDs for every selected item; and
+- the approving actor, time, and digest of all the preceding fields.
+
+Creating an execution performs no acquisition and starts no worker. Approval verifies
+that the project revision is still current and that the referenced plan artifact is
+the successful result of a planner job bound to that revision. Changing selection,
+policy, estimate, plan, or child identities changes the approval digest and therefore
+requires another execution proposal.
+
+Each selected item is an independently reservable unit within the aggregate. Before
+performing local acquisition, an operator process must obtain a bounded item claim.
+Convex serializes claims and records their owner and expiry, preventing two portal or
+CLI invocations from acquiring the same source concurrently. The claimant may only
+complete the item with the predeclared child run and job IDs. A failed or expired item
+can be reclaimed and resumes those deterministic child pipelines. An active operator
+renews a short item claim while it coordinates the child pipeline, so an interrupted
+operator becomes recoverable without waiting for a worker-scale timeout. Successful
+items are never repeated. The execution is complete only when every selected item
+succeeds.
+
+This aggregate sits above `AuthoringRun` and `AuthoringJob`; it does not replace them.
+The execution answers “what approved project work are we coordinating?”, a child run
+answers “what is the state of this item's pipeline?”, and a child job remains the
+leaseable producer of one typed artifact. Collection-wide terminology, normalization,
+compilation, and publication may later be incorporated into a broader recipe, but the
+initial execution boundary deliberately covers the selected per-item transcription
+and analysis pipelines.
 
 ### Job lifecycle and leases
 
