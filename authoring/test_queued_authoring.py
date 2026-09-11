@@ -30,7 +30,7 @@ def registry_snapshot(
 ):
     if terminology_resolution:
         return {
-            "registry_version": "2026-09-10.7",
+            "registry_version": "2026-09-10.8",
             "registry_sha256": "c" * 64,
             "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
                 queued_authoring.TERMINOLOGY_RESOLUTION_HANDLER
@@ -41,7 +41,7 @@ def registry_snapshot(
         }
     if collection_compilation:
         return {
-            "registry_version": "2026-09-10.7",
+            "registry_version": "2026-09-10.8",
             "registry_sha256": "c" * 64,
             "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
                 queued_authoring.COLLECTION_COMPILATION_HANDLER
@@ -52,7 +52,7 @@ def registry_snapshot(
         }
     if topic_normalization:
         return {
-            "registry_version": "2026-09-10.7",
+            "registry_version": "2026-09-10.8",
             "registry_sha256": "c" * 64,
             "handler": queued_authoring.LOCAL_HANDLER_CONTRACTS[
                 queued_authoring.TOPIC_NORMALIZATION_HANDLER
@@ -2634,6 +2634,10 @@ class QueuedAuthoringTests(unittest.TestCase):
                     "canonical_key": "i-hat, j-hat, k-hat",
                     "canonical_label": "i-hat, j-hat, k-hat",
                 },
+                "matrix encoding of linear transformations": {
+                    "canonical_key": "matrix encoding of linear transformations",
+                    "canonical_label": "matrix encoding of linear transformations",
+                },
             },
             "display_labels": {
                 "basis vectors i-hat and j-hat": "basis vectors i Hat & j Hat",
@@ -2644,6 +2648,9 @@ class QueuedAuthoringTests(unittest.TestCase):
                     "columns images of basis vectors"
                 ),
                 "i-hat, j-hat, k-hat": "ijk Basis Vectors",
+                "matrix encoding of linear transformations": (
+                    "Linear Transformation Encoding"
+                ),
             },
         }
         terminology = {
@@ -2651,6 +2658,14 @@ class QueuedAuthoringTests(unittest.TestCase):
                 {
                     "observed_forms": ["i_hat"],
                     "display_label": "i-hat",
+                    "disposition": "automatic-safe",
+                },
+                {
+                    "observed_forms": [
+                        "matrix encoding of linear transformations",
+                        "Matrix encoding of linear transformations",
+                    ],
+                    "display_label": "matrix encoding of linear transformations",
                     "disposition": "automatic-safe",
                 },
                 {
@@ -2682,6 +2697,10 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertEqual(
             labels["i-hat, j-hat, k-hat"],
             "i-hat j-hat k-hat",
+        )
+        self.assertEqual(
+            labels["matrix encoding of linear transformations"],
+            "Linear Transformation Encoding",
         )
 
     def test_collection_topic_normalizer_uses_the_existing_normalization_core(self):

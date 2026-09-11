@@ -92,7 +92,7 @@ PROJECT_PROCESSING_PLANNER_HANDLER = (
 )
 TOPIC_NORMALIZATION_HANDLER = (
     "watchcraft.normalize.collection-topics",
-    "4",
+    "5",
 )
 PRE_TERMINOLOGY_TOPIC_NORMALIZATION_HANDLER = (
     "watchcraft.normalize.collection-topics",
@@ -100,7 +100,7 @@ PRE_TERMINOLOGY_TOPIC_NORMALIZATION_HANDLER = (
 )
 COLLECTION_COMPILATION_HANDLER = (
     "watchcraft.compile.video-collection",
-    "5",
+    "6",
 )
 PYTHON_EXECUTION_PROFILE = ("python-portable", "1")
 PYTHON_EXECUTION_WORKFLOW = "authoring-worker.yml"
@@ -1301,7 +1301,13 @@ def apply_automatic_terminology_to_display_labels(
         desired_tokens = re.findall(r"[A-Za-z0-9]+", display)
         if not desired_tokens:
             continue
-        variants = [display, *item.get("observed_forms", [])]
+        observed_forms = item.get("observed_forms", [])
+        variants = [display, *observed_forms]
+        protects_notation = any(
+            isinstance(observed, str)
+            and observed.casefold() != display.casefold()
+            for observed in observed_forms
+        )
         patterns = []
         for variant in variants:
             if not isinstance(variant, str):
@@ -1318,17 +1324,17 @@ def apply_automatic_terminology_to_display_labels(
                 flags=re.IGNORECASE,
             ))
         if patterns:
-            styles.append((display, patterns))
+            styles.append((display, patterns, protects_notation))
 
     def style(value: str) -> tuple[str, set[str]]:
         styled = value
         present = set()
-        for display, patterns in styles:
+        for display, patterns, protects_notation in styles:
             matched = False
             for pattern in patterns:
                 styled, count = pattern.subn(lambda _match: display, styled)
                 matched = matched or bool(count)
-            if matched:
+            if matched and protects_notation:
                 present.add(display)
         return styled, present
 
