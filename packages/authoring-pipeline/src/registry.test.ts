@@ -165,7 +165,7 @@ const topicNormalizationSpec = {
   operation: "generate" as const,
   artifact_kind: "topic-normalization",
   output_schema: { id: "watchcraft.topic-normalization", version: 1 },
-  handler: { id: "watchcraft.normalize.collection-topics", version: "7" },
+  handler: { id: "watchcraft.normalize.collection-topics", version: "8" },
   source: { media_asset_id: "catalog-project:essence-of-linear-algebra" },
   inputs: [],
   dependencies: [firstAnalysisArtifact, secondAnalysisArtifact, terminologyResolutionArtifact],
@@ -277,7 +277,7 @@ test("the checked-in registry is valid, stable, and fully resolves an approved j
   const registry = parseCapabilityRegistry(DEFAULT_CAPABILITY_REGISTRY);
   const spec = resolveJobSpecAgainstRegistry(lexicalSpec, registry);
 
-  assert.equal(spec.registry_snapshot?.registry_version, "2026-09-12.1");
+  assert.equal(spec.registry_snapshot?.registry_version, "2026-09-12.2");
   assert.equal(spec.registry_snapshot?.registry_sha256, capabilityRegistrySha256(registry));
   assert.equal(spec.registry_snapshot?.execution_profile.id, "python-portable");
   assert.equal(spec.registry_snapshot?.execution_profile.dispatcher.workflow, "authoring-worker.yml");

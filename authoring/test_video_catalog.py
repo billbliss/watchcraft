@@ -40,6 +40,7 @@ from normalize_topics import (
     finalize_canonical_assignments,
     label_batch,
     load_state,
+    lowercase_display_label,
     make_related_symmetric,
     mechanically_equivalent,
     prune_related_topics,
@@ -1495,13 +1496,20 @@ class FormattingTests(unittest.TestCase):
         self.assertIsNone(display_label_error("Essential Sound", set()))
         self.assertIsNone(display_label_error("Basis Vectors i-hat and j-hat", set()))
         self.assertIsNone(display_label_error("pH Measurement", set()))
-        self.assertIn(
-            "headline-capitalized",
-            display_label_error("Crankcase oil pan", set()),
+        self.assertEqual(
+            lowercase_display_label("Crankcase Oil Pan"),
+            "crankcase oil pan",
         )
-        self.assertIn(
-            "headline-capitalized",
-            display_label_error("internal Combustion Engine", set()),
+        self.assertEqual(
+            lowercase_display_label(
+                "DaVinci Resolve H.264 Export",
+                ["DaVinci Resolve"],
+            ),
+            "DaVinci Resolve H.264 export",
+        )
+        self.assertEqual(
+            lowercase_display_label("DaVinci Resolve H.264 Export"),
+            "DaVinci Resolve H.264 export",
         )
         self.assertIn(
             "characters",
@@ -1521,29 +1529,29 @@ class FormattingTests(unittest.TestCase):
             deterministic_display_label(
                 "Fermentation timing and dough rest", set()
             ),
-            "Fermentation Timing & Dough Rest",
+            "fermentation timing & dough rest",
         )
         self.assertEqual(
             deterministic_display_label(
                 "Mediterranean braised green beans (Andrew Janjigian)",
                 {"braised green beans"},
             ),
-            "Mediterranean Braised Beans",
+            "mediterranean braised beans",
         )
         self.assertEqual(
             deterministic_display_label(
                 "pan materials: cast iron, carbon steel, non-stick",
                 {"pan material comparison"},
             ),
-            "Pan Materials",
+            "pan materials",
         )
         self.assertEqual(
             deterministic_display_label("body-on-frame construction", set()),
-            "Body-on-Frame Construction",
+            "body-on-frame construction",
         )
         self.assertEqual(
             deterministic_display_label("engine vs motor", set()),
-            "Engine vs Motor",
+            "engine vs motor",
         )
         self.assertEqual(
             deterministic_display_label(
@@ -1551,7 +1559,7 @@ class FormattingTests(unittest.TestCase):
                 {"drain pitch"},
                 preferred_label="Drain Pitch",
             ),
-            "Drain Pitch Overview",
+            "drain pitch overview",
         )
         self.assertEqual(
             deterministic_display_label(
@@ -1559,7 +1567,7 @@ class FormattingTests(unittest.TestCase):
                 {"basement drain routing"},
                 preferred_label="Basement Drain Routing",
             ),
-            "Finished Basement Drain Routing",
+            "finished basement drain routing",
         )
 
     def test_duplicate_display_label_gets_deterministic_qualifier(self):
@@ -1568,7 +1576,7 @@ class FormattingTests(unittest.TestCase):
                 generated = GeneratedDisplayLabels(
                     labels=[
                         DisplayLabelDecision(
-                            source_id="D001", label="Drain Pitch"
+                            source_id="D001", label="Drain Pitch", protected_forms=[]
                         )
                     ]
                 )
@@ -1593,7 +1601,7 @@ class FormattingTests(unittest.TestCase):
                 reserved_labels=["Drain Pitch"],
                 retries=0,
             ),
-            {"drain pitch": "Drain Pitch Overview"},
+            {"drain pitch": "drain pitch overview"},
         )
 
     def test_display_label_failure_preserves_valid_partial_results(self):
@@ -1610,10 +1618,10 @@ class FormattingTests(unittest.TestCase):
                     generated = GeneratedDisplayLabels(
                         labels=[
                             DisplayLabelDecision(
-                                source_id="D001", label="Useful Topic"
+                                source_id="D001", label="Useful Topic", protected_forms=[]
                             ),
                             DisplayLabelDecision(
-                                source_id="D002", label=long_label
+                                source_id="D002", label=long_label, protected_forms=[]
                             ),
                         ]
                     )
@@ -1621,7 +1629,7 @@ class FormattingTests(unittest.TestCase):
                     generated = GeneratedDisplayLabels(
                         labels=[
                             DisplayLabelDecision(
-                                source_id="D001", label=long_label
+                                source_id="D001", label=long_label, protected_forms=[]
                             )
                         ]
                     )
@@ -1654,7 +1662,7 @@ class FormattingTests(unittest.TestCase):
                 retries=0,
             )
 
-        self.assertEqual(raised.exception.completed, {valid: "Useful Topic"})
+        self.assertEqual(raised.exception.completed, {valid: "useful topic"})
         self.assertEqual(raised.exception.remaining, [invalid])
         self.assertIn("characters", raised.exception.rejected[invalid])
 

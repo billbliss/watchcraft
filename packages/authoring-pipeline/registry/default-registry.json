@@ -1,7 +1,7 @@
 {
   "kind": "watchcraft.authoring-capability-registry",
   "schema_version": 1,
-  "registry_version": "2026-09-12.1",
+  "registry_version": "2026-09-12.2",
   "handlers": [
     {
       "id": "watchcraft.analysis.lexical",
@@ -131,7 +131,7 @@
     },
     {
       "id": "watchcraft.normalize.collection-topics",
-      "version": "7",
+      "version": "8",
       "operation": "generate",
       "inputs": [
         {

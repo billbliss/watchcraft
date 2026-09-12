@@ -33,7 +33,7 @@ NORMALIZATION_MODEL_ENV = "VIDEO_CATALOG_NORMALIZATION_MODEL"
 BUILTIN_NORMALIZATION_MODEL = "gpt-5.4-mini"
 NORMALIZATION_SCHEMA_VERSION = 1
 NORMALIZATION_PROMPT_VERSION = 2
-DISPLAY_LABEL_PROMPT_VERSION = 2
+DISPLAY_LABEL_PROMPT_VERSION = 3
 DEFAULT_BATCH_SIZE = 40
 MAX_DISPLAY_LABEL_CHARS = 32
 MIN_DISPLAY_LABEL_WORDS = 2
@@ -83,6 +83,7 @@ class GeneratedRelatedTopics(StrictModel):
 class DisplayLabelDecision(StrictModel):
     source_id: str
     label: str
+    protected_forms: list[str]
 
 
 class GeneratedDisplayLabels(StrictModel):
@@ -153,96 +154,76 @@ Rules:
 - Remove parenthetical examples, keyboard-shortcut lists, settings, and enumerations.
 - Do not use commas, colons, semicolons, parentheses, or square brackets.
 - Labels must be unique within this batch and must not duplicate reserved_labels.
-- Use domain-aware headline capitalization consistently across every label. Capitalize
-  substantive words, but preserve conventional technical forms and proper names exactly,
-  such as "i-hat", "pH", "H.264", "macOS", and "DaVinci Resolve". Do not mechanically
-  capitalize variable names, acronyms, or branded spellings.
-- Prefer natural title-style labels such as "Multi-Camera Editing", "Essential Sound",
-  "Lumetri Scopes", "Transcript-Based Editing", or "Video Transitions".
+- Use lowercase for ordinary language. Preserve conventional casing only for notation,
+  acronyms, brands, and proper names, such as "i-hat", "pH", "H.264", "macOS",
+  "YouTube", and "DaVinci Resolve".
+- protected_forms: copy the exact conventionally cased substrings that must not be
+  lowercased. Use an empty list for ordinary subject terms. Never protect a generic
+  concept merely because it appeared in title case in the input.
+- Prefer calm labels such as "multi-camera editing", "essential sound",
+  "Lumetri scopes", "transcript-based editing", or "video transitions".
 - Do not broaden a specific topic into only its family name.
 """
 
 
-DISPLAY_LABEL_MINOR_WORDS = {
-    "a", "an", "and", "as", "at", "but", "by", "for", "from", "in", "into",
-    "nor", "of", "on", "or", "over", "per", "the", "to", "via", "vs", "with",
-}
-
-
-def conventional_lowercase_display_word(word: str) -> bool:
-    """Recognize compact variable notation whose lowercase spelling is meaningful."""
-    token = word.strip("'\"")
-    return bool(
-        re.fullmatch(r"[a-z]", token)
-        or re.fullmatch(r"(?:[a-z]|yt)-(?:hat|axis|value|test|score|dlp)", token)
-    )
-
-
-def display_label_case_error(label: str) -> str | None:
-    words = label.split()
-    for index, raw_word in enumerate(words):
-        word = raw_word.strip("'\".,")
-        if not word or not any(character.isalpha() for character in word):
-            continue
-        if word[0].isdigit():
-            continue
-        if conventional_lowercase_display_word(word):
-            continue
+def intrinsically_cased_display_forms(label: str) -> list[str]:
+    """Find tokens whose internal form carries more information than title casing."""
+    tokens = re.findall(r"[A-Za-z0-9]+(?:[.+/#-][A-Za-z0-9]+)*", label)
+    forms = []
+    for index, token in enumerate(tokens):
+        letters = "".join(character for character in token if character.isalpha())
+        parts = re.split(r"[.+/#-]", token)
+        has_internal_uppercase = any(
+            any(character.isupper() for character in part[1:])
+            for part in parts
+        )
         if (
-            word in DISPLAY_LABEL_MINOR_WORDS
-            and index not in {0, len(words) - 1}
-        ):
-            continue
-        if any(character.isupper() for character in word[1:]) and word[0].islower():
-            continue
-        for part_index, part in enumerate(word.split("-")):
-            if not part or part[0].isdigit():
-                continue
-            if (
-                part in DISPLAY_LABEL_MINOR_WORDS
-                and part_index > 0
-            ):
-                continue
-            if part[0].islower():
-                return f"substantive word {word!r} is not headline-capitalized"
-    return None
-
-
-def headline_case_display_label(label: str) -> str:
-    words = label.split()
-    result = []
-    for index, word in enumerate(words):
-        comparison = word.strip("'\"")
-        if comparison and comparison[0].isdigit():
-            result.append(word)
-            continue
-        if (
-            conventional_lowercase_display_word(comparison)
+            (len(letters) > 1 and letters.isupper())
+            or has_internal_uppercase
             or (
-                comparison[:1].islower()
-                and any(character.isupper() for character in comparison[1:])
-            )
-            or (
-                comparison in DISPLAY_LABEL_MINOR_WORDS
-                and index not in {0, len(words) - 1}
+                any(character.isdigit() for character in token)
+                and any(character.isupper() for character in token)
             )
         ):
-            result.append(word)
-            continue
-        parts = word.split("-")
-        styled_parts = []
-        for part_index, part in enumerate(parts):
+            form = token
+            # Preserve a conventional two-word name such as "DaVinci Resolve" or
+            # "YouTube Studio" when its distinctive first token proves this is not
+            # merely ordinary title casing. Do not extend notation such as H.264.
             if (
-                part in DISPLAY_LABEL_MINOR_WORDS
-                and part_index > 0
+                token.isalpha()
+                and index + 1 < len(tokens)
+                and re.fullmatch(r"[A-Z][a-z]+", tokens[index + 1])
             ):
-                styled_parts.append(part)
-            elif part:
-                styled_parts.append(part[:1].upper() + part[1:])
-            else:
-                styled_parts.append(part)
-        result.append("-".join(styled_parts))
-    return " ".join(result)
+                form = f"{token} {tokens[index + 1]}"
+            forms.append(form)
+    return forms
+
+
+def lowercase_display_label(
+    label: str, protected_forms: list[str] | None = None
+) -> str:
+    """Lowercase ordinary language while preserving explicitly meaningful casing."""
+    protected = [
+        " ".join(form.split())
+        for form in [*(protected_forms or []), *intrinsically_cased_display_forms(label)]
+        if isinstance(form, str) and form.strip()
+    ]
+    protected = list(dict.fromkeys(sorted(protected, key=lambda form: -len(form))))
+    result = " ".join(label.split())
+    replacements = {}
+    for index, form in enumerate(protected):
+        marker = f"@@{index}@@"
+        pattern = re.compile(
+            r"(?<![A-Za-z0-9])" + re.escape(form) + r"(?![A-Za-z0-9])",
+            flags=re.IGNORECASE,
+        )
+        result, count = pattern.subn(marker, result)
+        if count:
+            replacements[marker] = form
+    result = result.lower()
+    for marker, form in replacements.items():
+        result = result.replace(marker, form)
+    return result
 
 
 def now_iso() -> str:
@@ -728,9 +709,6 @@ def display_label_error(label: str, reserved_keys: set[str]) -> str | None:
             f"label must contain {MIN_DISPLAY_LABEL_WORDS} to "
             f"{MAX_DISPLAY_LABEL_WORDS} words"
         )
-    case_error = display_label_case_error(label)
-    if case_error is not None:
-        return case_error
     if canonical_topic_key(label) in reserved_keys:
         return "label duplicates another display label"
     return None
@@ -742,7 +720,7 @@ def deterministic_display_label(
     *,
     preferred_label: str | None = None,
 ) -> str | None:
-    normalized = headline_case_display_label(" ".join(label.split()))
+    normalized = lowercase_display_label(" ".join(label.split()))
     if ":" in normalized:
         prefix = normalized.split(":", 1)[0].strip()
         if display_label_error(prefix, reserved_keys) is None:
@@ -765,7 +743,7 @@ def deterministic_display_label(
     # A model-generated label can be perfectly valid except that an earlier topic
     # already claimed it. Preserve the model's natural wording and add a distinctive
     # word from the canonical topic before falling back to a generic qualifier.
-    preferred = " ".join((preferred_label or "").split())
+    preferred = lowercase_display_label(preferred_label or "")
     if preferred:
         word_pattern = r"[A-Za-z0-9]+(?:[&+./-][A-Za-z0-9]+)*"
         preferred_words = re.findall(word_pattern, preferred)
@@ -804,12 +782,11 @@ def deterministic_display_label(
         ]
         for word in distinctive_words:
             for tail in preferred_tails:
-                title_word = word[:1].upper() + word[1:]
-                disambiguated = " ".join([title_word, *tail])
+                disambiguated = " ".join([word.lower(), *tail])
                 if display_label_error(disambiguated, reserved_keys) is None:
                     return disambiguated
 
-        for qualifier in ("Overview", "Guidance", "Methods", "Concepts"):
+        for qualifier in ("overview", "guidance", "methods", "concepts"):
             disambiguated = f"{preferred} {qualifier}"
             if display_label_error(disambiguated, reserved_keys) is None:
                 return disambiguated
@@ -876,7 +853,28 @@ def label_batch(
             key = source_ids.get(decision.source_id)
             if not key or key in results:
                 continue
-            label = " ".join(decision.label.split())
+            protected_forms = list(dict.fromkeys(
+                " ".join(form.split())
+                for form in decision.protected_forms
+                if form.strip()
+            ))
+            evidence = "\n".join([
+                canonical[key]["label"],
+                *canonical[key]["contexts"],
+            ]).casefold()
+            unsupported = [
+                form
+                for form in protected_forms
+                if form.casefold() not in evidence
+                or form.casefold() not in decision.label.casefold()
+            ]
+            if unsupported:
+                rejected[key] = (
+                    f"protected forms are not grounded in the topic corpus: {unsupported}"
+                )
+                rejected_labels[key] = decision.label
+                continue
+            label = lowercase_display_label(decision.label, protected_forms)
             error = display_label_error(label, reserved_keys)
             if error:
                 rejected[key] = f"{label!r}: {error}"

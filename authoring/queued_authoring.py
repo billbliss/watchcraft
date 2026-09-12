@@ -98,7 +98,7 @@ PROJECT_PROCESSING_PLANNER_HANDLER = (
 SUPPORTED_PROJECT_PROCESSING_PLANNER_VERSIONS = {"1", "2"}
 TOPIC_NORMALIZATION_HANDLER = (
     "watchcraft.normalize.collection-topics",
-    "7",
+    "8",
 )
 PRE_TERMINOLOGY_TOPIC_NORMALIZATION_HANDLER = (
     "watchcraft.normalize.collection-topics",
@@ -183,7 +183,7 @@ PROJECT_ESTIMATION_POLICY = {
 }
 TOPIC_NORMALIZATION_MODEL = "gpt-5.4-mini"
 TOPIC_NORMALIZATION_PROMPT_VERSION = 2
-TOPIC_DISPLAY_LABEL_PROMPT_VERSION = 2
+TOPIC_DISPLAY_LABEL_PROMPT_VERSION = 3
 TOPIC_NORMALIZATION_BATCH_SIZE = 40
 TOPIC_NORMALIZATION_RETRIES = 5
 TOPIC_NORMALIZATION_TIMEOUT_SECONDS = 300
@@ -1436,7 +1436,11 @@ def apply_automatic_terminology(
 def apply_automatic_terminology_to_display_labels(
     normalization: dict[str, Any], resolution: dict[str, Any]
 ) -> dict[str, str]:
-    from normalize_topics import deterministic_display_label, display_label_error
+    from normalize_topics import (
+        deterministic_display_label,
+        display_label_error,
+        lowercase_display_label,
+    )
 
     automatic = [
         item
@@ -1448,6 +1452,7 @@ def apply_automatic_terminology_to_display_labels(
         display = item.get("display_label")
         if not isinstance(display, str) or not display:
             continue
+        display = lowercase_display_label(display)
         desired_tokens = re.findall(r"[A-Za-z0-9]+", display)
         if not desired_tokens:
             continue
@@ -1533,7 +1538,9 @@ def apply_automatic_terminology_to_display_labels(
         )
         candidates = []
         if context is not None:
-            candidates.append(f"{context.title()} {joined}")
+            candidates.append(lowercase_display_label(
+                f"{context} {joined}", required
+            ))
         candidates.append(joined)
         for candidate in candidates:
             if display_label_error(candidate, reserved) is None:
@@ -1561,6 +1568,8 @@ def apply_automatic_terminology_to_display_labels(
         canonical_label = canonical_labels.get(key, key)
         styled_canonical, _required = style(canonical_label)
         required = protected_terms(styled_canonical)
+        styled_canonical = lowercase_display_label(styled_canonical, required)
+        styled_label = lowercase_display_label(styled_label, required)
         canonical_error = display_label_error(styled_canonical, set())
         approved_atomic = (
             len(required) == 1
@@ -1602,6 +1611,7 @@ def apply_automatic_terminology_to_display_labels(
         label = repaired[key]
         canonical_label, _ = style(canonical_labels.get(key, key))
         required = protected_terms(canonical_label)
+        canonical_label = lowercase_display_label(canonical_label, required)
         if any(not contains_term(label, term) for term in required):
             fallback = protected_fallback(canonical_label, required, set(by_identity))
             if fallback is None:

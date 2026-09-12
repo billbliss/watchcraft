@@ -3469,11 +3469,11 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertEqual(labels["i-hat and j-hat"], "i-hat and j-hat")
         self.assertEqual(
             labels["basis vectors i-hat, j-hat, k-hat"],
-            "Basis i-hat j-hat k-hat",
+            "basis i-hat j-hat k-hat",
         )
         self.assertEqual(
             labels["columns as images of basis vectors (i-hat, j-hat)"],
-            "Columns i-hat j-hat",
+            "columns i-hat j-hat",
         )
         self.assertEqual(
             labels["i-hat, j-hat, k-hat"],
@@ -3481,12 +3481,57 @@ class QueuedAuthoringTests(unittest.TestCase):
         )
         self.assertEqual(
             labels["matrix encoding of linear transformations"],
-            "Linear Transformation Encoding",
+            "linear transformation encoding",
         )
         self.assertEqual(
             labels["right-hand rule for cross-product direction"],
-            "Cross-Product Direction",
+            "cross-product direction",
         )
+
+    def test_automatic_terminology_lowercases_every_ordinary_output_path(self):
+        normalization = {
+            "assignments": {
+                "camshaft Drive": {
+                    "canonical_key": "camshaft drive",
+                    "canonical_label": "Camshaft Drive",
+                },
+                "gasket Sealing": {
+                    "canonical_key": "gasket sealing",
+                    "canonical_label": "Gasket Sealing",
+                },
+                "Piston Pin": {
+                    "canonical_key": "piston pin",
+                    "canonical_label": "Piston Pin",
+                },
+            },
+            "display_labels": {
+                "camshaft drive": "Camshaft Drive",
+                "gasket sealing": "Gasket Sealing",
+                "piston pin": "Piston Pin",
+            },
+        }
+        terminology = {
+            "resolutions": [
+                {
+                    "observed_forms": ["Camshaft"],
+                    "display_label": "camshaft",
+                    "disposition": "automatic-safe",
+                },
+                {
+                    "observed_forms": ["Gasket"],
+                    "display_label": "gasket",
+                    "disposition": "automatic-safe",
+                },
+            ],
+        }
+
+        labels = queued_authoring.apply_automatic_terminology_to_display_labels(
+            normalization, terminology
+        )
+
+        self.assertEqual(labels["camshaft drive"], "camshaft drive")
+        self.assertEqual(labels["gasket sealing"], "gasket sealing")
+        self.assertEqual(labels["piston pin"], "piston pin")
 
     def test_collection_topic_normalizer_uses_the_existing_normalization_core(self):
         references = []
