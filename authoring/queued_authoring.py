@@ -98,7 +98,7 @@ PROJECT_PROCESSING_PLANNER_HANDLER = (
 SUPPORTED_PROJECT_PROCESSING_PLANNER_VERSIONS = {"1", "2"}
 TOPIC_NORMALIZATION_HANDLER = (
     "watchcraft.normalize.collection-topics",
-    "6",
+    "7",
 )
 PRE_TERMINOLOGY_TOPIC_NORMALIZATION_HANDLER = (
     "watchcraft.normalize.collection-topics",
@@ -183,7 +183,7 @@ PROJECT_ESTIMATION_POLICY = {
 }
 TOPIC_NORMALIZATION_MODEL = "gpt-5.4-mini"
 TOPIC_NORMALIZATION_PROMPT_VERSION = 2
-TOPIC_DISPLAY_LABEL_PROMPT_VERSION = 1
+TOPIC_DISPLAY_LABEL_PROMPT_VERSION = 2
 TOPIC_NORMALIZATION_BATCH_SIZE = 40
 TOPIC_NORMALIZATION_RETRIES = 5
 TOPIC_NORMALIZATION_TIMEOUT_SECONDS = 300
@@ -7293,12 +7293,27 @@ def completed_project_compilation_inputs(
         plan=plan,
         plan_reference=plan_reference,
     )
-    normalization_job_id = stable_project_execution_id(
+    baseline_reference = previous_project_topic_normalization(
+        control,
+        plan_job_id=plan_job_id,
+        plan=plan,
+        plan_reference=plan_reference,
+    )
+    normalization_spec = project_topic_normalization_spec(
+        plan_job_id=plan_job_id,
+        plan_reference=plan_reference,
+        plan=plan,
+        dependencies=analysis_references,
+        bindings=analysis_bindings,
+        terminology_reference=terminology_reference,
+        baseline_reference=baseline_reference,
+    )
+    normalization_job_id = spec_bound_project_execution_id(
         plan_reference["digest"],
         project_item_id,
-        versioned_handler_execution_role(
-            "topic-normalization", TOPIC_NORMALIZATION_HANDLER
-        ),
+        "topic-normalization",
+        TOPIC_NORMALIZATION_HANDLER,
+        normalization_spec,
     )
     normalization_submission = control.post(
         "/submissions/get", {"job_id": normalization_job_id}
@@ -8091,26 +8106,26 @@ def run_normalize_project(args: argparse.Namespace) -> int:
         baseline_reference=baseline_reference,
     )
     project_item_id = f"catalog-project:{plan['project']['project_id']}"
-    run_id = stable_project_execution_id(
+    run_id = spec_bound_project_execution_id(
         plan_reference["digest"],
         project_item_id,
-        versioned_handler_execution_role(
-            "topic-normalization-run", TOPIC_NORMALIZATION_HANDLER
-        ),
+        "topic-normalization-run",
+        TOPIC_NORMALIZATION_HANDLER,
+        spec,
     )
-    job_id = stable_project_execution_id(
+    job_id = spec_bound_project_execution_id(
         plan_reference["digest"],
         project_item_id,
-        versioned_handler_execution_role(
-            "topic-normalization", TOPIC_NORMALIZATION_HANDLER
-        ),
+        "topic-normalization",
+        TOPIC_NORMALIZATION_HANDLER,
+        spec,
     )
-    command_prefix = stable_project_execution_id(
+    command_prefix = spec_bound_project_execution_id(
         plan_reference["digest"],
         project_item_id,
-        versioned_handler_execution_role(
-            "topic-normalization-commands", TOPIC_NORMALIZATION_HANDLER
-        ),
+        "topic-normalization-commands",
+        TOPIC_NORMALIZATION_HANDLER,
+        spec,
     )
     request = {
         "kind": "project-topic-normalization",
@@ -8225,11 +8240,12 @@ def run_normalize_project(args: argparse.Namespace) -> int:
             f"Normalization job ID: {job_id}",
             f"Canonical topics: {canonical_topics}; families: {families}.",
             f"Elapsed: {format_elapsed(total_ms)}.",
+            "For an update, add --compare-to with the existing collection.json path.",
         ],
         next_command=(
             "./authoring/watchcraft-author queue compile-project "
             f"--plan-job-id {args.plan_job_id} --operator-token-source keychain "
-            "--r2-credentials-source keychain --compare-to PUBLISHED_COLLECTION_JSON"
+            "--r2-credentials-source keychain"
         ),
     )
     return 0
@@ -8329,33 +8345,94 @@ def materialization_diff(
     return "".join(chunks)
 
 
-def run_materialize_project(args: argparse.Namespace) -> int:
-    destination = args.output_directory.resolve()
-    published_collection_path = args.published_collection.resolve()
-    published_root = published_collection_path.parent
-    diff_path = (
-        args.diff_output.resolve()
-        if args.diff_output is not None
-        else Path(f"{destination}.diff")
+def default_draft_collections_root() -> Path:
+    configured = os.environ.get("WATCHCRAFT_DRAFT_COLLECTIONS_ROOT")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    watchcraft_root = Path(__file__).resolve().parents[1]
+    collections_repository = watchcraft_root.parent / "watchcraft-collections"
+    if collections_repository.is_dir():
+        return (collections_repository / "draft-collections").resolve()
+    raise RuntimeError(
+        "Could not locate watchcraft-collections; pass --draft-root or "
+        "--output-directory"
     )
-    if destination.exists():
-        raise RuntimeError(f"Materialization destination already exists: {destination}")
-    if diff_path.exists():
-        raise RuntimeError(f"Materialization diff already exists: {diff_path}")
-    if not destination.parent.is_dir():
-        raise RuntimeError(
-            f"Materialization destination parent does not exist: {destination.parent}"
+
+
+def materialization_destination(
+    args: argparse.Namespace, candidate: dict[str, Any]
+) -> Path:
+    if args.output_directory is not None:
+        if args.draft_root is not None or args.draft_name is not None:
+            raise ValueError(
+                "--output-directory cannot be combined with --draft-root or --draft-name"
+            )
+        return args.output_directory.expanduser().resolve()
+    draft_root = (
+        args.draft_root.expanduser().resolve()
+        if args.draft_root is not None
+        else default_draft_collections_root()
+    )
+    draft_name = args.draft_name or (
+        f"{candidate['collection_id']}-revision-{candidate['revision']}"
+    )
+    if (
+        not draft_name
+        or Path(draft_name).name != draft_name
+        or draft_name in {".", ".."}
+    ):
+        raise ValueError("--draft-name must be one directory name")
+    if not draft_root.exists():
+        if not draft_root.parent.is_dir():
+            raise RuntimeError(f"Draft root parent does not exist: {draft_root.parent}")
+        draft_root.mkdir()
+    elif not draft_root.is_dir():
+        raise RuntimeError(f"Draft root is not a directory: {draft_root}")
+    return draft_root / draft_name
+
+
+def run_materialize_project(args: argparse.Namespace) -> int:
+    if args.output_directory is not None:
+        explicit_destination = args.output_directory.expanduser().resolve()
+        explicit_diff = (
+            args.diff_output.expanduser().resolve()
+            if args.diff_output is not None
+            else Path(f"{explicit_destination}.diff")
         )
-    try:
-        published = json.loads(published_collection_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise RuntimeError(
-            f"Could not read published collection {published_collection_path}"
-        ) from error
+        if explicit_destination.exists():
+            raise RuntimeError(
+                f"Materialization destination already exists: {explicit_destination}"
+            )
+        if explicit_diff.exists():
+            raise RuntimeError(
+                f"Materialization diff already exists: {explicit_diff}"
+            )
+    published_collection_path = (
+        args.published_collection.resolve()
+        if args.published_collection is not None
+        else None
+    )
+    published_root = (
+        published_collection_path.parent
+        if published_collection_path is not None
+        else None
+    )
     from build_collection import render_csv, validate_collection_manifest
-    validate_collection_manifest(published)
-    if published.get("content_hash") != collection_manifest_content_hash(published):
-        raise RuntimeError("Published collection content_hash does not match its content")
+    published = None
+    if published_collection_path is not None:
+        try:
+            published = json.loads(
+                published_collection_path.read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError) as error:
+            raise RuntimeError(
+                f"Could not read published collection {published_collection_path}"
+            ) from error
+        validate_collection_manifest(published)
+        if published.get("content_hash") != collection_manifest_content_hash(published):
+            raise RuntimeError(
+                "Published collection content_hash does not match its content"
+            )
 
     control = operator_client(args.operator_token_source)
     submission = control.post(
@@ -8391,15 +8468,33 @@ def run_materialize_project(args: argparse.Namespace) -> int:
     validate_collection_manifest(manifest)
     if manifest.get("content_hash") != collection_manifest_content_hash(manifest):
         raise RuntimeError("Candidate collection content_hash does not match its content")
-    if manifest["collection_id"] != published["collection_id"]:
+    if published is not None and manifest["collection_id"] != published["collection_id"]:
         raise RuntimeError("Candidate and published collection IDs do not match")
 
     candidate = json.loads(json.dumps(manifest, ensure_ascii=False))
-    content_changed = candidate["content_hash"] != published["content_hash"]
-    candidate["revision"] = (
-        published["revision"] + 1 if content_changed else published["revision"]
-    )
+    if published is None:
+        content_changed = True
+    else:
+        content_changed = candidate["content_hash"] != published["content_hash"]
+        candidate["revision"] = (
+            published["revision"] + 1 if content_changed else published["revision"]
+        )
     validate_collection_manifest(candidate)
+
+    destination = materialization_destination(args, candidate)
+    diff_path = (
+        args.diff_output.expanduser().resolve()
+        if args.diff_output is not None
+        else Path(f"{destination}.diff")
+    )
+    if destination.exists():
+        raise RuntimeError(f"Materialization destination already exists: {destination}")
+    if diff_path.exists():
+        raise RuntimeError(f"Materialization diff already exists: {diff_path}")
+    if not destination.parent.is_dir():
+        raise RuntimeError(
+            f"Materialization destination parent does not exist: {destination.parent}"
+        )
 
     expected_paths = {
         item["analysis"]["path"]
@@ -8471,7 +8566,11 @@ def run_materialize_project(args: argparse.Namespace) -> int:
         for relative in expected_paths:
             if not (temporary / relative).is_file():
                 raise RuntimeError(f"Materialized package is missing {relative}")
-        diff = materialization_diff(published_root, temporary, expected_paths)
+        diff = materialization_diff(
+            published_root or destination.parent / f".{destination.name}.empty-baseline",
+            temporary,
+            expected_paths,
+        )
         diff = diff.replace(str(temporary), str(destination))
         os.replace(temporary, destination)
         try:
@@ -8496,26 +8595,35 @@ def run_materialize_project(args: argparse.Namespace) -> int:
         "content_hash": candidate["content_hash"],
         "content_changed": content_changed,
         "resources": len(resource_payloads),
-        "comparison": collection_comparison(candidate, published),
     }
+    if published is not None:
+        summary["comparison"] = collection_comparison(candidate, published)
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True), flush=True)
     print(
         f"Review with: git apply --stat {diff_path}",
         flush=True,
     )
-    print_operator_handoff(
-        f"Materialized {candidate['collection_id']} revision {candidate['revision']} for review.",
-        details=[
-            f"Candidate directory: {destination}",
-            f"Review diff: {diff_path}",
-            f"Analysis resources: {len(resource_payloads)}.",
-        ],
-        next_command=(
+    details = [
+        f"Candidate directory: {destination}",
+        f"Review diff: {diff_path}",
+        f"Analysis resources: {len(resource_payloads)}.",
+    ]
+    publish_command = None
+    if published_collection_path is not None:
+        publish_command = (
             "./authoring/watchcraft-author queue publish-project "
             f"{job['job_id']} --candidate-directory {destination} "
             f"--published-collection {published_collection_path} "
             "--operator-token-source keychain --r2-credentials-source keychain"
-        ),
+        )
+    else:
+        details.append(
+            "This is a new collection; choose its publication destination after review."
+        )
+    print_operator_handoff(
+        f"Materialized {candidate['collection_id']} revision {candidate['revision']} for review.",
+        details=details,
+        next_command=publish_command,
         next_label="After review",
     )
     return 0
@@ -8881,26 +8989,26 @@ def run_compile_project(args: argparse.Namespace) -> int:
         normalization_reference=normalization_reference,
     )
     project_item_id = f"catalog-project:{project['project_id']}"
-    run_id = stable_project_execution_id(
+    run_id = spec_bound_project_execution_id(
         plan_reference["digest"],
         project_item_id,
-        versioned_handler_execution_role(
-            "collection-compilation-run", COLLECTION_COMPILATION_HANDLER
-        ),
+        "collection-compilation-run",
+        COLLECTION_COMPILATION_HANDLER,
+        spec,
     )
-    job_id = stable_project_execution_id(
+    job_id = spec_bound_project_execution_id(
         plan_reference["digest"],
         project_item_id,
-        versioned_handler_execution_role(
-            "collection-compilation", COLLECTION_COMPILATION_HANDLER
-        ),
+        "collection-compilation",
+        COLLECTION_COMPILATION_HANDLER,
+        spec,
     )
-    command_prefix = stable_project_execution_id(
+    command_prefix = spec_bound_project_execution_id(
         plan_reference["digest"],
         project_item_id,
-        versioned_handler_execution_role(
-            "collection-compilation-commands", COLLECTION_COMPILATION_HANDLER
-        ),
+        "collection-compilation-commands",
+        COLLECTION_COMPILATION_HANDLER,
+        spec,
     )
     request = {
         "kind": "project-collection-compilation",
@@ -9027,21 +9135,15 @@ def run_compile_project(args: argparse.Namespace) -> int:
             f"Compared with revision {comparison['published_revision']}; proposed revision {comparison['proposed_revision']}."
         )
         published_collection = args.compare_to.resolve()
-        review_directory = published_collection.parents[1] / (
-            f"{manifest['collection_id']}-revision-"
-            f"{comparison['proposed_revision']}-review"
-        )
         materialize_command = (
             "./authoring/watchcraft-author queue materialize-project "
             f"{job_id} --published-collection {published_collection} "
-            f"--output-directory {review_directory} "
             "--operator-token-source keychain --r2-credentials-source keychain"
         )
     else:
         materialize_command = (
             "./authoring/watchcraft-author queue materialize-project "
-            f"{job_id} --published-collection PUBLISHED_COLLECTION_JSON "
-            "--output-directory REVIEW_DIRECTORY --operator-token-source keychain "
+            f"{job_id} --operator-token-source keychain "
             "--r2-credentials-source keychain"
         )
     print_operator_handoff(
@@ -9359,6 +9461,23 @@ def stable_project_execution_id(
         uuid.NAMESPACE_URL,
         f"https://watchcraft.dev/authoring/{plan_artifact_sha256}/{item_id}/{role}",
     ))
+
+
+def spec_bound_project_execution_id(
+    plan_artifact_sha256: str,
+    item_id: str,
+    role: str,
+    handler: tuple[str, str],
+    spec: dict[str, Any],
+) -> str:
+    """Identify an execution by both its logical role and immutable job specification."""
+    spec_digest = sha256_hex(canonical_json(spec))
+    execution_role = (
+        f"{versioned_handler_execution_role(role, handler)}:spec:{spec_digest}"
+    )
+    return stable_project_execution_id(
+        plan_artifact_sha256, item_id, execution_role
+    )
 
 
 def versioned_handler_execution_role(
@@ -10241,23 +10360,43 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         help="Materialize a successful compilation into a new review directory",
         description=(
             "Retrieve and verify one immutable collection-compilation result and all "
-            "of its analysis resources, assign the next revision relative to an "
-            "existing published collection, and write a new validated review package "
-            "plus a Git-readable diff. Existing paths are never overwritten."
+            "of its analysis resources and write a new validated review package plus "
+            "a Git-readable diff. When an existing published collection is supplied, "
+            "assign its next revision and use it as the diff baseline. Existing paths "
+            "are never overwritten."
         ),
     )
     materialize_project.add_argument("compilation_job_id")
     materialize_project.add_argument(
         "--published-collection",
-        required=True,
         type=Path,
-        help="Current published collection.json used as the revision and diff baseline",
+        help=(
+            "Current published collection.json used as the revision and diff baseline; "
+            "omit for a new collection"
+        ),
     )
     materialize_project.add_argument(
         "--output-directory",
-        required=True,
         type=Path,
-        help="New directory to create for the materialized candidate",
+        help=(
+            "Exact new directory to create; by default use an automatically named "
+            "directory under draft-collections"
+        ),
+    )
+    materialize_project.add_argument(
+        "--draft-root",
+        type=Path,
+        help=(
+            "Draft parent directory; defaults to WATCHCRAFT_DRAFT_COLLECTIONS_ROOT "
+            "or the sibling watchcraft-collections/draft-collections directory"
+        ),
+    )
+    materialize_project.add_argument(
+        "--draft-name",
+        help=(
+            "Directory name beneath the draft root; defaults to "
+            "COLLECTION_ID-revision-REVISION"
+        ),
     )
     materialize_project.add_argument(
         "--diff-output",

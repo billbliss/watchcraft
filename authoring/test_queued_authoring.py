@@ -3825,6 +3825,7 @@ class QueuedAuthoringTests(unittest.TestCase):
             "--plan-job-id", "plan-job-1",
         ])
         output = io.StringIO()
+        handoff = io.StringIO()
         with patch("queued_authoring.operator_client", return_value=control), patch(
             "queued_authoring.verified_json_result", side_effect=[plan, result]
         ), patch(
@@ -3850,7 +3851,7 @@ class QueuedAuthoringTests(unittest.TestCase):
             "queued_authoring.wait_for_terminal_job",
             return_value={"job": completed_job, "run": {"run_id": "normalization-run"}},
         ):
-            with redirect_stdout(output):
+            with redirect_stdout(output), redirect_stderr(handoff):
                 self.assertEqual(queued_authoring.run_normalize_project(args), 0)
         self.assertEqual(captured["request"]["analysis_job_ids"], ["analysis-job-1"])
         self.assertEqual(captured["spec"]["dependencies"], [
@@ -3866,6 +3867,11 @@ class QueuedAuthoringTests(unittest.TestCase):
         ))
         self.assertIn("Full normalization:", output.getvalue())
         self.assertNotIn('"sections": [', output.getvalue())
+        self.assertIn(
+            "Next: ./authoring/watchcraft-author queue compile-project",
+            handoff.getvalue(),
+        )
+        self.assertNotIn("--compare-to", handoff.getvalue().split("Next:", 1)[1])
 
     def test_collection_compiler_builds_a_portable_manifest_from_bound_resources(self):
         examples = queued_authoring.CATALOG_PROJECT_SCHEMA_PATH.parent / "examples"
@@ -3971,7 +3977,9 @@ class QueuedAuthoringTests(unittest.TestCase):
             "collection_id": project["project_id"],
             "status": "complete",
             "prompt_version": 2,
-            "display_label_prompt_version": 1,
+            "display_label_prompt_version": (
+                queued_authoring.TOPIC_DISPLAY_LABEL_PROMPT_VERSION
+            ),
             "model": "gpt-5.4-mini",
             "source_hash": "b" * 64,
             "assignments": {
@@ -4262,8 +4270,17 @@ class QueuedAuthoringTests(unittest.TestCase):
         ), patch(
             "build_collection.validate_collection_manifest"
         ):
-            with redirect_stdout(io.StringIO()):
+            with redirect_stdout(io.StringIO()), redirect_stderr(
+                io.StringIO()
+            ) as handoff:
                 self.assertEqual(queued_authoring.run_compile_project(args), 0)
+        next_command = handoff.getvalue().split("Next: ", 1)[1]
+        self.assertIn(
+            f"queue materialize-project {captured['job_id']}", next_command
+        )
+        self.assertNotIn("--published-collection", next_command)
+        self.assertNotIn("--output-directory", next_command)
+        self.assertNotIn("REVIEW_DIRECTORY", next_command)
         self.assertEqual(captured["spec"]["operation"], "compile")
         self.assertEqual(captured["spec"]["inputs"], [plan_reference, snapshot_reference])
         self.assertEqual(captured["spec"]["dependencies"], [
@@ -4277,23 +4294,26 @@ class QueuedAuthoringTests(unittest.TestCase):
             "version": queued_authoring.COLLECTION_COMPILATION_HANDLER[1],
         })
         project_item_id = f"catalog-project:{project['project_id']}"
-        current_role = queued_authoring.versioned_handler_execution_role(
-            "collection-compilation", queued_authoring.COLLECTION_COMPILATION_HANDLER
-        )
-        prior_role = queued_authoring.versioned_handler_execution_role(
-            "collection-compilation",
-            (queued_authoring.COLLECTION_COMPILATION_HANDLER[0], "1"),
-        )
         self.assertEqual(
             captured["job_id"],
-            queued_authoring.stable_project_execution_id(
-                plan_reference["digest"], project_item_id, current_role
+            queued_authoring.spec_bound_project_execution_id(
+                plan_reference["digest"],
+                project_item_id,
+                "collection-compilation",
+                queued_authoring.COLLECTION_COMPILATION_HANDLER,
+                captured["spec"],
             ),
         )
+        changed_spec = json.loads(json.dumps(captured["spec"]))
+        changed_spec["dependencies"][-1]["digest"] = "0" * 64
         self.assertNotEqual(
             captured["job_id"],
-            queued_authoring.stable_project_execution_id(
-                plan_reference["digest"], project_item_id, prior_role
+            queued_authoring.spec_bound_project_execution_id(
+                plan_reference["digest"],
+                project_item_id,
+                "collection-compilation",
+                queued_authoring.COLLECTION_COMPILATION_HANDLER,
+                changed_spec,
             ),
         )
 
@@ -4422,6 +4442,40 @@ class QueuedAuthoringTests(unittest.TestCase):
                 "New lesson title",
                 Path(f"{destination}.diff").read_text(encoding="utf-8"),
             )
+
+            draft_root = root / "draft-collections"
+            new_destination = draft_root / "example-collection-revision-1"
+            new_args = build_parser().parse_args([
+                "queue", "materialize-project", job["job_id"],
+            ])
+            with patch("queued_authoring.operator_client", return_value=control), patch(
+                "queued_authoring.verified_json_result", return_value=bundle
+            ), patch(
+                "queued_authoring.r2_artifact_reader", return_value=store
+            ), patch(
+                "queued_authoring.default_draft_collections_root",
+                return_value=draft_root,
+            ):
+                with redirect_stdout(io.StringIO()), redirect_stderr(
+                    io.StringIO()
+                ) as new_handoff:
+                    self.assertEqual(
+                        queued_authoring.run_materialize_project(new_args), 0
+                    )
+            new_materialized = json.loads(
+                (new_destination / "collection.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(new_materialized["revision"], candidate["revision"])
+            self.assertIn(
+                "New lesson title",
+                Path(f"{new_destination}.diff").read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "This is a new collection; choose its publication destination",
+                new_handoff.getvalue(),
+            )
+            self.assertNotIn("PUBLISHED_COLLECTION", new_handoff.getvalue())
+
             with self.assertRaisesRegex(RuntimeError, "already exists"):
                 queued_authoring.run_materialize_project(args)
 

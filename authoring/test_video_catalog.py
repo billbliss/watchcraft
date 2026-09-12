@@ -1493,6 +1493,16 @@ class FormattingTests(unittest.TestCase):
     def test_compact_topic_display_label_rules(self):
         self.assertIsNone(display_label_error("Multi-Camera Editing", set()))
         self.assertIsNone(display_label_error("Essential Sound", set()))
+        self.assertIsNone(display_label_error("Basis Vectors i-hat and j-hat", set()))
+        self.assertIsNone(display_label_error("pH Measurement", set()))
+        self.assertIn(
+            "headline-capitalized",
+            display_label_error("Crankcase oil pan", set()),
+        )
+        self.assertIn(
+            "headline-capitalized",
+            display_label_error("internal Combustion Engine", set()),
+        )
         self.assertIn(
             "characters",
             display_label_error(
@@ -1511,21 +1521,29 @@ class FormattingTests(unittest.TestCase):
             deterministic_display_label(
                 "Fermentation timing and dough rest", set()
             ),
-            "Fermentation timing & dough rest",
+            "Fermentation Timing & Dough Rest",
         )
         self.assertEqual(
             deterministic_display_label(
                 "Mediterranean braised green beans (Andrew Janjigian)",
                 {"braised green beans"},
             ),
-            "Mediterranean braised beans",
+            "Mediterranean Braised Beans",
         )
         self.assertEqual(
             deterministic_display_label(
                 "pan materials: cast iron, carbon steel, non-stick",
                 {"pan material comparison"},
             ),
-            "pan materials",
+            "Pan Materials",
+        )
+        self.assertEqual(
+            deterministic_display_label("body-on-frame construction", set()),
+            "Body-on-Frame Construction",
+        )
+        self.assertEqual(
+            deterministic_display_label("engine vs motor", set()),
+            "Engine vs Motor",
         )
         self.assertEqual(
             deterministic_display_label(

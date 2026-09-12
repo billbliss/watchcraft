@@ -33,7 +33,7 @@ NORMALIZATION_MODEL_ENV = "VIDEO_CATALOG_NORMALIZATION_MODEL"
 BUILTIN_NORMALIZATION_MODEL = "gpt-5.4-mini"
 NORMALIZATION_SCHEMA_VERSION = 1
 NORMALIZATION_PROMPT_VERSION = 2
-DISPLAY_LABEL_PROMPT_VERSION = 1
+DISPLAY_LABEL_PROMPT_VERSION = 2
 DEFAULT_BATCH_SIZE = 40
 MAX_DISPLAY_LABEL_CHARS = 32
 MIN_DISPLAY_LABEL_WORDS = 2
@@ -153,10 +153,96 @@ Rules:
 - Remove parenthetical examples, keyboard-shortcut lists, settings, and enumerations.
 - Do not use commas, colons, semicolons, parentheses, or square brackets.
 - Labels must be unique within this batch and must not duplicate reserved_labels.
+- Use domain-aware headline capitalization consistently across every label. Capitalize
+  substantive words, but preserve conventional technical forms and proper names exactly,
+  such as "i-hat", "pH", "H.264", "macOS", and "DaVinci Resolve". Do not mechanically
+  capitalize variable names, acronyms, or branded spellings.
 - Prefer natural title-style labels such as "Multi-Camera Editing", "Essential Sound",
   "Lumetri Scopes", "Transcript-Based Editing", or "Video Transitions".
 - Do not broaden a specific topic into only its family name.
 """
+
+
+DISPLAY_LABEL_MINOR_WORDS = {
+    "a", "an", "and", "as", "at", "but", "by", "for", "from", "in", "into",
+    "nor", "of", "on", "or", "over", "per", "the", "to", "via", "vs", "with",
+}
+
+
+def conventional_lowercase_display_word(word: str) -> bool:
+    """Recognize compact variable notation whose lowercase spelling is meaningful."""
+    token = word.strip("'\"")
+    return bool(
+        re.fullmatch(r"[a-z]", token)
+        or re.fullmatch(r"(?:[a-z]|yt)-(?:hat|axis|value|test|score|dlp)", token)
+    )
+
+
+def display_label_case_error(label: str) -> str | None:
+    words = label.split()
+    for index, raw_word in enumerate(words):
+        word = raw_word.strip("'\".,")
+        if not word or not any(character.isalpha() for character in word):
+            continue
+        if word[0].isdigit():
+            continue
+        if conventional_lowercase_display_word(word):
+            continue
+        if (
+            word in DISPLAY_LABEL_MINOR_WORDS
+            and index not in {0, len(words) - 1}
+        ):
+            continue
+        if any(character.isupper() for character in word[1:]) and word[0].islower():
+            continue
+        for part_index, part in enumerate(word.split("-")):
+            if not part or part[0].isdigit():
+                continue
+            if (
+                part in DISPLAY_LABEL_MINOR_WORDS
+                and part_index > 0
+            ):
+                continue
+            if part[0].islower():
+                return f"substantive word {word!r} is not headline-capitalized"
+    return None
+
+
+def headline_case_display_label(label: str) -> str:
+    words = label.split()
+    result = []
+    for index, word in enumerate(words):
+        comparison = word.strip("'\"")
+        if comparison and comparison[0].isdigit():
+            result.append(word)
+            continue
+        if (
+            conventional_lowercase_display_word(comparison)
+            or (
+                comparison[:1].islower()
+                and any(character.isupper() for character in comparison[1:])
+            )
+            or (
+                comparison in DISPLAY_LABEL_MINOR_WORDS
+                and index not in {0, len(words) - 1}
+            )
+        ):
+            result.append(word)
+            continue
+        parts = word.split("-")
+        styled_parts = []
+        for part_index, part in enumerate(parts):
+            if (
+                part in DISPLAY_LABEL_MINOR_WORDS
+                and part_index > 0
+            ):
+                styled_parts.append(part)
+            elif part:
+                styled_parts.append(part[:1].upper() + part[1:])
+            else:
+                styled_parts.append(part)
+        result.append("-".join(styled_parts))
+    return " ".join(result)
 
 
 def now_iso() -> str:
@@ -642,6 +728,9 @@ def display_label_error(label: str, reserved_keys: set[str]) -> str | None:
             f"label must contain {MIN_DISPLAY_LABEL_WORDS} to "
             f"{MAX_DISPLAY_LABEL_WORDS} words"
         )
+    case_error = display_label_case_error(label)
+    if case_error is not None:
+        return case_error
     if canonical_topic_key(label) in reserved_keys:
         return "label duplicates another display label"
     return None
@@ -653,12 +742,12 @@ def deterministic_display_label(
     *,
     preferred_label: str | None = None,
 ) -> str | None:
-    normalized = " ".join(label.split())
+    normalized = headline_case_display_label(" ".join(label.split()))
     if ":" in normalized:
         prefix = normalized.split(":", 1)[0].strip()
         if display_label_error(prefix, reserved_keys) is None:
             return prefix
-    candidate = re.sub(r"\([^)]*\)|\[[^]]*\]|\{[^}]*\}", " ", label)
+    candidate = re.sub(r"\([^)]*\)|\[[^]]*\]|\{[^}]*\}", " ", normalized)
     candidate = re.sub(r"[,;:]", " ", candidate)
     candidate = re.sub(r"\s+and\s+", " & ", " ".join(candidate.split()), flags=re.I)
     if display_label_error(candidate, reserved_keys) is None:

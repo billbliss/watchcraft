@@ -734,17 +734,23 @@ Materialize a successful compilation into a separate review package:
 
 ```bash
 ./authoring/watchcraft-author queue materialize-project COMPILATION_JOB_ID \
-  --published-collection /path/to/current/collection.json \
-  --output-directory /path/to/new-review-directory \
   --operator-token-source keychain \
   --r2-credentials-source keychain
 ```
 
 Materialization is operator-local and never changes the published collection. Both the
-destination and its default sibling `OUTPUT_DIRECTORY.diff` must not already exist. The
-command verifies the compilation job and bundle, rechecks both collection content hashes,
-assigns the unchanged revision or the next revision as appropriate, downloads and verifies
-every immutable analysis artifact, writes readable JSON plus `catalog.csv`, validates all
+destination and its default sibling diff must not already exist. By default, the command
+creates `watchcraft-collections/draft-collections/COLLECTION_ID-revision-REVISION/` and
+places the diff beside it. `--draft-name` selects another name beneath that ignored draft
+root; `--draft-root` overrides the root, and `--output-directory` remains available as an
+exact-path override. Set `WATCHCRAFT_DRAFT_COLLECTIONS_ROOT` when the collections checkout
+is not adjacent to Watchcraft.
+
+For an update, add `--published-collection /path/to/current/collection.json` so the command
+assigns the unchanged or next published revision and uses the current package as its diff
+baseline. Without it, the compilation is treated as a new collection. The command verifies
+the compilation job and bundle, rechecks applicable collection content hashes, downloads
+and verifies every immutable analysis artifact, writes readable JSON plus `catalog.csv`, validates all
 manifest resource paths, and atomically exposes the completed directory. The diff includes
 only `collection.json`, `catalog.csv`, and analysis resources, so authoring-only files in the
 published workspace do not appear as deletions. Use `--diff-output` to choose another new
