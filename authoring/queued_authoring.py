@@ -8720,6 +8720,76 @@ def git_path_status(repository: Path, paths: list[Path]) -> str:
     return completed.stdout.strip()
 
 
+def prepared_collection_directory(
+    directory_path: Path,
+    *,
+    manifest: dict,
+    published_root: Path,
+    description: str | None,
+    category: str | None,
+) -> tuple[dict, bytes, bytes]:
+    """Return a validated website directory with one new collection appended."""
+    try:
+        original = directory_path.read_bytes()
+        directory = json.loads(original.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(
+            f"Could not read collection directory: {directory_path}"
+        ) from error
+    entries = directory.get("collections") if isinstance(directory, dict) else None
+    if not isinstance(entries, list):
+        raise RuntimeError(
+            f"Collection directory has no collections list: {directory_path}"
+        )
+    collection_id = str(manifest["collection_id"])
+    if any(
+        isinstance(entry, dict) and entry.get("collection_id") == collection_id
+        for entry in entries
+    ):
+        raise RuntimeError(
+            f"Collection directory already contains {collection_id}; use "
+            "--published-collection when publishing a revision"
+        )
+    base_url = str(directory.get("base_url") or "").rstrip("/")
+    if not base_url:
+        raise RuntimeError(
+            f"Collection directory has no base_url: {directory_path}"
+        )
+    items = manifest.get("items", {})
+    media_modes = sorted({
+        str(media["delivery"])
+        for item in items.values()
+        for media in item.get("media", [])
+        if media.get("delivery")
+    })
+    entry = {
+        "collection_id": collection_id,
+        "title": str(manifest["title"]),
+        "description": " ".join(
+            str(
+                description
+                or manifest.get("description")
+                or f"A Watchcraft collection with {len(items)} videos."
+            ).split()
+        ),
+        "video_count": int(
+            manifest.get("stats", {}).get("video_count", len(items))
+        ),
+        "media_modes": media_modes,
+        "manifest_url": (
+            f"{base_url}/collections/{published_root.name}/collection.json"
+        ),
+    }
+    normalized_category = " ".join(str(category or "").split())
+    if normalized_category:
+        entry["category"] = normalized_category
+    entries.append(entry)
+    payload = (json.dumps(directory, ensure_ascii=False, indent=2) + "\n").encode(
+        "utf-8"
+    )
+    return entry, payload, original
+
+
 def run_publish_project(args: argparse.Namespace) -> int:
     candidate_root = args.candidate_directory.expanduser().resolve()
     if not candidate_root.is_dir():
@@ -8922,6 +8992,30 @@ def run_publish_project(args: argparse.Namespace) -> int:
         if published is not None
         else [published_root]
     )
+    directory_path = None
+    directory_entry = None
+    directory_original = None
+    directory_payload = None
+    if published is None and not args.unlisted:
+        expected_collections_root = repository / "collections"
+        if collections_root != expected_collections_root:
+            raise RuntimeError(
+                "Listed collections must be published under the repository's "
+                "collections directory; use --unlisted for another destination"
+            )
+        directory_path = repository / "site" / "collections.json"
+        (
+            directory_entry,
+            directory_payload,
+            directory_original,
+        ) = prepared_collection_directory(
+            directory_path,
+            manifest=candidate,
+            published_root=published_root,
+            description=args.directory_description,
+            category=args.category,
+        )
+        managed_targets.append(directory_path)
     status = git_path_status(repository, managed_targets)
     if status:
         raise RuntimeError(
@@ -8968,7 +9062,22 @@ def run_publish_project(args: argparse.Namespace) -> int:
                 "Published collection changed during publication:\n" + status
             )
         if published is None:
-            os.replace(staging, published_root)
+            if directory_path is not None:
+                from video_catalog import atomic_write_text
+
+                atomic_write_text(
+                    directory_path,
+                    directory_payload.decode("utf-8"),
+                )
+            try:
+                os.replace(staging, published_root)
+            except Exception:
+                if directory_path is not None:
+                    atomic_write_text(
+                        directory_path,
+                        directory_original.decode("utf-8"),
+                    )
+                raise
         else:
             os.replace(published_root, backup)
             try:
@@ -8982,7 +9091,10 @@ def run_publish_project(args: argparse.Namespace) -> int:
             shutil.rmtree(staging)
         raise
 
-    changed = git_path_status(repository, [published_root])
+    changed_targets = [published_root]
+    if directory_path is not None:
+        changed_targets.append(directory_path)
+    changed = git_path_status(repository, changed_targets)
     publication = {
         "state": "published-to-worktree",
         "compilation_job_id": job["job_id"],
@@ -8993,6 +9105,7 @@ def run_publish_project(args: argparse.Namespace) -> int:
         "revision": candidate["revision"],
         "content_hash": candidate["content_hash"],
         "resources": len(expected_resource_payloads),
+        "directory_entry": directory_entry,
         "git_changes": changed.splitlines(),
         "evidence": {
             "source": (
@@ -9036,7 +9149,14 @@ def run_publish_project(args: argparse.Namespace) -> int:
     review_command = (
         f"git -C {repository} diff -- {relative_collection}"
         if published is not None
-        else f"git -C {repository} status --short -- {relative_collection}"
+        else (
+            f"git -C {repository} status --short -- {relative_collection}"
+            + (
+                f" {directory_path.relative_to(repository)}"
+                if directory_path is not None
+                else ""
+            )
+        )
     )
     print(
         f"Review with: {review_command}",
@@ -10573,6 +10693,22 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         choices=("auto", "keychain", "environment"),
         default="auto",
         help="Read-only compilation and resource credential source (default: auto)",
+    )
+    publish_project.add_argument(
+        "--directory-description",
+        help=(
+            "Website-directory description for a new listed collection; defaults "
+            "to the manifest description or a generated summary"
+        ),
+    )
+    publish_project.add_argument(
+        "--category",
+        help="Website-directory category for a new listed collection",
+    )
+    publish_project.add_argument(
+        "--unlisted",
+        action="store_true",
+        help="Publish a new collection without advertising it in site/collections.json",
     )
     queued_analysis = commands.add_parser(
         "analyze-transcript",

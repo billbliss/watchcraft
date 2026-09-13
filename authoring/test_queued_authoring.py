@@ -4598,6 +4598,20 @@ class QueuedAuthoringTests(unittest.TestCase):
             (published_root / "transcripts/lesson.txt").write_text(
                 "Preserved transcript.\n", encoding="utf-8"
             )
+            collections_root = root / "collections"
+            collections_root.mkdir()
+            site_root = root / "site"
+            site_root.mkdir()
+            directory_path = site_root / "collections.json"
+            directory_path.write_text(
+                json.dumps({
+                    "kind": "watchcraft.collection-directory",
+                    "schema_version": 2,
+                    "base_url": "https://collections.example.test",
+                    "collections": [],
+                }, indent=2) + "\n",
+                encoding="utf-8",
+            )
             subprocess.run(["git", "init", str(root)], check=True, capture_output=True)
             subprocess.run(
                 ["git", "-C", str(root), "config", "user.email", "test@example.com"],
@@ -4608,7 +4622,7 @@ class QueuedAuthoringTests(unittest.TestCase):
                 check=True,
             )
             subprocess.run(
-                ["git", "-C", str(root), "add", "published"], check=True
+                ["git", "-C", str(root), "add", "published", "site"], check=True
             )
             subprocess.run(
                 ["git", "-C", str(root), "commit", "-m", "published baseline"],
@@ -4651,11 +4665,11 @@ class QueuedAuthoringTests(unittest.TestCase):
             ):
                 queued_authoring.run_publish_project(publish_args)
 
-            collections_root = root / "collections"
-            collections_root.mkdir()
             new_publish_args = build_parser().parse_args([
                 "queue", "publish-project", job["job_id"],
                 "--candidate-directory", str(new_destination),
+                "--directory-description", "A useful example collection.",
+                "--category", "Examples",
             ])
             with patch("queued_authoring.operator_client", return_value=control), patch(
                 "queued_authoring.verified_json_result", return_value=bundle
@@ -4683,6 +4697,19 @@ class QueuedAuthoringTests(unittest.TestCase):
                 (new_published_root / "analysis/lesson.analysis.json").read_bytes(),
                 (new_destination / "analysis/lesson.analysis.json").read_bytes(),
             )
+            directory = json.loads(directory_path.read_text(encoding="utf-8"))
+            self.assertEqual(directory["collections"], [{
+                "collection_id": "example-collection",
+                "title": "Example Collection",
+                "description": "A useful example collection.",
+                "video_count": 1,
+                "media_modes": ["referenced-local"],
+                "manifest_url": (
+                    "https://collections.example.test/collections/"
+                    "example-collection/collection.json"
+                ),
+                "category": "Examples",
+            }])
             self.assertIn(
                 '"new-destination-created"', new_publication_output.getvalue()
             )
@@ -4694,7 +4721,7 @@ class QueuedAuthoringTests(unittest.TestCase):
                 "Review with: git -C ", new_publication_output.getvalue()
             )
             self.assertIn(
-                " status --short -- collections/example-collection",
+                " status --short -- collections/example-collection site/collections.json",
                 new_publication_output.getvalue(),
             )
             with patch(
