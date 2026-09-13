@@ -8395,6 +8395,19 @@ def default_draft_collections_root() -> Path:
     )
 
 
+def default_published_collections_root() -> Path:
+    configured = os.environ.get("WATCHCRAFT_COLLECTIONS_ROOT")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    watchcraft_root = Path(__file__).resolve().parents[1]
+    collections_repository = watchcraft_root.parent / "watchcraft-collections"
+    if collections_repository.is_dir():
+        return (collections_repository / "collections").resolve()
+    raise RuntimeError(
+        "Could not locate watchcraft-collections; pass --collections-root"
+    )
+
+
 def materialization_destination(
     args: argparse.Namespace, candidate: dict[str, Any]
 ) -> Path:
@@ -8654,7 +8667,13 @@ def run_materialize_project(args: argparse.Namespace) -> int:
         )
     else:
         details.append(
-            "This is a new collection; choose its publication destination after review."
+            "This is a new collection; publication will derive its tracked directory "
+            "from the collection ID."
+        )
+        publish_command = (
+            "./authoring/watchcraft-author queue publish-project "
+            f"{job['job_id']} --candidate-directory {destination} "
+            "--operator-token-source keychain --r2-credentials-source keychain"
         )
     print_operator_handoff(
         f"Materialized {candidate['collection_id']} revision {candidate['revision']} for review.",
@@ -8702,15 +8721,74 @@ def git_path_status(repository: Path, paths: list[Path]) -> str:
 
 
 def run_publish_project(args: argparse.Namespace) -> int:
-    candidate_root = args.candidate_directory.resolve()
-    published_collection_path = args.published_collection.resolve()
-    published_root = published_collection_path.parent
+    candidate_root = args.candidate_directory.expanduser().resolve()
     if not candidate_root.is_dir():
         raise RuntimeError(f"Candidate directory does not exist: {candidate_root}")
-    if not published_collection_path.is_file():
-        raise RuntimeError(
-            f"Published collection does not exist: {published_collection_path}"
+
+    from build_collection import render_csv, validate_collection_manifest
+
+    try:
+        candidate = json.loads(
+            (candidate_root / "collection.json").read_text(encoding="utf-8")
         )
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError("Could not read candidate collection manifest") from error
+    validate_collection_manifest(candidate)
+    if candidate.get("content_hash") != collection_manifest_content_hash(candidate):
+        raise RuntimeError("Candidate collection content_hash does not match its content")
+
+    published = None
+    published_collection_path = None
+    if args.published_collection is not None:
+        published_collection_path = args.published_collection.expanduser().resolve()
+        published_root = published_collection_path.parent
+        if not published_collection_path.is_file():
+            raise RuntimeError(
+                f"Published collection does not exist: {published_collection_path}"
+            )
+        try:
+            published = json.loads(
+                published_collection_path.read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError) as error:
+            raise RuntimeError("Could not read published collection manifest") from error
+        validate_collection_manifest(published)
+        if published.get("content_hash") != collection_manifest_content_hash(published):
+            raise RuntimeError("Published collection content_hash does not match its content")
+        if candidate.get("collection_id") != published.get("collection_id"):
+            raise RuntimeError("Candidate and published collection IDs do not match")
+        content_changed = candidate["content_hash"] != published["content_hash"]
+        expected_revision = (
+            published["revision"] + 1 if content_changed else published["revision"]
+        )
+        if candidate.get("revision") != expected_revision:
+            raise RuntimeError(
+                f"Candidate revision {candidate.get('revision')} does not match expected "
+                f"publication revision {expected_revision}"
+            )
+    else:
+        collections_root = (
+            args.collections_root.expanduser().resolve()
+            if args.collections_root is not None
+            else default_published_collections_root().expanduser().resolve()
+        )
+        if not collections_root.is_dir():
+            raise RuntimeError(
+                f"Published collections root does not exist: {collections_root}"
+            )
+        collection_id = candidate["collection_id"]
+        if (
+            not collection_id
+            or Path(collection_id).name != collection_id
+            or collection_id in {".", ".."}
+        ):
+            raise RuntimeError("Candidate collection_id is not a safe directory name")
+        published_root = collections_root / collection_id
+        if published_root.exists():
+            raise RuntimeError(
+                f"New collection publication destination already exists: {published_root}"
+            )
+
     if candidate_root == published_root:
         raise RuntimeError("Candidate and published collection directories must differ")
     if (
@@ -8719,31 +8797,6 @@ def run_publish_project(args: argparse.Namespace) -> int:
     ):
         raise RuntimeError(
             "Candidate and published collection directories must not contain one another"
-        )
-
-    from build_collection import render_csv, validate_collection_manifest
-
-    try:
-        published = json.loads(published_collection_path.read_text(encoding="utf-8"))
-        candidate = json.loads(
-            (candidate_root / "collection.json").read_text(encoding="utf-8")
-        )
-    except (OSError, json.JSONDecodeError) as error:
-        raise RuntimeError("Could not read candidate and published collection manifests") from error
-    validate_collection_manifest(published)
-    validate_collection_manifest(candidate)
-    if published.get("content_hash") != collection_manifest_content_hash(published):
-        raise RuntimeError("Published collection content_hash does not match its content")
-    if candidate.get("content_hash") != collection_manifest_content_hash(candidate):
-        raise RuntimeError("Candidate collection content_hash does not match its content")
-    if candidate.get("collection_id") != published.get("collection_id"):
-        raise RuntimeError("Candidate and published collection IDs do not match")
-    content_changed = candidate["content_hash"] != published["content_hash"]
-    expected_revision = published["revision"] + 1 if content_changed else published["revision"]
-    if candidate.get("revision") != expected_revision:
-        raise RuntimeError(
-            f"Candidate revision {candidate.get('revision')} does not match expected "
-            f"publication revision {expected_revision}"
         )
 
     control = operator_client(args.operator_token_source)
@@ -8777,7 +8830,8 @@ def run_publish_project(args: argparse.Namespace) -> int:
         raise RuntimeError("The compilation artifact is invalid")
     validate_collection_manifest(manifest)
     expected_candidate = json.loads(json.dumps(manifest, ensure_ascii=False))
-    expected_candidate["revision"] = expected_revision
+    if published is not None:
+        expected_candidate["revision"] = expected_revision
     if candidate != expected_candidate:
         raise RuntimeError("Materialized candidate does not match its compilation artifact")
 
@@ -8851,17 +8905,23 @@ def run_publish_project(args: argparse.Namespace) -> int:
         if (candidate_root / relative).read_bytes() != expected_payload:
             raise RuntimeError(f"Candidate resource was changed after materialization: {relative}")
 
-    repository = git_repository_root(published_root)
+    repository = git_repository_root(
+        published_root if published is not None else collections_root
+    )
     if published_root == repository:
         raise RuntimeError("The collection directory must not be the Git repository root")
     current_analysis_paths = {
         path.relative_to(published_root).as_posix()
         for path in (published_root / "analysis").rglob("*.analysis.json")
-    } if (published_root / "analysis").is_dir() else set()
+    } if published is not None and (published_root / "analysis").is_dir() else set()
     managed_paths = {
         "collection.json", "catalog.csv", *expected_paths, *current_analysis_paths
     }
-    managed_targets = [published_root / relative for relative in sorted(managed_paths)]
+    managed_targets = (
+        [published_root / relative for relative in sorted(managed_paths)]
+        if published is not None
+        else [published_root]
+    )
     status = git_path_status(repository, managed_targets)
     if status:
         raise RuntimeError(
@@ -8876,9 +8936,14 @@ def run_publish_project(args: argparse.Namespace) -> int:
     staging = Path(tempfile.mkdtemp(
         prefix=f".{published_root.name}.publishing-", dir=published_root.parent
     ))
-    backup = published_root.parent / f".{published_root.name}.publication-backup-{uuid.uuid4()}"
+    backup = (
+        published_root.parent / f".{published_root.name}.publication-backup-{uuid.uuid4()}"
+        if published is not None
+        else None
+    )
     try:
-        shutil.copytree(published_root, staging, dirs_exist_ok=True)
+        if published is not None:
+            shutil.copytree(published_root, staging, dirs_exist_ok=True)
         staged_analysis = staging / "analysis"
         if staged_analysis.is_dir():
             for path in staged_analysis.rglob("*.analysis.json"):
@@ -8889,22 +8954,29 @@ def run_publish_project(args: argparse.Namespace) -> int:
         validate_collection_manifest(json.loads(
             (staging / "collection.json").read_text(encoding="utf-8")
         ))
-        for relative, original in original_payloads.items():
-            current = published_root / relative
-            if not current.is_file() or current.read_bytes() != original:
-                raise RuntimeError("Published collection changed during publication")
+        if published is None:
+            if published_root.exists():
+                raise RuntimeError("New collection destination appeared during publication")
+        else:
+            for relative, original in original_payloads.items():
+                current = published_root / relative
+                if not current.is_file() or current.read_bytes() != original:
+                    raise RuntimeError("Published collection changed during publication")
         status = git_path_status(repository, managed_targets)
         if status:
             raise RuntimeError(
                 "Published collection changed during publication:\n" + status
             )
-        os.replace(published_root, backup)
-        try:
+        if published is None:
             os.replace(staging, published_root)
-        except Exception:
-            os.replace(backup, published_root)
-            raise
-        shutil.rmtree(backup)
+        else:
+            os.replace(published_root, backup)
+            try:
+                os.replace(staging, published_root)
+            except Exception:
+                os.replace(backup, published_root)
+                raise
+            shutil.rmtree(backup)
     except Exception:
         if staging.exists():
             shutil.rmtree(staging)
@@ -8923,16 +8995,24 @@ def run_publish_project(args: argparse.Namespace) -> int:
         "resources": len(expected_resource_payloads),
         "git_changes": changed.splitlines(),
         "evidence": {
-            "source": {
-                "revision": published["revision"],
-                "content_hash": published["content_hash"],
-            },
+            "source": (
+                {
+                    "revision": published["revision"],
+                    "content_hash": published["content_hash"],
+                }
+                if published is not None
+                else None
+            ),
             "candidate": {
                 "revision": candidate["revision"],
                 "content_hash": candidate["content_hash"],
                 "stats": candidate.get("stats", {}),
             },
-            "comparison": collection_comparison(candidate, published),
+            "comparison": (
+                collection_comparison(candidate, published)
+                if published is not None
+                else None
+            ),
             "workflow": {
                 "github_run_id": job.get("dispatch", {}).get("github_run_id"),
                 "github_run_url": job.get("dispatch", {}).get("github_run_url"),
@@ -8940,7 +9020,11 @@ def run_publish_project(args: argparse.Namespace) -> int:
             "checks": [
                 "compilation-artifact-verified",
                 "candidate-bytes-verified",
-                "published-baseline-unchanged",
+                (
+                    "published-baseline-unchanged"
+                    if published is not None
+                    else "new-destination-created"
+                ),
                 "collection-schema-validated",
                 "managed-target-paths-clean",
             ],
@@ -8948,9 +9032,14 @@ def run_publish_project(args: argparse.Namespace) -> int:
         },
     }
     print(json.dumps(publication, ensure_ascii=False, indent=2, sort_keys=True), flush=True)
+    relative_collection = published_root.relative_to(repository)
+    review_command = (
+        f"git -C {repository} diff -- {relative_collection}"
+        if published is not None
+        else f"git -C {repository} status --short -- {relative_collection}"
+    )
     print(
-        f"Review with: git -C {repository} diff -- "
-        f"{published_root.relative_to(repository)}",
+        f"Review with: {review_command}",
         flush=True,
     )
     print_operator_handoff(
@@ -8960,9 +9049,7 @@ def run_publish_project(args: argparse.Namespace) -> int:
             f"Analysis resources: {len(expected_resource_payloads)}.",
             "No commit, push, or deployment was performed.",
         ],
-        next_command=(
-            f"git -C {repository} diff -- {published_root.relative_to(repository)}"
-        ),
+        next_command=review_command,
         next_label="Review",
     )
     return 0
@@ -10451,8 +10538,9 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         help="Promote a reviewed candidate into a collection Git worktree",
         description=(
             "Reverify a materialized collection candidate against its immutable "
-            "compilation artifact and unchanged published baseline, then replace only "
-            "the managed reader package files. This does not commit, push, or deploy."
+            "compilation artifact. Replace an unchanged published baseline, or create "
+            "a new collection directory derived from its collection ID. This does not "
+            "commit, push, or deploy."
         ),
     )
     publish_project.add_argument("compilation_job_id")
@@ -10462,11 +10550,23 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         type=Path,
         help="Reviewed materialized candidate directory",
     )
-    publish_project.add_argument(
+    publication_target = publish_project.add_mutually_exclusive_group()
+    publication_target.add_argument(
         "--published-collection",
-        required=True,
         type=Path,
-        help="Current tracked collection.json to replace after verification",
+        help=(
+            "Current tracked collection.json to replace after verification; omit "
+            "when publishing a new collection"
+        ),
+    )
+    publication_target.add_argument(
+        "--collections-root",
+        type=Path,
+        help=(
+            "Destination parent for a new collection; defaults to "
+            "WATCHCRAFT_COLLECTIONS_ROOT or the sibling "
+            "watchcraft-collections/collections directory"
+        ),
     )
     publish_project.add_argument(
         "--r2-credentials-source",

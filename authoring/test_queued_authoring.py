@@ -4563,10 +4563,14 @@ class QueuedAuthoringTests(unittest.TestCase):
                 Path(f"{new_destination}.diff").read_text(encoding="utf-8"),
             )
             self.assertIn(
-                "This is a new collection; choose its publication destination",
+                "This is a new collection; publication will derive its tracked directory",
                 new_handoff.getvalue(),
             )
             self.assertNotIn("PUBLISHED_COLLECTION", new_handoff.getvalue())
+            self.assertIn(
+                "queue publish-project compile-job-1",
+                new_handoff.getvalue(),
+            )
 
             with self.assertRaisesRegex(RuntimeError, "already exists"):
                 queued_authoring.run_materialize_project(args)
@@ -4646,6 +4650,58 @@ class QueuedAuthoringTests(unittest.TestCase):
                 RuntimeError, "uncommitted managed-file changes"
             ):
                 queued_authoring.run_publish_project(publish_args)
+
+            collections_root = root / "collections"
+            collections_root.mkdir()
+            new_publish_args = build_parser().parse_args([
+                "queue", "publish-project", job["job_id"],
+                "--candidate-directory", str(new_destination),
+            ])
+            with patch("queued_authoring.operator_client", return_value=control), patch(
+                "queued_authoring.verified_json_result", return_value=bundle
+            ), patch(
+                "queued_authoring.r2_artifact_reader", return_value=store
+            ), patch(
+                "queued_authoring.default_published_collections_root",
+                return_value=collections_root,
+            ):
+                with redirect_stdout(io.StringIO()) as new_publication_output:
+                    self.assertEqual(
+                        queued_authoring.run_publish_project(new_publish_args), 0
+                    )
+
+            new_published_root = collections_root / "example-collection"
+            self.assertEqual(
+                (new_published_root / "collection.json").read_bytes(),
+                (new_destination / "collection.json").read_bytes(),
+            )
+            self.assertEqual(
+                (new_published_root / "catalog.csv").read_bytes(),
+                (new_destination / "catalog.csv").read_bytes(),
+            )
+            self.assertEqual(
+                (new_published_root / "analysis/lesson.analysis.json").read_bytes(),
+                (new_destination / "analysis/lesson.analysis.json").read_bytes(),
+            )
+            self.assertIn(
+                '"new-destination-created"', new_publication_output.getvalue()
+            )
+            self.assertIn(
+                '?? collections/example-collection/',
+                new_publication_output.getvalue(),
+            )
+            self.assertIn(
+                "Review with: git -C ", new_publication_output.getvalue()
+            )
+            self.assertIn(
+                " status --short -- collections/example-collection",
+                new_publication_output.getvalue(),
+            )
+            with patch(
+                "queued_authoring.default_published_collections_root",
+                return_value=collections_root,
+            ), self.assertRaisesRegex(RuntimeError, "already exists"):
+                queued_authoring.run_publish_project(new_publish_args)
 
     def test_waiting_for_a_remote_job_reports_periodic_progress(self):
         client = Mock()
