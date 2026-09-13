@@ -3533,6 +3533,53 @@ class QueuedAuthoringTests(unittest.TestCase):
         self.assertEqual(labels["gasket sealing"], "gasket sealing")
         self.assertEqual(labels["piston pin"], "piston pin")
 
+    def test_automatic_terminology_preserves_normalized_proper_names(self):
+        normalization = {
+            "assignments": {
+                "mazda mx-5 miata": {
+                    "canonical_key": "mazda mx-5 miata",
+                    "canonical_label": "Mazda MX-5 Miata",
+                },
+                "holley hp efi": {
+                    "canonical_key": "holley hp efi",
+                    "canonical_label": "Holley HP EFI",
+                },
+                "vintage air accessory drive": {
+                    "canonical_key": "vintage air accessory drive",
+                    "canonical_label": "Vintage Air accessory drive",
+                },
+            },
+            "display_labels": {
+                "mazda mx-5 miata": "Mazda MX-5 Miata",
+                "holley hp efi": "Holley HP EFI",
+                "vintage air accessory drive": "Vintage Air accessory drive",
+            },
+            "display_label_protected_forms": {
+                "mazda mx-5 miata": ["Mazda", "MX-5", "Miata"],
+                "holley hp efi": ["Holley", "HP", "EFI"],
+                "vintage air accessory drive": ["Vintage Air"],
+            },
+        }
+
+        labels = queued_authoring.apply_automatic_terminology_to_display_labels(
+            normalization, {"resolutions": []}
+        )
+
+        self.assertEqual(labels["mazda mx-5 miata"], "Mazda MX-5 Miata")
+        self.assertEqual(labels["holley hp efi"], "Holley HP EFI")
+        self.assertEqual(
+            labels["vintage air accessory drive"],
+            "Vintage Air accessory drive",
+        )
+        self.assertEqual(
+            normalization["display_label_protected_forms"],
+            {
+                "mazda mx-5 miata": ["Mazda", "MX-5", "Miata"],
+                "holley hp efi": ["Holley", "HP", "EFI"],
+                "vintage air accessory drive": ["Vintage Air"],
+            },
+        )
+
     def test_collection_topic_normalizer_uses_the_existing_normalization_core(self):
         references = []
         analyses = []

@@ -33,7 +33,7 @@ NORMALIZATION_MODEL_ENV = "VIDEO_CATALOG_NORMALIZATION_MODEL"
 BUILTIN_NORMALIZATION_MODEL = "gpt-5.4-mini"
 NORMALIZATION_SCHEMA_VERSION = 1
 NORMALIZATION_PROMPT_VERSION = 2
-DISPLAY_LABEL_PROMPT_VERSION = 3
+DISPLAY_LABEL_PROMPT_VERSION = 4
 DEFAULT_BATCH_SIZE = 40
 MAX_DISPLAY_LABEL_CHARS = 32
 MIN_DISPLAY_LABEL_WORDS = 2
@@ -95,10 +95,12 @@ class DisplayLabelBatchError(RuntimeError):
         self,
         *,
         completed: dict[str, str],
+        completed_protected_forms: dict[str, list[str]],
         remaining: list[str],
         rejected: dict[str, str],
     ) -> None:
         self.completed = completed
+        self.completed_protected_forms = completed_protected_forms
         self.remaining = remaining
         self.rejected = rejected
         details = "; ".join(
@@ -160,6 +162,10 @@ Rules:
 - protected_forms: copy the exact conventionally cased substrings that must not be
   lowercased. Use an empty list for ordinary subject terms. Never protect a generic
   concept merely because it appeared in title case in the input.
+- Protect every proper name retained in the label, including individually capitalized
+  people, organizations, brands, product families, and model names. A multiword name
+  may be one protected form; separate names such as a make and model may be separate
+  protected forms.
 - Prefer calm labels such as "multi-camera editing", "essential sound",
   "Lumetri scopes", "transcript-based editing", or "video transitions".
 - Do not broaden a specific topic into only its family name.
@@ -459,6 +465,7 @@ def initial_state(collection_id: str, source_hash: str, model: str) -> dict:
         "related": {},
         "display_label_prompt_version": DISPLAY_LABEL_PROMPT_VERSION,
         "display_labels": {},
+        "display_label_protected_forms": {},
     }
 
 
@@ -494,6 +501,7 @@ def load_state(
     payload["model"] = model
     payload.setdefault("display_label_prompt_version", DISPLAY_LABEL_PROMPT_VERSION)
     payload.setdefault("display_labels", {})
+    payload.setdefault("display_label_protected_forms", {})
     return payload
 
 
@@ -811,8 +819,9 @@ def label_batch(
     families: dict[str, dict],
     reserved_labels: list[str],
     retries: int,
-) -> dict[str, str]:
+) -> tuple[dict[str, str], dict[str, list[str]]]:
     results: dict[str, str] = {}
+    result_protected_forms: dict[str, list[str]] = {}
     remaining = list(keys)
     reserved_keys = {
         canonical_topic_key(label) for label in reserved_labels if label.strip()
@@ -881,12 +890,13 @@ def label_batch(
                 rejected_labels[key] = label
                 continue
             results[key] = label
+            result_protected_forms[key] = protected_forms
             reserved_keys.add(canonical_topic_key(label))
         remaining = [key for key in remaining if key not in results]
         for key in remaining:
             rejected.setdefault(key, "model omitted topic")
         if not remaining:
-            return results
+            return results, result_protected_forms
         print(
             f"  repairing {len(remaining)} display label(s), attempt "
             f"{repair_attempt + 1}/4",
@@ -903,15 +913,17 @@ def label_batch(
             unresolved.append(key)
             continue
         results[key] = fallback
+        result_protected_forms[key] = intrinsically_cased_display_forms(fallback)
         reserved_keys.add(canonical_topic_key(fallback))
         print(f"  using deterministic display label for {key}: {fallback}", flush=True)
     if unresolved:
         raise DisplayLabelBatchError(
             completed=results,
+            completed_protected_forms=result_protected_forms,
             remaining=unresolved,
             rejected=rejected,
         )
-    return results
+    return results, result_protected_forms
 
 
 def related_candidates(canonical: dict[str, dict]) -> dict[str, list[str]]:
@@ -1064,6 +1076,7 @@ def run(args: argparse.Namespace) -> int:
     ):
         state["display_label_prompt_version"] = DISPLAY_LABEL_PROMPT_VERSION
         state["display_labels"] = {}
+        state["display_label_protected_forms"] = {}
         state.pop("stats", None)
     known_keys = set(records)
     state["assignments"] = {
@@ -1137,6 +1150,11 @@ def run(args: argparse.Namespace) -> int:
         for key, label in state.get("display_labels", {}).items()
         if key in canonical
     }
+    state["display_label_protected_forms"] = {
+        key: forms
+        for key, forms in state.get("display_label_protected_forms", {}).items()
+        if key in canonical and isinstance(forms, list)
+    }
     pending_labels = sorted(set(canonical) - set(state["display_labels"]))
     for batch_number, keys in enumerate(chunks(pending_labels, args.batch_size), start=1):
         print(
@@ -1145,7 +1163,7 @@ def run(args: argparse.Namespace) -> int:
             flush=True,
         )
         try:
-            labels = label_batch(
+            labels, protected_forms = label_batch(
                 client,
                 model=args.normalization_model,
                 keys=keys,
@@ -1156,6 +1174,9 @@ def run(args: argparse.Namespace) -> int:
             )
         except DisplayLabelBatchError as error:
             state["display_labels"].update(error.completed)
+            state["display_label_protected_forms"].update(
+                error.completed_protected_forms
+            )
             state["status"] = "labeling"
             state["last_error"] = {
                 "phase": "display-labels",
@@ -1165,6 +1186,7 @@ def run(args: argparse.Namespace) -> int:
             save_state(path, state)
             raise
         state["display_labels"].update(labels)
+        state["display_label_protected_forms"].update(protected_forms)
         state.pop("last_error", None)
         state["status"] = "labeling"
         save_state(path, state)

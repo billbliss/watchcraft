@@ -1601,7 +1601,46 @@ class FormattingTests(unittest.TestCase):
                 reserved_labels=["Drain Pitch"],
                 retries=0,
             ),
-            {"drain pitch": "drain pitch overview"},
+            ({"drain pitch": "drain pitch overview"}, {"drain pitch": []}),
+        )
+
+    def test_display_label_preserves_grounded_proper_names_durably(self):
+        class FakeResponses:
+            def parse(self, **_kwargs):
+                generated = GeneratedDisplayLabels(
+                    labels=[
+                        DisplayLabelDecision(
+                            source_id="D001",
+                            label="Mazda MX-5 Miata engine",
+                            protected_forms=["Mazda", "MX-5", "Miata"],
+                        )
+                    ]
+                )
+                return type("Response", (), {"output_parsed": generated})()
+
+        client = type("Client", (), {"responses": FakeResponses()})()
+        canonical = {
+            "mazda mx-5 miata engine": {
+                "label": "Mazda MX-5 Miata engine",
+                "family_ids": [],
+                "contexts": {"A Mazda MX-5 Miata is the example vehicle."},
+            }
+        }
+
+        self.assertEqual(
+            label_batch(
+                client,
+                model="test-model",
+                keys=["mazda mx-5 miata engine"],
+                canonical=canonical,
+                families={},
+                reserved_labels=[],
+                retries=0,
+            ),
+            (
+                {"mazda mx-5 miata engine": "Mazda MX-5 Miata engine"},
+                {"mazda mx-5 miata engine": ["Mazda", "MX-5", "Miata"]},
+            ),
         )
 
     def test_display_label_failure_preserves_valid_partial_results(self):
@@ -1663,6 +1702,7 @@ class FormattingTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.completed, {valid: "useful topic"})
+        self.assertEqual(raised.exception.completed_protected_forms, {valid: []})
         self.assertEqual(raised.exception.remaining, [invalid])
         self.assertIn("characters", raised.exception.rejected[invalid])
 

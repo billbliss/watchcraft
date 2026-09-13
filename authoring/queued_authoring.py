@@ -98,7 +98,7 @@ PROJECT_PROCESSING_PLANNER_HANDLER = (
 SUPPORTED_PROJECT_PROCESSING_PLANNER_VERSIONS = {"1", "2"}
 TOPIC_NORMALIZATION_HANDLER = (
     "watchcraft.normalize.collection-topics",
-    "8",
+    "9",
 )
 PRE_TERMINOLOGY_TOPIC_NORMALIZATION_HANDLER = (
     "watchcraft.normalize.collection-topics",
@@ -183,7 +183,7 @@ PROJECT_ESTIMATION_POLICY = {
 }
 TOPIC_NORMALIZATION_MODEL = "gpt-5.4-mini"
 TOPIC_NORMALIZATION_PROMPT_VERSION = 2
-TOPIC_DISPLAY_LABEL_PROMPT_VERSION = 3
+TOPIC_DISPLAY_LABEL_PROMPT_VERSION = 4
 TOPIC_NORMALIZATION_BATCH_SIZE = 40
 TOPIC_NORMALIZATION_RETRIES = 5
 TOPIC_NORMALIZATION_TIMEOUT_SECONDS = 300
@@ -1549,7 +1549,12 @@ def apply_automatic_terminology_to_display_labels(
 
     assignments = normalization.get("assignments", {})
     display_labels = normalization.get("display_labels", {})
-    if not isinstance(assignments, dict) or not isinstance(display_labels, dict):
+    protected_by_key = normalization.get("display_label_protected_forms", {})
+    if (
+        not isinstance(assignments, dict)
+        or not isinstance(display_labels, dict)
+        or not isinstance(protected_by_key, dict)
+    ):
         raise ValueError("Topic normalization has invalid display-label state")
     canonical_labels = {}
     for assignment in assignments.values():
@@ -1561,13 +1566,23 @@ def apply_automatic_terminology_to_display_labels(
             canonical_labels.setdefault(key, label)
 
     repaired = {}
+    repaired_protected_forms = {}
     for key, label in display_labels.items():
         if not isinstance(key, str) or not isinstance(label, str):
             raise ValueError("Topic normalization has an invalid display label")
         styled_label, _present = style(label)
         canonical_label = canonical_labels.get(key, key)
         styled_canonical, _required = style(canonical_label)
-        required = protected_terms(styled_canonical)
+        explicit = protected_by_key.get(key, [])
+        if not isinstance(explicit, list) or any(
+            not isinstance(form, str) or not form.strip() for form in explicit
+        ):
+            raise ValueError("Topic normalization has invalid protected display forms")
+        styled_explicit = [style(form)[0] for form in explicit]
+        required = list(dict.fromkeys([
+            *styled_explicit,
+            *protected_terms(styled_canonical),
+        ]))
         styled_canonical = lowercase_display_label(styled_canonical, required)
         styled_label = lowercase_display_label(styled_label, required)
         canonical_error = display_label_error(styled_canonical, set())
@@ -1587,6 +1602,7 @@ def apply_automatic_terminology_to_display_labels(
             if canonical_error is None:
                 styled_label = styled_canonical
         repaired[key] = styled_label
+        repaired_protected_forms[key] = required
 
     unique = {}
     by_identity: dict[str, str] = {}
@@ -1600,7 +1616,10 @@ def apply_automatic_terminology_to_display_labels(
                     canonical_labels.get(key, key),
                 )
                 if word.casefold() not in {
-                    *[term.casefold() for term in protected_terms(canonical_labels.get(key, key))],
+                    *[
+                        term.casefold()
+                        for term in repaired_protected_forms.get(key, [])
+                    ],
                     "a", "an", "and", "as", "for", "in", "of", "on", "or", "the", "to", "with",
                 }
             ]),
@@ -1610,7 +1629,7 @@ def apply_automatic_terminology_to_display_labels(
     for key in ordered_keys:
         label = repaired[key]
         canonical_label, _ = style(canonical_labels.get(key, key))
-        required = protected_terms(canonical_label)
+        required = repaired_protected_forms.get(key, [])
         canonical_label = lowercase_display_label(canonical_label, required)
         if any(not contains_term(label, term) for term in required):
             fallback = protected_fallback(canonical_label, required, set(by_identity))
@@ -1646,6 +1665,13 @@ def apply_automatic_terminology_to_display_labels(
         unique[key] = label
         by_identity[identity] = key
     normalization["display_labels"] = unique
+    normalization["display_label_protected_forms"] = {
+        key: [
+            form for form in repaired_protected_forms.get(key, [])
+            if contains_term(unique[key], form)
+        ]
+        for key in unique
+    }
     return unique
 
 
