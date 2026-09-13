@@ -19,6 +19,8 @@ The pipeline is artifact-oriented rather than transcription-oriented. A job may 
 
 Terminology resolution is an independently versioned processing layer rather than an in-place transcript edit. It combines raw timed text, source context, corpus repetition, and domain or entity priors into explicit resolution proposals with alternatives, confidence, evidence, and review disposition. Candidate terms are partitioned into deterministic, context-bounded map units and their validated proposals are reduced into one corpus artifact; small corpora may execute those units sequentially inside one leased worker while preserving a future child-job boundary. Raw observations remain immutable. Accepted resolution artifacts may later produce a resolved transcript view and selectively invalidate dependent analyses. This pattern applies equally to instructional vocabulary and to film dialogue, names, fictional terms, locations, credits, and edition-specific evidence.
 
+The companion note [Display-label normalization and protected forms](display-label-normalization-and-protected-forms.md) records the related presentation-layer pattern: case-insensitive semantic identity, lowercase ordinary language, corpus-grounded protected forms, and deterministic validation after every downstream transformation.
+
 ## Pattern at a glance
 
 ```text
