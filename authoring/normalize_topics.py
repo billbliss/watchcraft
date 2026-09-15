@@ -738,6 +738,12 @@ def deterministic_display_label(
     candidate = re.sub(r"\s+and\s+", " & ", " ".join(candidate.split()), flags=re.I)
     if display_label_error(candidate, reserved_keys) is None:
         return candidate
+    # Compound canonical topics often provide a concise, meaningful alternative
+    # when the model repeatedly selects an already-reserved label.
+    for phrase in re.split(r"\s+/\s+", candidate):
+        phrase = phrase.strip()
+        if display_label_error(phrase, reserved_keys) is None:
+            return phrase
     words = candidate.split()
     if len(words) > MIN_DISPLAY_LABEL_WORDS:
         removable = range(1, max(1, len(words) - 1))
@@ -803,7 +809,7 @@ def deterministic_display_label(
         # collection cannot be left unfinished solely because every natural fallback
         # is already reserved.
         digest = hashlib.sha256(canonical_topic_key(label).encode()).hexdigest()[:4].upper()
-        for tail in (preferred_words[:4], preferred_words[:3], preferred_words[:2]):
+        for tail in (preferred_words[:4], preferred_words[:3], preferred_words[:2], preferred_words[:1]):
             disambiguated = " ".join([*tail, digest])
             if display_label_error(disambiguated, reserved_keys) is None:
                 return disambiguated

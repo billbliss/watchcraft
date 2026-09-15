@@ -1570,6 +1570,27 @@ class FormattingTests(unittest.TestCase):
             "finished basement drain routing",
         )
 
+    def test_compound_display_label_recovers_from_repeated_model_collisions(self):
+        key = "removing silos / cross-functional collaboration"
+        for duplicate in ("cross-functional integration", "cross-functional collaboration"):
+            with self.subTest(duplicate=duplicate):
+                generated = GeneratedDisplayLabels(labels=[DisplayLabelDecision(source_id="D001", label=duplicate, protected_forms=[])])
+                with patch("normalize_topics.request_structured", return_value=generated) as model:
+                    labels, _ = label_batch(None, model="test", keys=[key],
+                        canonical={key: {"label": key, "family_ids": [], "contexts": set()}},
+                        families={}, reserved_labels=[duplicate], retries=0)
+                self.assertEqual(labels[key], "removing silos")
+                self.assertEqual(model.call_count, 4)
+                self.assertIsNone(display_label_error(labels[key], {duplicate}))
+
+    def test_long_duplicate_label_has_a_bounded_unique_fallback(self):
+        key = "cross-functional collaboration"
+        reserved = {key}
+        result = deterministic_display_label(key, reserved, preferred_label=key)
+        self.assertIsNotNone(result)
+        self.assertIsNone(display_label_error(result, reserved))
+        self.assertEqual(result, deterministic_display_label(key, reserved, preferred_label=key))
+
     def test_duplicate_display_label_gets_deterministic_qualifier(self):
         class FakeResponses:
             def parse(self, **_kwargs):

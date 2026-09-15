@@ -98,7 +98,7 @@ PROJECT_PROCESSING_PLANNER_HANDLER = (
 SUPPORTED_PROJECT_PROCESSING_PLANNER_VERSIONS = {"1", "2"}
 TOPIC_NORMALIZATION_HANDLER = (
     "watchcraft.normalize.collection-topics",
-    "10",
+    "11",
 )
 PRE_TERMINOLOGY_TOPIC_NORMALIZATION_HANDLER = (
     "watchcraft.normalize.collection-topics",
