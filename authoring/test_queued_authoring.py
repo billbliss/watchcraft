@@ -3580,6 +3580,15 @@ class QueuedAuthoringTests(unittest.TestCase):
             },
         )
 
+    def test_normalization_accepts_short_video_without_chapters_and_reports_bad_fields(self):
+        binding = {"item_id": "youtube:short", "video": "short.youtube"}
+        analysis = {"schema_version": 2, "video": "short.youtube", "topics": ["Customer experience"], "sections": [],
+                    "provenance": {"handler_id": queued_authoring.EDUCATIONAL_VIDEO_ANALYSIS_HANDLER[0]}}
+        queued_authoring.validate_normalization_analysis(analysis, binding)
+        for field, value in [("sections", None), ("topics", []), ("video", "different")]:
+            with self.subTest(field=field), self.assertRaisesRegex(queued_authoring.NormalizationDependencyError, field):
+                queued_authoring.validate_normalization_analysis({**analysis, field: value}, binding)
+
     def test_collection_topic_normalizer_uses_the_existing_normalization_core(self):
         references = []
         analyses = []

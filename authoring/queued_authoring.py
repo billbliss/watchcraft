@@ -98,7 +98,7 @@ PROJECT_PROCESSING_PLANNER_HANDLER = (
 SUPPORTED_PROJECT_PROCESSING_PLANNER_VERSIONS = {"1", "2"}
 TOPIC_NORMALIZATION_HANDLER = (
     "watchcraft.normalize.collection-topics",
-    "9",
+    "10",
 )
 PRE_TERMINOLOGY_TOPIC_NORMALIZATION_HANDLER = (
     "watchcraft.normalize.collection-topics",
@@ -1675,6 +1675,26 @@ def apply_automatic_terminology_to_display_labels(
     return unique
 
 
+def validate_normalization_analysis(analysis: Any, binding: dict[str, Any]) -> None:
+    """Short videos may have no chapters; reject malformed data with a field reason."""
+    reasons = []
+    if not isinstance(analysis, dict):
+        reasons.append("analysis must be an object")
+    else:
+        if analysis.get("schema_version") != VIDEO_ANALYSIS_SCHEMA["version"]:
+            reasons.append("schema_version does not match")
+        if analysis.get("video") != binding["video"]:
+            reasons.append("video identity does not match")
+        if not isinstance(analysis.get("topics"), list) or not analysis["topics"]:
+            reasons.append("topics must be a non-empty list")
+        if not isinstance(analysis.get("sections"), list):
+            reasons.append("sections must be a list (an empty list is valid)")
+        if not isinstance(analysis.get("provenance"), dict) or analysis["provenance"].get("handler_id") != EDUCATIONAL_VIDEO_ANALYSIS_HANDLER[0]:
+            reasons.append("analysis provenance does not match")
+    if reasons:
+        raise NormalizationDependencyError(f"Analysis dependency for {binding['item_id']} is invalid: {'; '.join(reasons)}")
+
+
 def collection_topic_normalization(
     job: dict[str, Any], context: WorkerContext | None = None
 ) -> dict[str, Any]:
@@ -1847,19 +1867,7 @@ def collection_topic_normalization(
             failure.classification = "analysis_dependency_unavailable"
             failure.retryable = True
             raise failure from error
-        provenance = analysis.get("provenance") if isinstance(analysis, dict) else None
-        if (
-            not isinstance(analysis, dict)
-            or analysis.get("schema_version") != VIDEO_ANALYSIS_SCHEMA["version"]
-            or analysis.get("video") != binding["video"]
-            or not analysis.get("topics")
-            or not analysis.get("sections")
-            or not isinstance(provenance, dict)
-            or provenance.get("handler_id") != EDUCATIONAL_VIDEO_ANALYSIS_HANDLER[0]
-        ):
-            raise NormalizationDependencyError(
-                f"Analysis dependency for {binding['item_id']} is invalid"
-            )
+        validate_normalization_analysis(analysis, binding)
         derived, _ = apply_automatic_terminology(analysis, terminology)
         analyses.append(derived)
     dependency_ms = elapsed_milliseconds(dependency_started_at)
