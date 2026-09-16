@@ -109,6 +109,7 @@ export const syncPullRequests = internalAction({
   args: {},
   handler: async (ctx) => {
     const rows = await ctx.runQuery(internal.portalWorkflows.pendingPullRequests, {});
+    const results: { executionId: string; result: string }[] = [];
     for (const row of rows) {
       const match = row.pull_request_url?.match(/^https:\/\/github.com\/billbliss\/watchcraft-collections\/pull\/([1-9][0-9]*)$/);
       if (!match) continue;
@@ -116,7 +117,7 @@ export const syncPullRequests = internalAction({
         headers: { Accept: "application/vnd.github+json", "User-Agent": "Watchcraft-portal" },
       });
       // Leave existing status intact on outages or rate limits; try again next cycle.
-      if (!response.ok) continue;
+      if (!response.ok) { results.push({ executionId: row.execution_id, result: `GitHub HTTP ${response.status}` }); continue; }
       const pr = await response.json();
       if (pr.html_url !== row.pull_request_url || pr.head?.sha !== row.preview_commit ||
           pr.base?.repo?.full_name !== "billbliss/watchcraft-collections" || pr.base?.ref !== "main" ||
@@ -127,6 +128,8 @@ export const syncPullRequests = internalAction({
         executionId: row.execution_id, url: pr.html_url, head: pr.head.sha,
         status: pr.merged ? "merged" : pr.state, ...(pr.merged ? { mergedAt } : {}),
       });
+      results.push({ executionId: row.execution_id, result: pr.merged ? "merged" : pr.state });
     }
+    return results;
   },
 });
