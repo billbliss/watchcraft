@@ -131,6 +131,7 @@ export function ReviewQueue() {
             <div><dt>Estimated model cost</dt><dd>{cost(submission.estimate.expectedCostUsd)}</dd>{submission.estimate.highCostUsd !== null && <small>{cost(submission.estimate.highCostUsd)} conservative</small>}</div>
           </dl>
           <details className="estimate-details approval-details"><summary>Plan details</summary>
+            {submission.collectionName && <p className="muted">Publication folder: <code>collections/{submission.collectionName}/</code></p>}
             <ol className="selected-videos">{submission.selectedItems.map((item, index) => <li key={item.id}>{item.url ? <a href={item.url} target="_blank" rel="noreferrer">{item.title ?? `Video ${index + 1} · ${item.id.slice(8)}`} ↗</a> : item.id}</li>)}</ol>
             <p>Revision {submission.projectRevision}{submission.estimate.confidence ? ` · ${submission.estimate.confidence} confidence` : ""}{submission.estimate.concurrency !== null ? ` · Estimated with ${submission.estimate.concurrency} concurrent videos` : ""}{` · Approved concurrency: ${submission.concurrency}`}</p>
           </details>

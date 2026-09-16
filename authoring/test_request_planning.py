@@ -26,6 +26,17 @@ class RequestPlanningTests(unittest.TestCase):
         self.assertEqual(project["iterator"]["configuration"]["entries"][0]["duration_seconds"], 60)
         self.assertEqual(project["project_id"], "request-request123-r2")
 
+    def test_publication_name_is_readable_and_revision_independent(self):
+        request = {**REQUEST, "title": "Jeanne Bliss — Customer Experience!"}
+        name = p.request_project(request, [VIDEO_DATA])["publication"]["collection_id"]
+        self.assertRegex(name, r"^jeanne-bliss-customer-experience-[a-f0-9]{10}$")
+        revised = {**request, "revision": 9, "_id": "another-request"}
+        self.assertEqual(name, p.request_project(revised, [VIDEO_DATA])["publication"]["collection_id"])
+        other = {**request, "options": [{"scope": "video", "targetUrl": "https://www.youtube.com/watch?v=abcdefghijk"}]}
+        self.assertNotEqual(name, p.request_project(other, [VIDEO_DATA])["publication"]["collection_id"])
+        self.assertRegex(p.publication_name(REQUEST, "你好"), r"^collection-[a-f0-9]{10}$")
+        self.assertLessEqual(len(p.publication_name(REQUEST, "a" * 300)), 91)
+
     def test_over_limit_or_missing_anchor_never_yields_partial_plan(self):
         request = {**REQUEST, "selected_scope": "playlist", "options": [{"scope": "playlist", "targetUrl": "https://www.youtube.com/playlist?list=PL1234567890"}]}
         with patch.object(p, "discover_youtube_playlist", return_value={"video_ids": [VIDEO, "abcdefghijk"]}):

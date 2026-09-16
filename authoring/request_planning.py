@@ -6,6 +6,8 @@ approves a project execution, acquires audio, or runs model processing.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import unicodedata
 import json
 import re
 import uuid
@@ -93,6 +95,17 @@ def request_members(request: dict, max_videos: int) -> list[str]:
     return ids
 
 
+def publication_name(request: dict, title: str) -> str:
+    """Readable public name, independent of internal request/revision identifiers."""
+    slug = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode().lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", slug).strip("-")[:80].rstrip("-") or "collection"
+    scope = request["selected_scope"]
+    target = next((option["targetUrl"] for option in request["options"] if option["scope"] == scope), request["source"]["url"])
+    # Distinguish identically named sources and scopes without exposing request IDs.
+    suffix = hashlib.sha256(f"{scope}:{target}".encode()).hexdigest()[:10]
+    return f"{slug}-{suffix}"
+
+
 def request_project(request: dict, videos: list[dict]) -> dict:
     project_id = f"request-{request['_id']}-r{request['revision']}".lower()
     title = request["title"]
@@ -118,7 +131,7 @@ def request_project(request: dict, videos: list[dict]) -> dict:
                 "placements": [{"placement_id": f"request-placement:{i}", "item_id": entry["item_id"], "parent_node_id": "request-root", "position": i} for i, entry in enumerate(entries, 1)]},
             "access_profile": "public-anonymous", "refresh": {"mode": "on-demand", "stale_while_refresh": True}},
         "metadata": {"title": title}, "metadata_basis": {"title": {"origin": "editorial"}},
-        "publication": {"collection_id": project_id, "listed": True},
+        "publication": {"collection_id": publication_name(request, title), "listed": True},
     }
 
 

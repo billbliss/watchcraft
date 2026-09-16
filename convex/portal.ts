@@ -89,6 +89,7 @@ export const overview = query({
         queuePosition: queuedWorkflows.some(w => w.execution_id === record.execution_id) ? queuedWorkflows.findIndex(w => w.execution_id === record.execution_id) + 1 : null,
         waitingOn: activeTitles.join(", ") || null,
         id: record.execution_id, projectId: record.project_id,
+        collectionName: project?.publication.collection_id ?? null,
         title: projectTitles.get(record.project_id) ?? record.project_id,
         state: execution.state, revision: execution.revision, approvalSha256: execution.approval_sha256,
         submittedAt: execution.created_at, submittedBy: requesterLabels.get(record.execution_id) ?? record.submitted_by ?? null,
