@@ -165,3 +165,16 @@ test("merged PRs move to completed history while closed PRs stay visible", () =>
   expect(within(submitted).queryByText("merged collection")).toBeNull();
   expect(within(submitted).getByText("Pull request closed without merging")).toBeTruthy();
 });
+
+test("video acquisition failures expose read-only CLI and local diagnostic commands", () => {
+  vi.mocked(useQuery).mockImplementation((_query, args?: unknown) => args ? {
+    completed: 18, total: 20, historyLimited: false, failures: [{ id: "youtube:9YG9INjO91Y", title: "Failed video", attempts: 1, failureCount: 1,
+      diagnosticIds: ["0771c792-c3ad-4d43-87f0-dab4aff9c0b6"], errors: [{ occurred_at: 1000, message: "Invalid acquisition metadata" }] }],
+  } : { pending: [], accepted: [], running: [], activeJobs: [], failed: [{ ...submission, workflow: { phase: "processing", state: "failed" } }], completed: [] });
+  vi.mocked(useMutation).mockReturnValue(vi.fn() as unknown as ReturnType<typeof useMutation>);
+  render(<ReviewQueue />);
+  fireEvent.click(screen.getByRole("button", { name: /Show failures/ }));
+  fireEvent.click(screen.getByText("Diagnostics for this video"));
+  expect(screen.getByText("./authoring/watchcraft-author queue project-execution-status --operator-token-source keychain 'execution'")).toBeTruthy();
+  expect(screen.getByText("python3 -m json.tool authoring/diagnostics/0771c792-c3ad-4d43-87f0-dab4aff9c0b6.log")).toBeTruthy();
+});

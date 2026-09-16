@@ -207,3 +207,5 @@ progress { display: block; width: 100%; height: .5rem; accent-color: var(--accen
 .failure-details article { border-top: 1px solid var(--border, #2d4837); padding: .75rem 0; }
 .failure-toggle { background: transparent; border: 0; padding: .4rem 0; color: var(--accent, #9fe5b6); cursor: pointer; font: inherit; text-align: left; }
 .failure-toggle:hover { text-decoration: underline; }
+
+.video-diagnostics pre { max-width: 100%; overflow-x: auto; padding: .75rem; background: #09100c; border-radius: .4rem; font-size: .85rem; }

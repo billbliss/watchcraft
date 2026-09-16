@@ -27,6 +27,7 @@ function Submitted({ submission }: { submission: Submission }) {
     <span>By <strong>{submission.submittedBy ?? "Not recorded"}</strong>{submission.submitterIsCli && " · CLI"}</span></p>;
 }
 
+const shellArgument = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
 function FailureDetails({ item }: { item: Submission }) {
   const [expanded, setExpanded] = useState(false);
   const details = useQuery(api.portal.failureDetails, { executionId: item.id });
@@ -55,6 +56,16 @@ function FailureDetails({ item }: { item: Submission }) {
           <strong>{failure.title}</strong>
           <p className="muted">{failure.attempts ? `${failure.attempts} recorded attempt${failure.attempts === 1 ? "" : "s"} · ` : "Attempt count unavailable · "}{failure.failureCount} recorded failure{failure.failureCount === 1 ? "" : "s"}</p>
           {failure.errors.map((error, index) => <p key={index}><time>{timestamp(error.occurred_at)}</time> — {error.message}</p>)}
+          <details className="video-diagnostics"><summary>Diagnostics for this video</summary>
+            <p>Video ID: <code>{failure.id}</code></p>
+            <p>Run from the Watchcraft repository to inspect this execution:</p>
+            <pre><code>{`./authoring/watchcraft-author queue project-execution-status --operator-token-source keychain ${shellArgument(item.id)}`}</code></pre>
+            {(failure.diagnosticIds ?? []).length > 0 ? <>
+              <p>Audio acquisition logs are on the Mac that ran the worker. Open the matching log to see the download output and metadata error:</p>
+              {failure.diagnosticIds.map(id => <pre key={id}><code>{`python3 -m json.tool authoring/diagnostics/${id}.log`}</code></pre>)}
+            </> : <p>No local diagnostic log was recorded for these attempts. Inspect the execution above for available job IDs; a new acquisition failure will record a local log.</p>}
+            <p className="muted">These commands only inspect existing records. They do not retry processing.</p>
+          </details>
         </article>)}
         </div>}
       </div>}

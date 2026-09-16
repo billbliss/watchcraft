@@ -227,6 +227,8 @@ export const failureDetails = query({
         const failures = new Map(versions.flatMap(version => version.failure ? [[`${version.failure.occurred_at}:${version.failure.message}`, version.failure] as const] : []));
         return { id: item.item_id, title: titles.get(item.item_id) ?? item.item_id,
           attempts: attempts.size, failureCount: failures.size,
+          diagnosticIds: [...new Set([...failures.values()].flatMap(failure =>
+            [...failure.message.matchAll(/\[diagnostic ([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\]/g)].map(match => match[1])))],
           errors: [...failures.values()].sort((a, b) => b.occurred_at - a.occurred_at),
         };
       }),

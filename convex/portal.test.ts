@@ -254,3 +254,15 @@ test("hosted PR sync recognizes merges and ignores changed heads or failed GitHu
     expect(await t.query(internal.portalWorkflows.pendingPullRequests, {})).toEqual([]);
   } finally { vi.unstubAllGlobals(); }
 });
+
+test("video diagnostics expose only valid diagnostic IDs and deduplicate repeated references", async () => {
+  const t = convexTest(schema, modules);
+  const { execution } = await seed(t);
+  const id = "0771c792-c3ad-4d43-87f0-dab4aff9c0b6";
+  await t.run(async ctx => {
+    const row = (await ctx.db.query("authoring_project_executions").first())!;
+    await ctx.db.patch(row._id, { aggregate: { ...execution, state: "failed", items: execution.items.map(item => ({ ...item, state: "failed", failure: { message: `Metadata error [diagnostic ${id}] [diagnostic ${id}] [diagnostic ../../secret]`, occurred_at: 3000 } })) } });
+  });
+  const details = await t.withIdentity(owner).query(api.portal.failureDetails, { executionId: execution.execution_id });
+  expect(details?.failures[0].diagnosticIds).toEqual([id]);
+});
