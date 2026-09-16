@@ -42,6 +42,7 @@
       .nav-links { display: flex; gap: 1.2rem; color: var(--muted); font-size: .92rem; }
       .nav-links a { text-decoration: none; }
       .nav-links a:hover, .nav-links a[aria-current="page"] { color: var(--text); }
+      [data-portal-navigation]:empty { display: none; }
       header > div { padding: clamp(2.5rem, 6vw, 5.5rem) 0 3rem; }
       .eyebrow { margin: 0 0 .7rem; color: var(--accent); font-size: .82rem; font-weight: 750; letter-spacing: .09em; text-transform: uppercase; }
       h1 { margin: 0; font-size: clamp(2.75rem, 7vw, 5.5rem); line-height: .98; letter-spacing: -.045em; }
@@ -72,6 +73,7 @@
           <a href="index.html#collections">Collections</a>
           <a href="gallery.html" aria-current="page">Gallery</a>
           <a href="https://github.com/billbliss/watchcraft">Source</a>
+          <span data-portal-navigation></span>
         </div>
       </nav>
       <div>
@@ -108,5 +110,6 @@
       <p>Watchcraft is an open-source project.</p>
       <p><a href="index.html">Home</a> · <a href="https://github.com/billbliss/watchcraft">Application source</a> · <a href="https://github.com/billbliss/watchcraft-collections">Collection source</a></p>
     </footer>
+    <script type="module" src="/portal/navigation.js"></script>
   </body>
 </html>

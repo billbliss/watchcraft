@@ -117,7 +117,7 @@ def youtube_text(value: Any) -> str:
         return " ".join(value.split())
     if not isinstance(value, dict):
         return ""
-    simple_text = value.get("simpleText")
+    simple_text = value.get("simpleText") or value.get("content")
     if isinstance(simple_text, str):
         return " ".join(simple_text.split())
     runs = value.get("runs")

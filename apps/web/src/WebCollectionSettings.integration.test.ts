@@ -269,3 +269,23 @@ test("featured picker hides collections already saved in the browser", async () 
   ));
   assert.equal(view.queryAllByRole("option").length, 0);
 });
+
+test("failed imports offer a contextual suggestion and preserve recognized YouTube input", async () => {
+  installDom();
+  const suggestions: Array<string | undefined> = [];
+  const view = render(createElement(WebCollectionSettings, {
+    activeCollectionId: null, busy: false, collections: [], error: null, openFeaturedPicker: false,
+    onAddUrl: async () => false, onClose: () => undefined, onOpenDiagnostics: () => undefined,
+    onRemove: () => undefined, onSwitch: () => undefined, onSuggestCollection: source => suggestions.push(source),
+  }));
+  const input = view.getByRole("combobox", { name: "Collection URL or featured collection" });
+  fireEvent.change(input, { target: { value: "https://youtu.be/PjObX9XQvgI" } });
+  fireEvent.click(view.getByRole("button", { name: "Add", exact: true }));
+  fireEvent.click(await view.findByRole("button", { name: "Open suggestion form ↗" }));
+  assert.deepEqual(suggestions, ["https://youtu.be/PjObX9XQvgI"]);
+  fireEvent.change(input, { target: { value: "https://example.com/not-a-collection" } });
+  assert.equal(view.queryByRole("button", { name: "Open suggestion form ↗" }), null);
+  fireEvent.click(view.getByRole("button", { name: "Add", exact: true }));
+  fireEvent.click(await view.findByRole("button", { name: "Suggest a collection ↗" }));
+  assert.equal(suggestions[1], undefined);
+});

@@ -9,6 +9,10 @@
   ],
   "scripts": {
     "build": "npm run build --workspace @watchcraft/web",
+    "portal:dev": "npm run dev --workspace @watchcraft/portal",
+    "portal:build": "npm run build --workspace @watchcraft/portal",
+    "site:build": "npm run build && npm run portal:build && node scripts/assemble-site.mjs",
+    "site:preview": "vite preview --config scripts/site-preview.config.mjs --host 127.0.0.1 --outDir dist --base /",
     "desktop:build": "npm run build --workspace @watchcraft/desktop",
     "desktop:build:beta": "npm run build:beta --workspace @watchcraft/desktop",
     "desktop:build:linux": "npm exec --workspace @watchcraft/desktop -- tauri build --bundles deb,appimage",

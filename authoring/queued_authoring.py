@@ -6,6 +6,7 @@ import argparse
 import copy
 import concurrent.futures
 import hashlib
+import getpass
 import json
 import math
 import os
@@ -7525,10 +7526,9 @@ def project_execution_work(
     ]
 
 
-def run_create_project_execution(args: argparse.Namespace) -> int:
+def create_pending_project_execution(control: AuthoringHttpClient, args: argparse.Namespace) -> dict[str, Any]:
     if args.concurrency < 1 or args.concurrency > 8:
         raise ValueError("--concurrency must be between 1 and 8")
-    control = operator_client(args.operator_token_source)
     _, plan_reference, plan = load_authoritative_project_plan(
         control, args.plan_job_id, args.r2_credentials_source
     )
@@ -7551,8 +7551,11 @@ def run_create_project_execution(args: argparse.Namespace) -> int:
         uuid.NAMESPACE_URL,
         f"https://watchcraft.dev/authoring/project-executions/{sha256_hex(canonical_json(execution_basis))}",
     ))
-    result = control.post("/project-executions/create", {
+    request_args = getattr(args, "request_args", None)
+    result = control.post("/requests/create-execution" if request_args else "/project-executions/create", {
+        **(request_args or {}),
         "command_id": str(uuid.uuid4()),
+        "submitted_by": args.submitted_by or getpass.getuser(),
         "execution": {
             "execution_id": execution_id,
             "project": plan["project"],
@@ -7574,10 +7577,20 @@ def run_create_project_execution(args: argparse.Namespace) -> int:
             "items": project_execution_work(plan_reference, items),
         },
     })
+    return result
+
+
+def run_create_project_execution(args: argparse.Namespace) -> int:
+    control = operator_client(args.operator_token_source)
+    result = create_pending_project_execution(control, args)
     execution = result["execution"]
-    compact_estimate = compact_project_estimate(plan["estimate"])
+    execution_id = execution["execution_id"]
+    concurrency = execution["policy"]["concurrency"]
+    selected_count = len(execution["selection"]["item_ids"])
+    planned_count = execution["estimate"]["planned_items"]
+    compact_estimate = compact_project_estimate(execution["estimate"]["plan_estimate"])
     estimate_details = [
-        f"Estimate basis: full {len(plan['items'])}-item plan; selected: {len(items)}."
+        f"Estimate basis: full {planned_count}-item plan; selected: {selected_count}."
     ]
     if "expected_seconds" in compact_estimate:
         estimate_details.append(
@@ -7588,7 +7601,7 @@ def run_create_project_execution(args: argparse.Namespace) -> int:
         )
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True), flush=True)
     print_operator_handoff(
-        f"Created project execution {execution_id} for {len(items)} item(s).",
+        f"Created project execution {execution_id} for {selected_count} item(s).",
         details=[
             f"State: {execution['state']}; concurrency: {concurrency}.",
             *estimate_details,
@@ -9183,7 +9196,7 @@ def run_publish_project(args: argparse.Namespace) -> int:
     return 0
 
 
-def run_compile_project(args: argparse.Namespace) -> int:
+def run_compile_project(args: argparse.Namespace, *, completed_callback: Callable[[str], None] | None = None) -> int:
     command_started_at = time.monotonic()
     control = operator_client(args.operator_token_source)
     plan_submission = control.post("/submissions/get", {"job_id": args.plan_job_id})
@@ -9402,6 +9415,8 @@ def run_compile_project(args: argparse.Namespace) -> int:
         details=details,
         next_command=materialize_command,
     )
+    if completed_callback is not None:
+        completed_callback(job_id)
     return 0
 
 
@@ -9869,6 +9884,10 @@ def run_youtube_video_pipeline(
                     maximum_bytes=settings["maximum_bytes"],
                     maximum_duration_seconds=settings["maximum_duration_seconds"],
                     timeout_seconds=YOUTUBE_TRANSCRIPTION_TIMEOUT_SECONDS,
+                    diagnostic_context={"execution_id": getattr(args, "execution_id", None),
+                        "run_id": run_id, "item_id": (project_execution or {}).get("item_id", video_id),
+                        "transcription_job_id": transcription_job_id, "analysis_job_id": analysis_job_id,
+                        "disposition": existing_disposition},
                 )
                 acquisition_ms = elapsed_milliseconds(acquisition_started_at)
                 acquisition = youtube_acquisition_provenance(
@@ -10500,6 +10519,28 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         default="auto",
         help="Temporary source-media uploader credential source (default: auto)",
     )
+    commands.add_parser("request-inbox", parents=[credentials], help="List collection requests marked for planning")
+    portal_runner = commands.add_parser("run-portal-worker", parents=[credentials], help="Process accepted portal plans and requested publication actions")
+    portal_runner.add_argument("--once", action="store_true")
+    portal_runner.add_argument("--poll-seconds", type=int, default=10)
+    portal_runner.add_argument("--r2-credentials-source", choices=("auto", "keychain", "environment"), default="auto")
+    portal_runner.add_argument("--r2-staging-credentials-source", choices=("auto", "keychain", "environment"), default="auto")
+    request_runner = commands.add_parser("run-request-planner", parents=[credentials], help="Automatically prepare requests marked for planning; never approve processing")
+    request_runner.add_argument("--once", action="store_true", help="Prepare at most one queued request, then exit")
+    request_runner.add_argument("--poll-seconds", type=int, default=10)
+    request_runner.add_argument("--max-videos", type=int, default=500)
+    request_runner.add_argument("--timeout-seconds", type=int, default=900)
+    request_runner.add_argument("--r2-credentials-source", choices=("auto", "keychain", "environment"), default="auto")
+    prepare_request = commands.add_parser("prepare-request", parents=[credentials], help="Prepare a reviewed request for owner approval using metadata-only jobs")
+    prepare_request.add_argument("request_id")
+    prepare_request.add_argument("--expected-revision", type=int, required=True)
+    prepare_request.add_argument("--max-videos", type=int, default=500, help="Stop without a partial plan above this limit (default: 500)")
+    prepare_request.add_argument("--timeout-seconds", type=int, default=900)
+    prepare_request.add_argument("--r2-credentials-source", choices=("auto", "keychain", "environment"), default="auto")
+    link_request = commands.add_parser("link-request", parents=[credentials], help="Connect a collection request to a pending execution for approval")
+    link_request.add_argument("request_id")
+    link_request.add_argument("execution_id")
+    link_request.add_argument("--expected-revision", type=int, required=True)
     create_execution = commands.add_parser(
         "create-project-execution",
         parents=[credentials],
@@ -10511,6 +10552,9 @@ def add_queue_parsers(parent: argparse.ArgumentParser) -> None:
         ),
     )
     create_execution.add_argument("--plan-job-id", required=True)
+    create_execution.add_argument(
+        "--submitted-by", help="Submitter name or email for review (defaults to your local username)",
+    )
     execution_selection = create_execution.add_mutually_exclusive_group(required=True)
     execution_selection.add_argument("--limit", type=int, help="Select the first N plan items")
     execution_selection.add_argument("--item", dest="item_id", help="Select one exact plan item ID")
@@ -11078,6 +11122,25 @@ def run_queue_command(args: argparse.Namespace) -> int:
         return run_iterate_project(args)
     if args.queue_command == "plan-project":
         return run_plan_project(args)
+    if args.queue_command == "run-portal-worker":
+        from portal_worker import run_portal_worker
+        return run_portal_worker(args, sys.modules[__name__])
+    if args.queue_command == "run-request-planner":
+        from request_runner import run_request_planner
+        return run_request_planner(args, sys.modules[__name__])
+    if args.queue_command == "prepare-request":
+        from request_planning import prepare_request
+        return prepare_request(args, sys.modules[__name__])
+    if args.queue_command == "request-inbox":
+        print(json.dumps(operator_client(args).post("/requests/planning", {}), indent=2))
+        return 0
+    if args.queue_command == "link-request":
+        operator_client(args).post("/requests/link-execution", {
+            "request_id": args.request_id, "execution_id": args.execution_id,
+            "expected_revision": args.expected_revision,
+        })
+        print("Request linked to its processing plan. Approval is still required.")
+        return 0
     if args.queue_command == "create-project-execution":
         return run_create_project_execution(args)
     if args.queue_command == "approve-project-execution":

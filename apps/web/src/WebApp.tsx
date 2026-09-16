@@ -1,3 +1,4 @@
+import { isYouTubeSource, submissionUrl } from "@watchcraft/catalog-core";
 import { useCallback, useEffect, useMemo, useState, type ReactElement } from "react";
 import type { CollectionManifest } from "@watchcraft/catalog-core";
 import { App } from "./App";
@@ -153,6 +154,7 @@ function EmptyWebApp({ onChoose }: { onChoose: () => void }): ReactElement {
         <p>Browse featured web-video collections or add a collection URL.</p>
         <div className="web-empty-library-actions">
           <button className="action primary" onClick={onChoose} type="button">Choose a collection</button>
+          <a href="/submit/" target="_blank" rel="noreferrer">Add to Watchcraft</a>
           <a href="/">Watchcraft home</a>
         </div>
       </div>
@@ -240,7 +242,15 @@ export function WebApp(): ReactElement {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
+  function suggestCollection(source?: string): void {
+    window.open(submissionUrl(source, new URL("/submit/", window.location.origin).href), "_blank", "noopener,noreferrer");
+  }
+
   async function addCollection(rawUrl: string, openAfter: boolean): Promise<boolean> {
+    if (isYouTubeSource(rawUrl)) {
+      setSettingsError(null);
+      return false;
+    }
     setSettingsBusy(true);
     setSettingsError(null);
     try {
@@ -343,6 +353,7 @@ export function WebApp(): ReactElement {
           onCollectionLoaded={rememberLoadedCollection}
           onDiagnosticEvent={recordDiagnostic}
           onOpenDiagnostics={() => setDiagnosticsOpen(true)}
+          onAddToWatchcraft={() => suggestCollection()}
           onOpenSettings={() => {
             setSettingsError(null);
             setSettingsOpen(true);
@@ -360,6 +371,7 @@ export function WebApp(): ReactElement {
       )}
       {settingsOpen && !diagnosticsOpen ? (
         <WebCollectionSettings
+          onSuggestCollection={(source) => suggestCollection(source)}
           activeCollectionId={currentCollectionId}
           busy={settingsBusy}
           collections={collections}

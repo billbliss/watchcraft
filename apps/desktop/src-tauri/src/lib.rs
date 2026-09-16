@@ -88,8 +88,11 @@ fn validated_external_url(requested_url: &str) -> Result<Url, String> {
         .host_str()
         .map(str::to_ascii_lowercase)
         .ok_or_else(|| "The requested external URL has no host.".to_string())?;
-    if host != "youtube.com" && !host.ends_with(".youtube.com") && host != "youtu.be" {
-        return Err("Only YouTube links can be opened externally.".into());
+    let submission = host == "watchcraft.stream" && url.path() == "/submit/"
+        && url.username().is_empty() && url.password().is_none() && url.port().is_none()
+        && url.query().is_none();
+    if !submission && host != "youtube.com" && !host.ends_with(".youtube.com") && host != "youtu.be" {
+        return Err("Only YouTube links and the Watchcraft submission page can be opened externally.".into());
     }
     Ok(url)
 }
@@ -1413,11 +1416,16 @@ mod tests {
     }
 
     #[test]
-    fn allows_only_secure_youtube_external_links() {
+    fn allows_secure_youtube_and_exact_submission_page_links() {
         assert!(validated_external_url("https://www.youtube.com/watch?v=PjObX9XQvgI").is_ok());
         assert!(validated_external_url("https://youtu.be/PjObX9XQvgI").is_ok());
         assert!(validated_external_url("http://www.youtube.com/watch?v=PjObX9XQvgI").is_err());
         assert!(validated_external_url("https://example.com/watch?v=PjObX9XQvgI").is_err());
+        assert!(validated_external_url("https://watchcraft.stream/submit/#source=video").is_ok());
+        assert!(validated_external_url("https://watchcraft.stream/elsewhere/").is_err());
+        assert!(validated_external_url("https://watchcraft.stream.evil.test/submit/").is_err());
+        assert!(validated_external_url("https://person@watchcraft.stream/submit/").is_err());
+        assert!(validated_external_url("https://watchcraft.stream/submit/?source=video").is_err());
     }
 
     #[test]

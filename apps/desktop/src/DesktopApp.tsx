@@ -1,3 +1,4 @@
+import { isYouTubeSource, submissionUrl } from "@watchcraft/catalog-core";
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
@@ -207,7 +208,16 @@ export function DesktopApp(): ReactElement {
     }
   }
 
+  async function suggestCollection(source?: string): Promise<boolean> {
+    try { await invoke("open_external_url", { url: submissionUrl(source) }); return true; }
+    catch (error) { setSettingsError(errorMessage(error)); setSettingsOpen(true); return false; }
+  }
+
   async function addUrl(url: string, openAfter: boolean): Promise<boolean> {
+    if (isYouTubeSource(url)) {
+      setSettingsError(null);
+      return false;
+    }
     setBusy(true);
     setSettingsError(null);
     try {
@@ -377,6 +387,7 @@ export function DesktopApp(): ReactElement {
 
   const settings = settingsOpen && !diagnosticsOpen ? (
     <CollectionSettings
+      onSuggestCollection={(source) => void suggestCollection(source)}
       appVersion={appVersion}
       busy={busy}
       collections={collections}
@@ -426,6 +437,7 @@ export function DesktopApp(): ReactElement {
         key={libraryLocation?.manifestPath}
         onDiagnosticEvent={diagnosticsEnabled ? recordDiagnostic : undefined}
         onOpenDiagnostics={diagnosticsEnabled ? () => setDiagnosticsOpen(true) : undefined}
+        onAddToWatchcraft={() => void suggestCollection()}
         onOpenSettings={() => {
           setSettingsError(null);
           setSettingsOpen(true);

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import datetime
+import time
+import uuid
 import hashlib
 import json
 import re
@@ -161,13 +164,68 @@ def classify_youtube_acquisition_failure(message: str) -> tuple[str, bool]:
     return "source_acquisition_failed", True
 
 
-def download_youtube_audio(
+DIAGNOSTICS_DIRECTORY = Path(__file__).resolve().parent / "diagnostics"
+
+
+def sanitized_diagnostic_text(value: str | bytes | None) -> str:
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    lines = []
+    for line in (value or "").splitlines():
+        if re.search(r"cookie|authorization|bearer|password|secret|token|api[_-]?key", line, re.I):
+            lines.append("[credential-bearing line omitted]")
+        else:
+            line = re.sub(r"https?://[^\s\"<>]+", "[URL omitted]", line)
+            line = re.sub(r"/(?:Users|home|private|tmp)/[^\s\"]+", "[local path omitted]", line)
+            lines.append(line)
+    return "\n".join(lines)[-4000:]
+
+
+def download_youtube_audio(value: str, destination: Path, *, maximum_bytes: int,
+                           maximum_duration_seconds: int, timeout_seconds: int,
+                           diagnostic_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Retain bounded failure evidence independently of temporary media files."""
+    started = time.monotonic()
+    diagnostic = {
+        "diagnostic_id": str(uuid.uuid4()), "step": "youtube-audio-acquisition",
+        "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "video_url": canonical_youtube_url(value),
+        "context": {key: sanitized_diagnostic_text(str(value)) for key, value in (diagnostic_context or {}).items()
+                    if key in {"execution_id", "run_id", "item_id", "transcription_job_id", "analysis_job_id", "disposition"}},
+    }
+    try:
+        return _download_youtube_audio(value, destination, maximum_bytes=maximum_bytes,
+            maximum_duration_seconds=maximum_duration_seconds, timeout_seconds=timeout_seconds,
+            diagnostic=diagnostic)
+    except YouTubeAcquisitionError as error:
+        diagnostic.update(finished_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            elapsed_seconds=round(time.monotonic() - started, 3),
+            classification=error.classification, retryable=error.retryable,
+            error=sanitized_diagnostic_text(str(error)))
+        path = DIAGNOSTICS_DIRECTORY / (diagnostic["diagnostic_id"] + ".log")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            for old in path.parent.glob("*.log"):
+                if old.stat().st_mtime < time.time() - 30 * 86400:
+                    old.unlink(missing_ok=True)
+            with path.open("x", encoding="utf-8") as output:
+                path.chmod(0o600)
+                json.dump(diagnostic, output, indent=2)
+            print(f"Acquisition diagnostics: {path}", file=sys.stderr, flush=True)
+            message = f"{diagnostic['error']} [diagnostic {diagnostic['diagnostic_id']}]"
+        except OSError:
+            message = f"{diagnostic['error']} (diagnostic log could not be saved)"
+        raise YouTubeAcquisitionError(message, error.classification, error.retryable) from error
+
+
+def _download_youtube_audio(
     value: str,
     destination: Path,
     *,
     maximum_bytes: int,
     maximum_duration_seconds: int,
     timeout_seconds: int,
+    diagnostic: dict[str, Any],
 ) -> dict[str, Any]:
     """Acquire one public original audio stream and return its observed identity."""
     video_id = youtube_video_id(value)
@@ -177,6 +235,7 @@ def download_youtube_audio(
     command = yt_dlp_command()
     try:
         version = command_version(command)
+        diagnostic["yt_dlp_version"] = version
     except RuntimeError as error:
         raise YouTubeAcquisitionError(
             str(error), "worker_dependency_missing", False
@@ -195,6 +254,7 @@ def download_youtube_audio(
             timeout=timeout_seconds,
         )
     except subprocess.TimeoutExpired as error:
+        diagnostic.update(timeout_seconds=timeout_seconds, stdout=sanitized_diagnostic_text(error.stdout), stderr=sanitized_diagnostic_text(error.stderr))
         destination.unlink(missing_ok=True)
         raise YouTubeAcquisitionError(
             f"YouTube audio acquisition timed out after {timeout_seconds}s",
@@ -208,9 +268,10 @@ def download_youtube_audio(
             "worker_dependency_missing",
             False,
         ) from error
+    diagnostic.update(exit_code=completed.returncode, stdout=sanitized_diagnostic_text(completed.stdout), stderr=sanitized_diagnostic_text(completed.stderr))
     if completed.returncode != 0:
         destination.unlink(missing_ok=True)
-        detail = " ".join(completed.stderr.split())[:400]
+        detail = " ".join(sanitized_diagnostic_text(completed.stderr).split())[:400]
         classification, retryable = classify_youtube_acquisition_failure(detail)
         raise YouTubeAcquisitionError(
             f"yt-dlp could not acquire YouTube audio: {detail or 'unknown error'}",
@@ -225,6 +286,7 @@ def download_youtube_audio(
         )
 
     byte_length = destination.stat().st_size
+    diagnostic["audio_bytes"] = byte_length
     if byte_length < 1 or byte_length > maximum_bytes:
         destination.unlink(missing_ok=True)
         raise YouTubeAcquisitionError(
@@ -235,9 +297,10 @@ def download_youtube_audio(
     try:
         metadata = json.loads(completed.stdout.strip().splitlines()[-1])
     except (IndexError, json.JSONDecodeError) as error:
+        diagnostic["validation_error"] = "No metadata line returned" if isinstance(error, IndexError) else f"{error.msg} at line {error.lineno}, column {error.colno}"
         destination.unlink(missing_ok=True)
         raise YouTubeAcquisitionError(
-            "yt-dlp returned invalid acquisition metadata",
+            f"yt-dlp returned invalid acquisition metadata: {diagnostic['validation_error']}",
             "source_acquisition_failed",
             True,
         ) from error

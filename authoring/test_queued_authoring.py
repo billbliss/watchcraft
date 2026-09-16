@@ -1105,6 +1105,21 @@ class QueuedAuthoringTests(unittest.TestCase):
             handoff.getvalue(),
         )
 
+    def test_request_inbox_and_link_handoff_use_operator_routes(self):
+        control = Mock()
+        control.post.return_value = []
+        with patch("queued_authoring.operator_client", return_value=control), redirect_stdout(io.StringIO()):
+            self.assertEqual(queued_authoring.run_queue_command(build_parser().parse_args([
+                "queue", "request-inbox",
+            ])), 0)
+            control.post.assert_called_with("/requests/planning", {})
+            self.assertEqual(queued_authoring.run_queue_command(build_parser().parse_args([
+                "queue", "link-request", "request-1", "execution-1", "--expected-revision", "2",
+            ])), 0)
+            control.post.assert_called_with("/requests/link-execution", {
+                "request_id": "request-1", "execution_id": "execution-1", "expected_revision": 2,
+            })
+
     def test_create_project_execution_reserves_exact_selected_child_work(self):
         plan_reference = {"digest": "d" * 64}
         plan = {
@@ -1131,7 +1146,7 @@ class QueuedAuthoringTests(unittest.TestCase):
         control.post.side_effect = post
         args = build_parser().parse_args([
             "queue", "create-project-execution",
-            "--plan-job-id", "plan-job-1", "--all", "--concurrency", "2",
+            "--plan-job-id", "plan-job-1", "--all", "--concurrency", "2", "--submitted-by", "Bill",
         ])
         with patch("queued_authoring.operator_client", return_value=control), patch(
             "queued_authoring.load_authoritative_project_plan",
@@ -1141,6 +1156,7 @@ class QueuedAuthoringTests(unittest.TestCase):
             return_value=plan["items"],
         ), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             self.assertEqual(queued_authoring.run_create_project_execution(args), 0)
+        self.assertEqual(captured["submitted_by"], "Bill")
         execution = captured["execution"]
         self.assertEqual(execution["selection"]["item_ids"], [
             "youtube:first", "youtube:second",

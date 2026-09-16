@@ -28,6 +28,7 @@ interface AppProps {
   onDiagnosticEvent?: (event: DiagnosticEvent) => void;
   onOpenDiagnostics?: () => void;
   onOpenSettings?: () => void;
+  onAddToWatchcraft?: () => void;
   routeBasePath?: string;
   sidebarFooter?: ReactElement;
   videoRouteMode?: "path" | "query";
@@ -208,6 +209,7 @@ export function App({
   onDiagnosticEvent,
   onOpenDiagnostics,
   onOpenSettings,
+  onAddToWatchcraft,
   repository,
   routeBasePath = "/",
   sidebarFooter,
@@ -652,8 +654,9 @@ export function App({
           <h1>Catalog unavailable</h1>
           <p>{loadError}</p>
           <code>{repository.manifestLocation}</code>
-          {(onOpenSettings || onOpenDiagnostics) ? (
+          {(onOpenSettings || onOpenDiagnostics || onAddToWatchcraft) ? (
             <div className="status-card-actions">
+              {onAddToWatchcraft ? <button className="action" onClick={onAddToWatchcraft} type="button">Add to Watchcraft</button> : null}
               {onOpenSettings ? (
                 <button className="action primary" onClick={onOpenSettings} type="button">Choose collection</button>
               ) : null}

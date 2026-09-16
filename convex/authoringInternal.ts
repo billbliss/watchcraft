@@ -130,6 +130,7 @@ async function persistProjectExecution(
       project_id: next.project.project_id,
       aggregate: next,
       updated_at: now,
+      ...(stored.submitted_by ? { submitted_by: stored.submitted_by } : {}),
     });
   } else {
     await ctx.db.insert("authoring_project_executions", {
@@ -474,7 +475,7 @@ export const listProjectExecutions = internalQuery({
 });
 
 export const createProjectExecutionRecord = internalMutation({
-  args: { command_id: v.string(), execution: v.any() },
+  args: { command_id: v.string(), execution: v.any(), submitted_by: v.optional(v.string()) },
   returns: v.any(),
   handler: async (ctx, args) => {
     const input = args.execution as ProjectExecutionInput;
@@ -482,7 +483,13 @@ export const createProjectExecutionRecord = internalMutation({
     if (typeof executionId !== "string" || executionId.length === 0) {
       throw new TypeError("Execution ID is required.");
     }
-    const commandSha256 = projectExecutionCommandSha256("create", { execution: input });
+    if (args.submitted_by !== undefined && (!args.submitted_by.trim() || args.submitted_by.length > 200)) {
+      throw new TypeError("Submitter must contain between 1 and 200 characters.");
+    }
+    const commandSha256 = projectExecutionCommandSha256("create", {
+      execution: input,
+      ...(args.submitted_by !== undefined ? { submitted_by: args.submitted_by } : {}),
+    });
     const replay = await projectExecutionCommand(ctx, executionId, args.command_id);
     if (replay) {
       if (replay.command_sha256 !== commandSha256) {
@@ -503,6 +510,10 @@ export const createProjectExecutionRecord = internalMutation({
     const now = Date.now();
     const execution = createProjectExecution(input, args.command_id, now);
     await persistProjectExecution(ctx, null, null, execution, args.command_id, commandSha256, now);
+    if (args.submitted_by) {
+      const stored = await projectExecutionDocument(ctx, executionId);
+      await ctx.db.patch(stored!._id, { submitted_by: args.submitted_by.trim() });
+    }
     return { execution, created: true };
   },
 });

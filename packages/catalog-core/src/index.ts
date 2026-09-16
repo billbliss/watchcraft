@@ -369,3 +369,5 @@ export function displayClock(
     ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`
     : `${minutes}:${String(remainder).padStart(2, "0")}`;
 }
+
+export { parseYouTubeSource, isYouTubeSource, submissionUrl, type YouTubeSource, type RequestScope } from "./youtubeRequest.ts";

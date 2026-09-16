@@ -45,6 +45,7 @@
       .nav-links { display: flex; gap: 1.2rem; color: var(--muted); font-size: .92rem; }
       .nav-links a { text-decoration: none; }
       .nav-links a:hover { color: var(--text); }
+      [data-portal-navigation]:empty { display: none; }
       .hero {
         display: grid;
         grid-template-columns: minmax(0, .9fr) minmax(24rem, 1.1fr);
@@ -144,8 +145,10 @@
           <a data-web-app-link href="app/">Open web app</a>
           <a href="#download">Download</a>
           <a href="#collections">Collections</a>
+          <a href="submit/">Suggest a collection</a>
           <a href="gallery.html">Gallery</a>
           <a href="https://github.com/billbliss/watchcraft">Source</a>
+          <span data-portal-navigation></span>
         </div>
       </nav>
       <div class="hero" id="top">
@@ -207,6 +210,7 @@
         <div class="collection-grid" id="collection-grid" aria-live="polite">
           <article class="collection-card"><p>Loading available collections…</p></article>
         </div>
+        <p style="margin-top: 1.5rem"><strong>Something missing?</strong> <a href="submit/">Suggest a video, playlist, or channel</a> you’d like to see in Watchcraft. No account required.</p>
         <p class="fine-print" style="margin-top: 1rem">Web-video collections can open in your browser or the desktop app. Collections using local videos require the desktop app.</p>
       </section>
 
@@ -238,5 +242,6 @@
       <p><a href="https://github.com/billbliss/watchcraft">Application source</a> · <a href="https://github.com/billbliss/watchcraft-collections">Collection source</a></p>
     </footer>
     <script type="module" src="app.js?v=directory-v8"></script>
+    <script type="module" src="/portal/navigation.js"></script>
   </body>
 </html>

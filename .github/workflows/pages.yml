@@ -8,6 +8,8 @@ on:
     paths:
       - ".github/workflows/pages.yml"
       - "apps/web/**"
+      - "apps/portal/**"
+      - "scripts/assemble-site.mjs"
       - "packages/catalog-core/**"
       - "package.json"
       - "package-lock.json"
@@ -36,23 +38,22 @@ jobs:
           cache: npm
       - name: Install JavaScript dependencies
         run: npm ci
-      - name: Build Watchcraft Web
-        run: npm run build --workspace @watchcraft/web
-      - name: Assemble the public site
+      - name: Build Watchcraft website and portal
+        env:
+          VITE_CLERK_PUBLISHABLE_KEY: ${{ vars.VITE_CLERK_PUBLISHABLE_KEY }}
+          VITE_CONVEX_URL: ${{ vars.VITE_CONVEX_URL }}
         run: |
-          mkdir -p _site/assets
-          cp site/index.html site/gallery.html site/app.js site/directory.mjs _site/
-          cp -R site/gallery _site/gallery
-          cp -R site/youtube-player _site/youtube-player
-          cp -R apps/web/dist _site/app
-          cp apps/desktop/src-tauri/icons/128x128.png _site/assets/watchcraft.png
-          touch _site/.nojekyll
+          if [[ "$VITE_CLERK_PUBLISHABLE_KEY" != pk_live_* || -z "$VITE_CONVEX_URL" ]]; then
+            echo "Configure the production Clerk publishable key and Convex URL in repository variables."
+            exit 1
+          fi
+          npm run site:build
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v6
       - name: Upload GitHub Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:
-          path: _site
+          path: dist
 
   deploy:
     needs: build

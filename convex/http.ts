@@ -59,7 +59,16 @@ function queryRoute(functionReference: any, verifierName: string) {
 
 const workerVerifier = "AUTHORING_WORKER_TOKEN_SHA256";
 const operatorVerifier = "AUTHORING_OPERATOR_TOKEN_SHA256";
+http.route({ path: "/authoring/operator/portal/claim", method: "POST", handler: mutationRoute(internal.portalWorkflows.claim, operatorVerifier) });
+http.route({ path: "/authoring/operator/portal/update", method: "POST", handler: mutationRoute(internal.portalWorkflows.update, operatorVerifier) });
+http.route({ path: "/authoring/operator/requests/poll", method: "POST", handler: mutationRoute(internal.collectionRequests.pollPlanner, operatorVerifier) });
+http.route({ path: "/authoring/operator/requests/disconnect", method: "POST", handler: mutationRoute(internal.collectionRequests.disconnectPlanner, operatorVerifier) });
 const registryAdminVerifier = "AUTHORING_REGISTRY_ADMIN_TOKEN_SHA256";
+http.route({ path: "/authoring/operator/requests/create-execution", method: "POST", handler: mutationRoute(internal.collectionRequests.createPreparedExecution, operatorVerifier) });
+http.route({ path: "/authoring/operator/requests/get", method: "POST", handler: queryRoute(internal.collectionRequests.preparationRequest, operatorVerifier) });
+http.route({ path: "/authoring/operator/requests/progress", method: "POST", handler: mutationRoute(internal.collectionRequests.preparationProgress, operatorVerifier) });
+http.route({ path: "/authoring/operator/requests/planning", method: "POST", handler: queryRoute(internal.collectionRequests.planningRequests, operatorVerifier) });
+http.route({ path: "/authoring/operator/requests/link-execution", method: "POST", handler: mutationRoute(internal.collectionRequests.linkExecution, operatorVerifier) });
 
 http.route({ path: "/authoring/smoke/prepare", method: "POST", handler: mutationRoute(internal.authoringInternal.prepareSmokeJob, workerVerifier) });
 http.route({ path: "/authoring/jobs/dispatch/record", method: "POST", handler: mutationRoute(internal.authoringInternal.recordDispatch, workerVerifier) });

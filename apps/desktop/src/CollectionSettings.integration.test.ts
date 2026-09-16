@@ -206,3 +206,22 @@ test("desktop featured picker hides installed collections, including archived on
   ));
   assert.equal(view.queryAllByRole("option").length, 0);
 });
+
+test("failed desktop imports offer a contextual YouTube suggestion", async () => {
+  globalThis.fetch = async () => new Response(JSON.stringify({ collections: [] }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+  const suggestions: Array<string | undefined> = [];
+  const view = render(createElement(CollectionSettings, {
+    appVersion: "test", busy: false, collections: [], error: null,
+    onAddFolder: async () => false, onAddUrl: async () => false, onClose: () => undefined,
+    onLocateMedia: async () => undefined, onRemove: async () => undefined,
+    onSetArchived: async () => undefined, onSwitch: async () => undefined, onUpdate: async () => undefined,
+    onSuggestCollection: source => suggestions.push(source),
+  }));
+  fireEvent.change(view.getByRole("combobox", { name: "Collection URL or featured collection" }), { target: { value: "@CustomerBliss" } });
+  fireEvent.click(view.getByRole("button", { name: "Add", exact: true }));
+  fireEvent.click(await view.findByRole("button", { name: "Open suggestion form ↗" }));
+  assert.deepEqual(suggestions, ["@CustomerBliss"]);
+});

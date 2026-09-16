@@ -11,8 +11,12 @@
 import type * as authoringCleanup from "../authoringCleanup.js";
 import type * as authoringInternal from "../authoringInternal.js";
 import type * as authoringRegistry from "../authoringRegistry.js";
+import type * as collectionRequests from "../collectionRequests.js";
 import type * as crons from "../crons.js";
 import type * as http from "../http.js";
+import type * as portal from "../portal.js";
+import type * as portalWorkflows from "../portalWorkflows.js";
+import type * as requestDiscovery from "../requestDiscovery.js";
 
 import type {
   ApiFromModules,
@@ -24,8 +28,12 @@ declare const fullApi: ApiFromModules<{
   authoringCleanup: typeof authoringCleanup;
   authoringInternal: typeof authoringInternal;
   authoringRegistry: typeof authoringRegistry;
+  collectionRequests: typeof collectionRequests;
   crons: typeof crons;
   http: typeof http;
+  portal: typeof portal;
+  portalWorkflows: typeof portalWorkflows;
+  requestDiscovery: typeof requestDiscovery;
 }>;
 
 /**

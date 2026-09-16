@@ -1,3 +1,4 @@
+import { isYouTubeSource } from "@watchcraft/catalog-core";
 import {
   useEffect,
   useMemo,
@@ -45,6 +46,7 @@ interface CollectionSettingsProps {
   onAddFolder: (openAfter: boolean) => Promise<boolean>;
   onAddUrl: (url: string, openAfter: boolean) => Promise<boolean>;
   onClose: () => void;
+  onSuggestCollection?: (source?: string) => void;
   onLocateMedia: (collection: RegisteredCollection) => Promise<void>;
   onOpenDiagnostics?: () => void;
   onRemove: (collection: RegisteredCollection) => Promise<void>;
@@ -68,6 +70,7 @@ export function CollectionSettings({
   onAddFolder,
   onAddUrl,
   onClose,
+  onSuggestCollection,
   onLocateMedia,
   onOpenDiagnostics,
   onRemove,
@@ -78,6 +81,7 @@ export function CollectionSettings({
   const [openAfter, setOpenAfter] = useState(true);
   const [showArchived, setShowArchived] = useState(false);
   const [url, setUrl] = useState("");
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const [featuredCollections, setFeaturedCollections] = useState<PublicCollectionDirectoryEntry[]>(
     FALLBACK_FEATURED_COLLECTIONS,
   );
@@ -179,9 +183,14 @@ export function CollectionSettings({
   function submitUrl(event: FormEvent): void {
     event.preventDefault();
     if (!url.trim() || busy) return;
-    void onAddUrl(url.trim(), openAfter).then((added) => {
+    const requested = url.trim();
+    setFailedUrl(null);
+    void onAddUrl(requested, openAfter).then((added) => {
       if (added) {
         setUrl("");
+        setPickerOpen(false);
+      } else {
+        setFailedUrl(requested);
         setPickerOpen(false);
       }
     });
@@ -315,7 +324,7 @@ export function CollectionSettings({
             <div className="settings-section-heading">
               <div>
                 <h3>Add a collection</h3>
-                <p>Choose a folder, select a featured collection, or paste a collection URL.</p>
+                <p>Choose a folder, select a featured collection, or paste a Watchcraft collection or YouTube URL.</p>
               </div>
             </div>
             {error ? <p className="settings-error" role="alert">{error}</p> : null}
@@ -341,6 +350,7 @@ export function CollectionSettings({
                       id="collection-url"
                       onChange={(event) => {
                         setUrl(event.target.value);
+                      setFailedUrl(null);
                         setPickerOpen(true);
                         setHighlightedIndex(0);
                       }}
@@ -350,7 +360,8 @@ export function CollectionSettings({
                       ref={inputRef}
                       role="combobox"
                       spellCheck={false}
-                      type="url"
+                      type="text"
+                    inputMode="url"
                       value={url}
                     />
                     <button
@@ -403,7 +414,7 @@ export function CollectionSettings({
                       {matchingFeaturedCollections.length === 0 ? (
                         <p className="desktop-featured-empty">
                           {url.trim()
-                            ? "No featured collections match. You can still add this URL."
+                            ? "No featured collections match. Use Add to check this link."
                             : "All featured collections are already installed."}
                         </p>
                       ) : null}
@@ -412,12 +423,22 @@ export function CollectionSettings({
                 </div>
                 <button disabled={busy || !url.trim()} type="submit">Add</button>
               </form>
+
             </div>
+              {failedUrl !== null && onSuggestCollection && <div className="collection-suggestion" role="status">
+                <strong>{isYouTubeSource(failedUrl) ? "Suggest a new collection" : "Something missing?"}</strong>
+                <p>{isYouTubeSource(failedUrl)
+                  ? "This is a YouTube link, so it can't be added directly. Open the suggestion form to preview it and choose which videos to request. Your link will be filled in; nothing is submitted yet."
+                  : "Looking for something that isn't in Watchcraft yet? You can suggest a YouTube video, playlist, or channel."}</p>
+                <button type="button" disabled={busy} onClick={() => onSuggestCollection(isYouTubeSource(failedUrl) ? failedUrl : undefined)}>
+                  {isYouTubeSource(failedUrl) ? "Open suggestion form ↗" : "Suggest a collection ↗"}
+                </button>
+              </div>}
             <div className="settings-bottom-row">
-              <label className="open-after-option">
+              {!isYouTubeSource(url) && <label className="open-after-option">
                 <input checked={openAfter} disabled={busy} onChange={(event) => setOpenAfter(event.target.checked)} type="checkbox" />
                 <span>Open the collection after adding it</span>
-              </label>
+              </label>}
               <div className="settings-build-actions">
                 {onOpenDiagnostics ? <button onClick={onOpenDiagnostics} type="button">View diagnostics…</button> : null}
                 <span className="settings-version">Version {appVersion ?? "unavailable"}</span>

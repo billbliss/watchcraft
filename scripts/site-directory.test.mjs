@@ -168,9 +168,11 @@ test("publishes a screenshot gallery and social sharing metadata", () => {
   assert.match(app, /track\.prepend\(lastClone\)/);
   assert.match(app, /track\.append\(firstClone\)/);
   assert.match(gallery, /watchcraft-premiere-pro-beginner-tutorial\.png/);
-  assert.match(workflow, /cp -R site\/gallery _site\/gallery/);
-  assert.match(workflow, /npm run build --workspace @watchcraft\/web/);
-  assert.match(workflow, /cp -R apps\/web\/dist _site\/app/);
+  assert.match(workflow, /npm run site:build/);
+  const assembly = readFileSync(new URL("./assemble-site.mjs", import.meta.url), "utf8");
+  assert.match(assembly, /"gallery", "youtube-player"/);
+  assert.match(assembly, /new URL\("apps\/web\/dist\/", root\)/);
+  assert.match(assembly, /new URL\("apps\/portal\/dist\/", root\)/);
 });
 
 test("links the public homepage to the web reader and desktop downloads", () => {

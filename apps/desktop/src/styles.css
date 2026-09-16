@@ -532,3 +532,13 @@
   .add-collection-row { flex-wrap: wrap; }
   .collection-url-form { flex-basis: 100%; }
 }
+
+.collection-suggestion { width: 100%; padding: 1rem; margin-top: .75rem; border: 1px solid #466850; border-radius: .5rem; background: #15241b; color: #edf5ef; }
+.collection-suggestion p { margin: 0 0 .75rem; line-height: 1.5; }
+
+.collection-suggestion { box-sizing: border-box; }
+.collection-suggestion > strong { display: block; margin-bottom: .4rem; }
+.collection-suggestion button { padding: .55rem .8rem; border: 1px solid #6b9f7c; border-radius: .5rem; color: #edf5ef; background: #294633; font: inherit; cursor: pointer; }
+.collection-suggestion button:hover:not(:disabled) { background: #355b42; }
+.collection-suggestion button:focus-visible { outline: 2px solid #a4e5b5; outline-offset: 3px; }
+.collection-suggestion button:disabled { opacity: .45; cursor: default; }

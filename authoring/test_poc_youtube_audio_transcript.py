@@ -26,6 +26,44 @@ from youtube_audio import (
 
 
 class YouTubeAudioTranscriptPocTests(unittest.TestCase):
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.diagnostics = Path(folder.name)
+        patcher = patch("youtube_audio.DIAGNOSTICS_DIRECTORY", self.diagnostics)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_invalid_metadata_retains_sanitized_diagnostics(self):
+        with tempfile.TemporaryDirectory() as folder:
+            destination = Path(folder) / "audio"
+            def download(*args, **kwargs):
+                destination.write_bytes(b"audio")
+                return Mock(returncode=0, stdout='{"duration": NA}', stderr='Authorization: Bearer private-token\nfailed https://media.example/audio?sig=secret-value')
+            with patch("youtube_audio.command_version", return_value="test-version"), patch("youtube_audio.subprocess.run", side_effect=download):
+                with self.assertRaises(YouTubeAcquisitionError) as raised:
+                    download_youtube_audio("WPtpUu3uIUI", destination, maximum_bytes=1000, maximum_duration_seconds=300, timeout_seconds=10,
+                        diagnostic_context={"execution_id": "execution", "cookie": "never-save"})
+            self.assertFalse(destination.exists())
+        log = next(self.diagnostics.glob("*.log"))
+        text = log.read_text()
+        evidence = json.loads(text)
+        self.assertEqual(evidence["exit_code"], 0)
+        self.assertEqual(evidence["yt_dlp_version"], "test-version")
+        self.assertIn("column", evidence["validation_error"])
+        self.assertIn(evidence["diagnostic_id"], str(raised.exception))
+        self.assertEqual(evidence["context"], {"execution_id": "execution"})
+        for secret in ["private-token", "secret-value", "never-save"]:
+            self.assertNotIn(secret, text)
+        self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+
+    def test_logging_failure_preserves_acquisition_classification(self):
+        with patch("youtube_audio._download_youtube_audio", side_effect=YouTubeAcquisitionError("failed", "source_acquisition_failed", True)), patch("youtube_audio.Path.mkdir", side_effect=OSError("unwritable")):
+            with self.assertRaises(YouTubeAcquisitionError) as raised:
+                download_youtube_audio("WPtpUu3uIUI", Path("unused"), maximum_bytes=1000, maximum_duration_seconds=300, timeout_seconds=10)
+        self.assertTrue(raised.exception.retryable)
+        self.assertIn("could not be saved", str(raised.exception))
+
     def test_uses_yt_dlp_from_the_active_python_environment_by_default(self) -> None:
         command = yt_dlp_command()
 
