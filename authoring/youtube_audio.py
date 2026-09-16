@@ -138,6 +138,9 @@ def yt_dlp_audio_download_command(
         str(maximum_bytes),
         "--output",
         str(destination),
+        # Missing fields must remain valid JSON (yt-dlp defaults to bare NA).
+        "--output-na-placeholder",
+        "null",
         "--print",
         metadata_template,
         url,

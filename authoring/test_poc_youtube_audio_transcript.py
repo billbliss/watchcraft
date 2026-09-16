@@ -139,6 +139,30 @@ class YouTubeAudioTranscriptPocTests(unittest.TestCase):
         self.assertEqual(result["duration_seconds"], 120.0)
         self.assertNotIn("url", result)
 
+    def test_missing_language_uses_real_yt_dlp_json_output(self) -> None:
+        import yt_dlp
+        # Reproduce both observed failures through yt-dlp's actual formatter.
+        for video_id, duration in [("9YG9INjO91Y", 180), ("QyMsF31NdNc", 5309)]:
+            with self.subTest(video_id=video_id), tempfile.TemporaryDirectory() as directory:
+                destination = Path(directory) / "audio"
+                def run_download(command, **kwargs):
+                    options = yt_dlp.parse_options(command[command.index("--ignore-config"):]).ydl_opts
+                    template = command[command.index("--print") + 1].removeprefix("after_move:")
+                    with yt_dlp.YoutubeDL(options) as downloader:
+                        output = downloader.evaluate_outtmpl(template, {
+                            "id": video_id, "duration": duration, "format_id": "251", "ext": "webm",
+                        })
+                    self.assertIsNone(json.loads(output)["language"])
+                    destination.write_bytes(b"audio bytes")
+                    return Mock(returncode=0, stdout=output, stderr="")
+                with patch("youtube_audio.command_version", return_value="2026.08.19"), patch("youtube_audio.subprocess.run", side_effect=run_download):
+                    result = download_youtube_audio(video_id, destination, maximum_bytes=1000,
+                        maximum_duration_seconds=6000, timeout_seconds=10)
+                self.assertIsNone(result["audio_language"])
+                self.assertEqual(result["video_id"], video_id)
+                self.assertEqual(result["duration_seconds"], duration)
+                self.assertTrue(destination.exists())
+
     def test_download_timeout_is_classified_and_removes_partial_audio(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory) / "audio"
