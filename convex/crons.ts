@@ -11,4 +11,6 @@ crons.interval(
   {},
 );
 
+crons.interval("refresh collection pull requests", { minutes: 5 }, internal.portalWorkflows.syncPullRequests, {});
+
 export default crons;

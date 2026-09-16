@@ -151,3 +151,17 @@ test("collections awaiting a PR are visible outside completed history", () => {
   expect(within(history).queryByText("Submitted collection")).toBeNull();
   expect(within(history).getByText("Historical collection")).toBeTruthy();
 });
+
+test("merged PRs move to completed history while closed PRs stay visible", () => {
+  vi.mocked(useQuery).mockReturnValue({ pending: [], accepted: [], running: [], activeJobs: [], failed: [], completed: [
+    ...["merged", "closed"].map(status => ({ ...submission, id: status, title: `${status} collection`, workflow: { phase: "ready", state: "ready", preview_url: "https://example.com/collection.json", pull_request_url: "https://github.com/billbliss/watchcraft-collections/pull/1", pull_request_status: status, pull_request_merged_at: status === "merged" ? 3000 : undefined } })),
+  ] });
+  vi.mocked(useMutation).mockReturnValue(vi.fn() as unknown as ReturnType<typeof useMutation>);
+  render(<ReviewQueue />);
+  const history = screen.getByText("Completed projects").closest("details")!;
+  expect(within(history).getByText("merged collection")).toBeTruthy();
+  expect(within(history).getByText("Pull request merged")).toBeTruthy();
+  const submitted = screen.getByRole("region", { name: /Submitted pull requests/ });
+  expect(within(submitted).queryByText("merged collection")).toBeNull();
+  expect(within(submitted).getByText("Pull request closed without merging")).toBeTruthy();
+});

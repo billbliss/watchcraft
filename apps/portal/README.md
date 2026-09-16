@@ -141,3 +141,13 @@ and common local paths are removed. Files older than 30 days are pruned when a
 new failure is logged. Failure to save diagnostics preserves the original error
 classification. Historical failures cannot be reconstructed; already-running
 Python workers load this change only when restarted.
+
+### Pull request status
+
+A hosted Convex scheduled action checks up to three outstanding collection PRs
+ every five minutes, oldest checks first, using GitHub's public API. It does not
+ depend on the local worker. Only a PR targeting the collections repository's
+ main branch with the verified preview commit can update the recorded status.
+ Merged PRs move into Completed projects; closed, unmerged PRs remain visible.
+ GitHub errors preserve the last known status. “Pull request merged” confirms
+ integration into the repository, not completion of the separate Pages deployment.

@@ -1,7 +1,8 @@
 import { ConvexError, v } from "convex/values";
-import { internalMutation, mutation, type MutationCtx } from "./_generated/server";
+import { internalAction, internalQuery, internalMutation, mutation, type MutationCtx } from "./_generated/server";
 import { portalIdentity } from "./portal";
 import type { ProjectExecution } from "../packages/authoring-pipeline/src/project-execution";
+import { internal } from "./_generated/api";
 const phases = ["processing", "terminology", "normalization", "compilation", "preview", "ready", "pull_request"];
 const leaseMs = 120_000;
 async function workflow(ctx: MutationCtx, executionId: string) {
@@ -81,5 +82,51 @@ export const update = internalMutation({
     if (!next) throw new Error("Invalid workflow phase.");
     await ctx.db.patch(row._id, { ...outputs, phase: next, state: next === "ready" ? "ready" : "queued", runner_id: undefined, lease_until: 0, updated_at: Date.now() });
     return { updated: true };
+  },
+});
+
+// Public repository metadata is checked on the hosted backend, independently of workers.
+export const pendingPullRequests = internalQuery({
+  args: {},
+  handler: async (ctx) => (await ctx.db.query("portal_workflows")
+    .withIndex("by_state_lease", q => q.eq("state", "ready")).collect())
+    .filter(row => row.pull_request_url && row.pull_request_status !== "merged")
+    .sort((a, b) => (a.pull_request_checked_at ?? 0) - (b.pull_request_checked_at ?? 0))
+    .slice(0, 3),
+});
+export const recordPullRequestStatus = internalMutation({
+  args: { executionId: v.string(), url: v.string(), head: v.string(),
+    status: v.union(v.literal("open"), v.literal("closed"), v.literal("merged")),
+    mergedAt: v.optional(v.number()) },
+  handler: async (ctx, args) => {
+    const row = await workflow(ctx, args.executionId);
+    if (!row || row.pull_request_url !== args.url || row.preview_commit !== args.head) return;
+    await ctx.db.patch(row._id, { pull_request_status: args.status,
+      pull_request_checked_at: Date.now(), pull_request_merged_at: args.mergedAt });
+  },
+});
+export const syncPullRequests = internalAction({
+  args: {},
+  handler: async (ctx) => {
+    const rows = await ctx.runQuery(internal.portalWorkflows.pendingPullRequests, {});
+    for (const row of rows) {
+      const match = row.pull_request_url?.match(/^https:\/\/github.com\/billbliss\/watchcraft-collections\/pull\/([1-9][0-9]*)$/);
+      if (!match) continue;
+      const response = await fetch(`https://api.github.com/repos/billbliss/watchcraft-collections/pulls/${match[1]}`, {
+        headers: { Accept: "application/vnd.github+json", "User-Agent": "Watchcraft-portal" },
+      });
+      // Leave existing status intact on outages or rate limits; try again next cycle.
+      if (!response.ok) continue;
+      const pr = await response.json();
+      if (pr.html_url !== row.pull_request_url || pr.head?.sha !== row.preview_commit ||
+          pr.base?.repo?.full_name !== "billbliss/watchcraft-collections" || pr.base?.ref !== "main" ||
+          !["open", "closed"].includes(pr.state)) continue;
+      const mergedAt = pr.merged_at ? Date.parse(pr.merged_at) : undefined;
+      if (pr.merged && (mergedAt === undefined || !Number.isFinite(mergedAt))) continue;
+      await ctx.runMutation(internal.portalWorkflows.recordPullRequestStatus, {
+        executionId: row.execution_id, url: pr.html_url, head: pr.head.sha,
+        status: pr.merged ? "merged" : pr.state, ...(pr.merged ? { mergedAt } : {}),
+      });
+    }
   },
 });

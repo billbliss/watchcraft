@@ -8,6 +8,9 @@ export default defineSchema({
     compilation_job_id: v.optional(v.string()), preview_url: v.optional(v.string()),
     preview_branch: v.optional(v.string()), preview_commit: v.optional(v.string()),
     pull_request_url: v.optional(v.string()),
+    pull_request_status: v.optional(v.union(v.literal("open"), v.literal("closed"), v.literal("merged"))),
+    pull_request_checked_at: v.optional(v.number()),
+    pull_request_merged_at: v.optional(v.number()),
     failure: v.optional(v.object({ message: v.string(), occurred_at: v.number() })),
   }).index("by_execution", ["execution_id"]).index("by_state_lease", ["state", "lease_until"]),
   request_planners: defineTable({

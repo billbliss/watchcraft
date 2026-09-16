@@ -81,7 +81,7 @@ function WorkflowActions({ item }: { item: Submission }) {
       {work?.pull_request_url ? <a href={work.pull_request_url} target="_blank" rel="noreferrer">View pull request ↗</a> : <button disabled={busy || !work?.preview_url || work.phase === "pull_request"} onClick={() => void act("pr")}>{work?.phase === "pull_request" ? work.state === "queued" ? "Pull request queued" : work.state === "failed" ? "Pull request failed" : "Creating pull request…" : "Submit pull request"}</button>}
       {work?.state === "failed" && <button disabled={busy} onClick={() => void act("retry")}>Retry {workflowLabels[work.phase]?.toLowerCase() ?? "workflow"}</button>}
     </div>
-    <small>{work ? `${work.state === "failed" ? "Needs attention · " : ""}${work.pull_request_url ? "Pull request submitted" : work.phase === "pull_request" && work.state === "queued" ? "Waiting for the local worker to create the pull request" : work.phase === "ready" && work.preview_url ? "Preview ready · awaiting pull request" : workflowLabels[work.phase] ?? work.phase}` : "No preview is attached to this earlier run."}</small>
+    <small>{work ? `${work.state === "failed" ? "Needs attention · " : ""}${work.pull_request_url ? work.pull_request_status === "merged" ? "Pull request merged" : work.pull_request_status === "closed" ? "Pull request closed without merging" : "Pull request submitted" : work.phase === "pull_request" && work.state === "queued" ? "Waiting for the local worker to create the pull request" : work.phase === "ready" && work.preview_url ? "Preview ready · awaiting pull request" : workflowLabels[work.phase] ?? work.phase}` : "No preview is attached to this earlier run."}</small>
     {work?.state === "failed" && <FailureDetails item={item} />}
     {error && <p className="feedback error" role="alert">{error}</p>}
   </>;
@@ -114,8 +114,8 @@ export function ReviewQueue() {
   const inFlight = unfinished.filter(item => item.workflow ? ["queued", "running"].includes(item.workflow.state) : ["approved", "running"].includes(item.state));
   const attention = unfinished.filter(item => item.workflow?.state === "failed" || (!item.workflow && item.state === "failed"));
   const readyToPublish = data.completed.filter(item => item.workflow?.preview_url && !item.workflow.pull_request_url);
-  const submittedPrs = data.completed.filter(item => item.workflow?.pull_request_url);
-  const completed = data.completed.filter(item => !item.workflow);
+  const submittedPrs = data.completed.filter(item => item.workflow?.pull_request_url && item.workflow.pull_request_status !== "merged");
+  const completed = data.completed.filter(item => !item.workflow || item.workflow.pull_request_status === "merged");
   return <>
     <RequestInbox />
     {notice && <p className="feedback" role="status">{notice}</p>}
@@ -175,7 +175,7 @@ export function ReviewQueue() {
       {completed.length === 0 ? <p className="muted">No completed project runs yet.</p> : <div className="table-scroll"><table>
         <thead><tr><th>Project</th><th>Items</th><th>Completed</th><th>Next steps</th></tr></thead>
         <tbody>{completed.map((item) => <tr key={item.id}>
-          <td>{item.title}<small>Revision {item.projectRevision}</small></td><td>{item.completed} / {item.total}</td><td>{timestamp(item.updatedAt)}</td>
+          <td>{item.title}<small>Revision {item.projectRevision}</small></td><td>{item.completed} / {item.total}</td><td>{timestamp(item.workflow?.pull_request_merged_at ?? item.updatedAt)}</td>
           <td><WorkflowActions item={item} /></td>
         </tr>)}</tbody>
       </table></div>}

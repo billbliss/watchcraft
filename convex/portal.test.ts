@@ -230,3 +230,27 @@ test("the newest retryable stage failure replaces an older permanent failure in 
   const result = await t.withIdentity(owner).query(api.portal.failureDetails, { executionId: execution.execution_id });
   expect(result?.stageFailure).toMatchObject({ message: "Duplicate display label", jobId: "retryable_failed", guidance: "Retry this stage. Completed videos will be reused." });
 });
+
+test("hosted PR sync recognizes merges and ignores changed heads or failed GitHub responses", async () => {
+  const t = convexTest(schema, modules);
+  const url = "https://github.com/billbliss/watchcraft-collections/pull/1";
+  const id = await t.run(ctx => ctx.db.insert("portal_workflows", { execution_id: "published", phase: "ready", state: "ready", lease_until: 0, updated_at: 1, pull_request_url: url, preview_commit: "a".repeat(40) }));
+  const pr = { html_url: url, head: { sha: "a".repeat(40) }, base: { repo: { full_name: "billbliss/watchcraft-collections" }, ref: "main" }, state: "closed", merged: true, merged_at: "2026-09-16T03:51:22Z" };
+  const fetchMock = vi.fn();
+  vi.stubGlobal("fetch", fetchMock);
+  try {
+    fetchMock.mockResolvedValue(new Response("unavailable", { status: 503 }));
+    await t.action(internal.portalWorkflows.syncPullRequests, {});
+    expect((await t.run(ctx => ctx.db.get(id)))?.pull_request_status).toBeUndefined();
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ ...pr, head: { sha: "wrong" } })));
+    await t.action(internal.portalWorkflows.syncPullRequests, {});
+    expect((await t.run(ctx => ctx.db.get(id)))?.pull_request_status).toBeUndefined();
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ ...pr, merged: false, merged_at: null })));
+    await t.action(internal.portalWorkflows.syncPullRequests, {});
+    expect((await t.run(ctx => ctx.db.get(id)))?.pull_request_status).toBe("closed");
+    fetchMock.mockResolvedValue(new Response(JSON.stringify(pr)));
+    await t.action(internal.portalWorkflows.syncPullRequests, {});
+    expect(await t.run(ctx => ctx.db.get(id))).toMatchObject({ pull_request_status: "merged", pull_request_merged_at: Date.parse(pr.merged_at) });
+    expect(await t.query(internal.portalWorkflows.pendingPullRequests, {})).toEqual([]);
+  } finally { vi.unstubAllGlobals(); }
+});
