@@ -84,3 +84,32 @@ class PortalWorkerTests(unittest.TestCase):
         request_text.side_effect = [json.dumps(manifest), '{"wrong":true}']
         with self.assertRaisesRegex(RuntimeError, 'resource does not match'):
             publish_preview(work, self.config(), q)
+
+    @patch('youtube_discovery.request_text')
+    @patch('portal_worker.command')
+    def test_new_pr_describes_collection_and_links_to_playable_preview(self, command, request_text):
+        import json
+        from pathlib import Path
+        manifest = {'title': 'GDC — Popular videos', 'items': {str(i): {'title': f'Talk {i}'} for i in range(20)},
+                    'source': {'canonical_url': 'https://www.youtube.com/@Gdconf', 'metadata': {'publisher': 'GDC'}},
+                    'topics': {'a': {}}, 'topic_families': {'b': {}}}
+        request_text.return_value = json.dumps(manifest)
+        head = 'a' * 40
+        preview = f'https://raw.githubusercontent.com/billbliss/watchcraft-collections/{head}/collections/gdc/collection.json'
+        def run(args, cwd=None):
+            if args[:3] == ['gh', 'pr', 'list']: return '[]'
+            if args[:2] == ['gh', 'api']: return head
+            if args[:3] == ['gh', 'repo', 'view']: return 'main'
+            self.assertEqual(args[:3], ['gh', 'pr', 'create'])
+            self.assertEqual(args[args.index('--title')+1], 'Add collection: GDC — Popular videos')
+            body = Path(args[args.index('--body-file')+1]).read_text()
+            self.assertIn('**Videos:** 20', body)
+            self.assertIn('**Publisher:** GDC', body)
+            self.assertIn('https://www.youtube.com/@Gdconf', body)
+            self.assertIn('https://watchcraft.stream/app/?catalog=https%3A', body)
+            self.assertIn('…and 15 more', body)
+            self.assertGreater(body.index('execution-secret-id'), body.index('<details>'))
+            return 'https://github.com/billbliss/watchcraft-collections/pull/3'
+        command.side_effect = run
+        submit_pull_request({'preview_branch': 'codex/portal-'+'b'*24, 'preview_commit': head,
+                             'preview_url': preview, 'execution_id': 'execution-secret-id'})

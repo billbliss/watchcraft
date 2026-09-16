@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import threading
 import uuid
+from urllib.parse import quote, urlparse
 from pathlib import Path
 
 REPOSITORY = "billbliss/watchcraft-collections"
@@ -79,6 +80,38 @@ def publish_preview(work, config, q):
     return {"preview_url": manifest_url, "preview_branch": branch, "preview_commit": commit}
 
 
+def pull_request_copy(manifest, preview_url, execution_id):
+    """Describe the collection itself, with implementation details tucked away."""
+    title = " ".join(manifest["title"].split())
+    items = list(manifest["items"].values())
+    def text(value):
+        return re.sub(r"([\\`*_{}\[\]<>])", r"\\\1", " ".join(str(value).split()))
+    source = manifest.get("source", {})
+    publisher = source.get("metadata", {}).get("publisher")
+    source_url = source.get("canonical_url", "")
+    lines = [f"Adds **{text(title)}** to the Watchcraft collection directory.", "",
+             f"- **Videos:** {len(items)}"]
+    if publisher:
+        lines.append(f"- **Publisher:** {text(publisher)}")
+    if urlparse(source_url).scheme in {"http", "https"}:
+        lines.append(f"- **Submitted source:** [View original source]({quote(source_url, safe=':/?=&%#@')})")
+    topics = manifest.get("topics", {})
+    families = manifest.get("topic_families", {})
+    if topics:
+        lines.append(f"- **Topics:** {len(topics)}" + (f" across {len(families)} topic groups" if families else ""))
+    lines += ["", f"[Preview this collection in Watchcraft](https://watchcraft.stream/app/?catalog={quote(preview_url, safe='')})", "",
+              "Merging this PR triggers publication to the website’s collection directory.", "",
+              "**Included videos**", ""]
+    lines += [f"- {text(item['title'])}" for item in items[:5]]
+    if len(items) > 5:
+        lines.append(f"- …and {len(items) - 5} more")
+    lines += ["", "<details>", "<summary>Build details</summary>", "",
+              f"Execution: `{text(execution_id)}`", "",
+              "The collection manifest and analysis resources were validated against the compiled artifact.",
+              "", f"[Collection manifest]({preview_url})", "", "</details>", ""]
+    return f"Add collection: {title}"[:240], "\n".join(lines)
+
+
 def submit_pull_request(work):
     branch = work["preview_branch"]
     if not re.fullmatch(r"codex/portal-[a-f0-9]{24}", branch):
@@ -95,9 +128,15 @@ def submit_pull_request(work):
     base = command(["gh", "repo", "view", REPOSITORY, "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"])
     with tempfile.TemporaryDirectory(prefix="watchcraft-pr-") as folder:
         body = Path(folder) / "body.md"
-        body.write_text(f"Adds the collection prepared from approved Watchcraft execution `{work['execution_id']}`.\n\nThe collection manifest and analysis resources were validated against the compiled artifact.\n\n[Loadable preview]({work['preview_url']})\n")
+        preview_url = work["preview_url"]
+        if not re.fullmatch(r"https://raw\.githubusercontent\.com/billbliss/watchcraft-collections/" + re.escape(work["preview_commit"]) + r"/collections/[a-z0-9-]+/collection\.json", preview_url):
+            raise ValueError("A commit-pinned collection preview is required")
+        from youtube_discovery import request_text
+        manifest = json.loads(request_text(preview_url))
+        title, description = pull_request_copy(manifest, preview_url, work["execution_id"])
+        body.write_text(description)
         url = command(["gh", "pr", "create", "--repo", REPOSITORY, "--base", base, "--head", branch,
-            "--title", f"Add Watchcraft collection ({work['execution']['project']['project_id']})", "--body-file", str(body)])
+            "--title", title, "--body-file", str(body)])
     return {"pull_request_url": url}
 
 
