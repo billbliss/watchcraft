@@ -234,6 +234,105 @@ fn validated_video_path<R: Runtime>(
     Ok(canonical_path)
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MediaInspection {
+    status: String,
+    message: String,
+    path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    byte_length: Option<u64>,
+}
+
+fn inspect_video_path(roots: &[PathBuf], path: &Path) -> MediaInspection {
+    let report = |status: &str, message: String, byte_length| MediaInspection {
+        status: status.into(),
+        message,
+        path: path.to_string_lossy().into(),
+        byte_length,
+    };
+    let Some(root) = roots
+        .iter()
+        .filter(|root| path.starts_with(root))
+        .max_by_key(|root| root.components().count())
+    else {
+        return report(
+            "access-denied",
+            "This video is outside the approved collection folders. Choose its folder in Settings."
+                .into(),
+            None,
+        );
+    };
+    if !is_video_path(path) {
+        return report(
+            "access-denied",
+            "This is not a supported video file.".into(),
+            None,
+        );
+    }
+    if let Err(error) = std::fs::metadata(root) {
+        let status = if error.kind() == std::io::ErrorKind::PermissionDenied {
+            "access-denied"
+        } else {
+            "folder-unavailable"
+        };
+        return report(status, format!("The collection's video folder cannot be reached. Reconnect the drive, then retry. Details: {error}"), None);
+    }
+    let canonical = match path.canonicalize() {
+        Ok(path) => path,
+        Err(error) => {
+            let status = match error.kind() {
+                std::io::ErrorKind::NotFound => "file-missing",
+                std::io::ErrorKind::PermissionDenied => "access-denied",
+                _ => "unavailable",
+            };
+            return report(status, format!("The selected video cannot be reached. Check the file or choose its folder again in Settings. Details: {error}"), None);
+        }
+    };
+    if !is_within_approved_roots(roots, &canonical) {
+        return report(
+            "access-denied",
+            "This video resolves outside the approved collection folders.".into(),
+            None,
+        );
+    }
+    match std::fs::File::open(&canonical).and_then(|file| file.metadata()) {
+        Ok(metadata) if metadata.is_file() && metadata.len() > 0 => report("available", "The video file is readable. Retry playback; if it still fails, try the default player and view playback diagnostics.".into(), Some(metadata.len())),
+        Ok(_) => report("unavailable", "The selected video is empty or is not a regular file.".into(), None),
+        Err(error) => report(if error.kind() == std::io::ErrorKind::PermissionDenied { "access-denied" } else { "unavailable" }, format!("Could not read the selected video: {error}"), None),
+    }
+}
+
+#[tauri::command]
+async fn inspect_video_file(
+    app: tauri::AppHandle,
+    path: String,
+) -> Result<MediaInspection, String> {
+    let roots = app
+        .state::<ApprovedLibraryRoots>()
+        .0
+        .read()
+        .map_err(|_| "The selected library state is unavailable.")?
+        .clone();
+    let report =
+        tauri::async_runtime::spawn_blocking(move || inspect_video_path(&roots, Path::new(&path)))
+            .await
+            .map_err(|error| error.to_string())?;
+    record_diagnostic(
+        &app,
+        if report.status == "available" {
+            "info"
+        } else {
+            "warn"
+        },
+        "playback",
+        "file.inspected",
+        &report.message,
+        serde_json::json!({ "path": report.path, "status": report.status, "byteLength": report.byte_length }),
+    );
+    Ok(report)
+}
+
 fn requested_byte_range(range_header: Option<&str>, length: u64) -> Result<Option<(u64, u64)>, ()> {
     let Some(range_header) = range_header else {
         return Ok(None);
@@ -774,8 +873,20 @@ fn video_stream_response<R: Runtime>(
             .body(Vec::new())?);
     }
 
-    let mut file = std::fs::File::open(&path)?;
-    let length = file.metadata()?.len();
+    let started = std::time::Instant::now();
+    let io_failure = |error: std::io::Error| {
+        record_diagnostic(
+            app,
+            "error",
+            "stream",
+            "file.io-failed",
+            "Could not read the selected local video",
+            serde_json::json!({ "path": path, "error": error.to_string(), "ioKind": format!("{:?}", error.kind()), "elapsedMs": started.elapsed().as_millis(), "range": requested_range }),
+        );
+        error
+    };
+    let mut file = std::fs::File::open(&path).map_err(&io_failure)?;
+    let length = file.metadata().map_err(&io_failure)?.len();
     record_diagnostic(
         app,
         "debug",
@@ -835,8 +946,10 @@ fn video_stream_response<R: Runtime>(
         };
         let end = start + bytes_to_read - 1;
         let mut body = Vec::with_capacity(bytes_to_read as usize);
-        file.seek(SeekFrom::Start(start))?;
-        file.take(bytes_to_read).read_to_end(&mut body)?;
+        file.seek(SeekFrom::Start(start)).map_err(&io_failure)?;
+        file.take(bytes_to_read)
+            .read_to_end(&mut body)
+            .map_err(&io_failure)?;
 
         record_diagnostic(
             app,
@@ -861,7 +974,7 @@ fn video_stream_response<R: Runtime>(
     }
 
     let mut body = Vec::with_capacity(length as usize);
-    file.read_to_end(&mut body)?;
+    file.read_to_end(&mut body).map_err(&io_failure)?;
     record_diagnostic(
         app,
         "debug",
@@ -1351,6 +1464,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             open_video,
+            inspect_video_file,
             open_external_url,
             default_video_player,
             youtube_bridge_base_url,
@@ -1378,13 +1492,64 @@ pub fn run() {
 mod tests {
     use super::{
         canonical_video_roots, configured_youtube_bridge_base_url,
-        diagnostics_enabled_for_identifier, is_video_path, is_within_approved_roots,
-        linux_deep_link_schemes_to_register, requested_byte_range, validated_external_url,
-        video_content_type, write_linux_video_response, MAX_STREAM_CHUNK,
+        diagnostics_enabled_for_identifier, inspect_video_path, is_video_path,
+        is_within_approved_roots, linux_deep_link_schemes_to_register, requested_byte_range,
+        validated_external_url, video_content_type, write_linux_video_response, MAX_STREAM_CHUNK,
     };
     use std::fs;
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn selected_file_checks_distinguish_missing_media_and_unavailable_drive() {
+        let root = std::env::temp_dir().join(format!(
+            "watchcraft-file-check-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let roots = vec![root.clone()];
+        let video = root.join("lesson.mp4");
+        let missing = inspect_video_path(&roots, &video);
+        assert_eq!(missing.status, "file-missing");
+        assert!(serde_json::to_value(missing).unwrap().get("byteLength").is_none());
+        fs::write(&video, b"media").unwrap();
+        let report = inspect_video_path(&roots, &video);
+        assert_eq!(report.status, "available");
+        assert_eq!(report.byte_length, Some(5));
+        assert_eq!(inspect_video_path(&[], &video).status, "access-denied");
+        fs::remove_file(&video).unwrap();
+        fs::remove_dir(&root).unwrap();
+        assert_eq!(
+            inspect_video_path(&roots, &video).status,
+            "folder-unavailable"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selected_file_check_rejects_symlink_outside_approved_folder() {
+        let root = std::env::temp_dir().join(format!(
+            "watchcraft-file-symlink-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("approved")).unwrap();
+        let root = root.canonicalize().unwrap();
+        fs::write(root.join("outside.mp4"), b"media").unwrap();
+        let link = root.join("approved/lesson.mp4");
+        std::os::unix::fs::symlink(root.join("outside.mp4"), &link).unwrap();
+        assert_eq!(
+            inspect_video_path(&[root.join("approved")], &link).status,
+            "access-denied"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn diagnostics_follow_the_application_channel_identity() {

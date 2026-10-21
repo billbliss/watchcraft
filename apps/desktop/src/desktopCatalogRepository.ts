@@ -9,6 +9,7 @@ import type {
   CatalogRepository,
   CollectionManifest,
   VideoAnalysis,
+  MediaInspection,
 } from "@watchcraft/catalog-core";
 
 function separatorFor(path: string): "/" | "\\" {
@@ -116,6 +117,16 @@ export class DesktopCatalogRepository implements CatalogRepository {
       joinLocalPath(root, relativePath),
       this.videoStreamBaseUrl,
     );
+  }
+
+  async inspectMedia(item: CatalogItem): Promise<MediaInspection> {
+    const media = item.media[0];
+    if (media?.type !== "local-file") return { status: "unavailable", message: "This video is not a local file." };
+    const root = localMediaRoot(this.location, media.delivery);
+    if (!root) return { status: "folder-unavailable", message: "Choose this collection's video folder in Settings." };
+    const relativePath = media.delivery === "managed-local" ? media.relative_path
+      : boundMediaRelativePath(media.relative_path, this.location.mediaPathPrefix);
+    return invoke<MediaInspection>("inspect_video_file", { path: joinLocalPath(root, relativePath) });
   }
 
   async defaultPlayerName(item: CatalogItem): Promise<string | null> {

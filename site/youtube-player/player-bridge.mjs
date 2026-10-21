@@ -15,9 +15,10 @@ export function isValidVideoId(videoId) {
 
 export function isAllowedPlayerCommand(message) {
   return (
-    message?.event === "command" &&
-    typeof message.func === "string" &&
-    allowedCommands.has(message.func)
+    message?.event === "listening"
+    || (message?.event === "command"
+      && typeof message.func === "string"
+      && allowedCommands.has(message.func))
   );
 }
 

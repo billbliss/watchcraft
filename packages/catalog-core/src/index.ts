@@ -282,12 +282,20 @@ export interface VideoAnalysis {
   }>;
 }
 
+export interface MediaInspection {
+  status: "available" | "folder-unavailable" | "file-missing" | "access-denied" | "unavailable";
+  message: string;
+  path?: string;
+  byteLength?: number;
+}
+
 export interface CatalogRepository {
   readonly manifestLocation: string;
   readonly canOpenInDefaultPlayer?: boolean;
   loadCollection(): Promise<CollectionManifest>;
   loadAnalysis(item: CatalogItem): Promise<VideoAnalysis>;
   mediaUrl(item: CatalogItem): string | null;
+  inspectMedia?(item: CatalogItem): Promise<MediaInspection>;
   defaultPlayerName?(item: CatalogItem): Promise<string | null>;
   openInDefaultPlayer(item: CatalogItem): Promise<boolean>;
   openExternalMedia?(item: CatalogItem): Promise<boolean>;

@@ -6,6 +6,7 @@ import {
   topicPassesFrequencyFilter,
   type CatalogItem,
   type CatalogRepository,
+  type MediaInspection,
   type CollectionManifest,
   type OrderedCatalogItem,
   type Topic,
@@ -20,6 +21,7 @@ import {
   type CSSProperties,
   type ReactElement,
 } from "react";
+import { youtubeDuration } from "./playback";
 import type { DiagnosticEvent } from "./diagnostics";
 
 interface AppProps {
@@ -243,6 +245,12 @@ export function App({
   const [defaultPlayerName, setDefaultPlayerName] = useState<string | null | undefined>(undefined);
   const [mediaErrorUrl, setMediaErrorUrl] = useState<string | null>(null);
   const mediaRetryCountsRef = useRef(new Map<string, number>());
+  const [mediaRecovering, setMediaRecovering] = useState(false);
+  const [mediaInspection, setMediaInspection] = useState<MediaInspection | null>(null);
+  const [inspectingMedia, setInspectingMedia] = useState(false);
+  const inspectionRequestRef = useRef(0);
+  const pendingSeekRef = useRef<{ url: string; start: string } | null>(null);
+  const retryTimerRef = useRef<number | null>(null);
   const playerRef = useRef<HTMLVideoElement>(null);
   const youtubePlayerRef = useRef<HTMLIFrameElement>(null);
 
@@ -356,6 +364,10 @@ export function App({
     setAnalysisError(null);
     setMediaDuration(null);
     setMediaErrorUrl(null);
+    setMediaRecovering(false);
+    setMediaInspection(null);
+    setInspectingMedia(false);
+    inspectionRequestRef.current += 1;
     setHighlightedTopic(null);
     setOpenStatus("idle");
     repository
@@ -553,41 +565,82 @@ export function App({
     window.setTimeout(() => setOpenStatus("idle"), 1800);
   }
 
-  async function openExternalMedia(): Promise<void> {
-    if (!selectedItem || !repository.openExternalMedia || openStatus === "opening") return;
-    setOpenStatus("opening");
-    const opened = await repository.openExternalMedia(selectedItem);
-    onDiagnosticEvent?.({
-      level: opened ? "info" : "error",
-      category: "playback",
-      event: opened ? "external.opened" : "external.failed",
-      message: opened ? "Opened external media" : "Could not open external media",
-      fields: { itemId: selectedItem.item_id, mediaUrl },
-    });
-    setOpenStatus(opened ? "opened" : "error");
-    window.setTimeout(() => setOpenStatus("idle"), 1800);
-  }
-
   function seek(start: string): void {
-    const seconds = clockSeconds(start, timelineClockMode);
+    if (!mediaUrl) return;
+    const duration = youtubeMedia ? mediaDuration : playerRef.current?.duration;
+    if (!duration || !Number.isFinite(duration) || (!youtubeMedia && (playerRef.current?.readyState ?? 0) < HTMLMediaElement.HAVE_METADATA)) {
+      pendingSeekRef.current = { url: mediaUrl, start };
+      return;
+    }
+    const mode = inferTimelineClockMode(analysis?.sections ?? [], duration);
+    const seconds = Math.min(clockSeconds(start, mode), duration);
+    onDiagnosticEvent?.({ level: "info", category: "playback", event: "seek.requested",
+      message: "Seeking to a chapter", fields: { itemId: selectedId, start, seconds, duration, clockMode: mode } });
+    pendingSeekRef.current = null;
     if (youtubeMedia && youtubePlayerRef.current?.contentWindow) {
       const target = youtubePlayerRef.current.contentWindow;
       const send = (func: string, args: unknown[]) => target.postMessage(
-        JSON.stringify({ event: "command", func, args }),
-        new URL(mediaUrl ?? "https://www.youtube-nocookie.com").origin,
-      );
+        JSON.stringify({ event: "command", func, args }), new URL(mediaUrl).origin);
       send("seekTo", [seconds, true]);
       send("playVideo", []);
-      return;
+    } else if (playerRef.current) {
+      const player = playerRef.current;
+      try {
+        player.currentTime = seconds;
+        void player.play().catch(() => recordMediaState("play-rejected", player, "warn"));
+      } catch {
+        recordMediaState("seek-failed", player, "warn");
+      }
     }
-    const player = playerRef.current;
-    if (!player) return;
-    const applySeek = () => {
-      player.currentTime = seconds;
-      void player.play();
+  }
+
+  useEffect(() => {
+    const pending = pendingSeekRef.current;
+    if (pending && pending.url === mediaUrl && mediaDuration) seek(pending.start);
+  }, [mediaDuration, mediaUrl, analysis]);
+
+  useEffect(() => {
+    if (!mediaUrl || !youtubeMedia) return;
+    const origin = new URL(mediaUrl).origin;
+    const listen = () => youtubePlayerRef.current?.contentWindow?.postMessage(
+      JSON.stringify({ event: "listening", id: "watchcraft" }), origin);
+    const onMessage = (event: MessageEvent) => {
+      if (event.source !== youtubePlayerRef.current?.contentWindow || event.origin !== origin) return;
+      const duration = youtubeDuration(event.data);
+      if (duration) {
+        setMediaDuration(duration);
+        window.clearInterval(interval);
+      }
     };
-    if (player.readyState >= HTMLMediaElement.HAVE_METADATA) applySeek();
-    else player.addEventListener("loadedmetadata", applySeek, { once: true });
+    window.addEventListener("message", onMessage);
+    const interval = window.setInterval(listen, 500);
+    listen();
+    return () => { window.clearInterval(interval); window.removeEventListener("message", onMessage); };
+  }, [mediaUrl, youtubeMedia]);
+
+  useEffect(() => {
+    pendingSeekRef.current = null;
+    return () => {
+      if (retryTimerRef.current !== null) window.clearTimeout(retryTimerRef.current);
+    };
+  }, [mediaUrl]);
+
+  useEffect(() => () => { inspectionRequestRef.current += 1; }, []);
+
+  async function inspectCurrentMedia(): Promise<void> {
+    if (!selectedItem || !repository.inspectMedia) return;
+    const request = ++inspectionRequestRef.current;
+    setInspectingMedia(true);
+    try {
+      const result = await repository.inspectMedia(selectedItem);
+      if (request !== inspectionRequestRef.current) return;
+      setMediaInspection(result);
+      onDiagnosticEvent?.({ level: result.status === "available" ? "info" : "warn", category: "playback",
+        event: "media.inspected", message: result.message, fields: { itemId: selectedItem.item_id, ...result } });
+    } catch (error) {
+      if (request === inspectionRequestRef.current) setMediaInspection({ status: "unavailable",
+        message: error instanceof Error ? error.message : "Could not check the selected video file." });
+    } finally { if (request === inspectionRequestRef.current) setInspectingMedia(false); }
   }
 
   function handleMediaError(sourceUrl: string, player: HTMLVideoElement): void {
@@ -607,23 +660,29 @@ export function App({
         readyState: player.readyState,
       },
     });
+    if (retryTimerRef.current !== null) window.clearTimeout(retryTimerRef.current);
+    setMediaErrorUrl(sourceUrl);
     const retryDelays = [500, 1_200, 2_500];
     if (retryCount < retryDelays.length) {
+      setMediaRecovering(true);
       mediaRetryCountsRef.current.set(sourceUrl, retryCount + 1);
-      window.setTimeout(() => {
+      retryTimerRef.current = window.setTimeout(() => {
         if (playerRef.current !== player) return;
-        setMediaErrorUrl(null);
         player.load();
       }, retryDelays[retryCount]);
       return;
     }
-    setMediaErrorUrl(sourceUrl);
+    setMediaRecovering(false);
+    void inspectCurrentMedia();
   }
 
   function retryMedia(): void {
     const player = playerRef.current;
     if (!player) return;
-    setMediaErrorUrl(null);
+    if (retryTimerRef.current !== null) window.clearTimeout(retryTimerRef.current);
+    if (mediaUrl) mediaRetryCountsRef.current.delete(mediaUrl);
+    setMediaRecovering(true);
+    setMediaInspection(null);
     player.load();
     void player.play().catch((error: unknown) => onDiagnosticEvent?.({
       level: "error",
@@ -889,12 +948,21 @@ export function App({
                         key={mediaUrl}
                         onCanPlayThrough={(event) => recordMediaState("canplaythrough", event.currentTarget)}
                         onCanPlay={(event) => {
+                          if (retryTimerRef.current !== null) window.clearTimeout(retryTimerRef.current);
                           mediaRetryCountsRef.current.delete(mediaUrl);
                           setMediaErrorUrl(null);
+                          setMediaRecovering(false);
+                          setMediaInspection(null);
+                          setInspectingMedia(false);
+                          inspectionRequestRef.current += 1;
                           recordMediaState("canplay", event.currentTarget, "info");
                         }}
                         onLoadStart={(event) => recordMediaState("loadstart", event.currentTarget)}
                         onError={(event) => handleMediaError(mediaUrl, event.currentTarget)}
+                        onDurationChange={(event) => {
+                          const duration = event.currentTarget.duration;
+                          setMediaDuration(Number.isFinite(duration) && duration > 0 ? duration : null);
+                        }}
                         onLoadedMetadata={(event) => {
                           const duration = event.currentTarget.duration;
                           setMediaDuration(Number.isFinite(duration) ? duration : null);
@@ -910,31 +978,22 @@ export function App({
                       />
                       {mediaErrorUrl === mediaUrl && (
                         <div className="media-error" role="status">
-                          <span>Embedded playback failed.</span>
+                          <span>{mediaRecovering ? "Video playback interrupted. Retrying…" : "Could not play this video."}</span>
+                          {mediaInspection && <span>{mediaInspection.message}</span>}
+                          {repository.inspectMedia && <button disabled={inspectingMedia} onClick={() => void inspectCurrentMedia()} type="button">{inspectingMedia ? "Checking video file…" : "Check video file"}</button>}
+                          {hasLocalMedia && onOpenSettings && <button onClick={onOpenSettings} type="button">Video folder settings</button>}
+                          {mediaInspection?.path && <details><summary>File details</summary><code>{mediaInspection.path}</code>{typeof mediaInspection.byteLength === "number" && <p>{mediaInspection.byteLength.toLocaleString()} bytes</p>}</details>}
                           <button onClick={retryMedia} type="button">Retry</button>
                           {onOpenDiagnostics ? <button onClick={onOpenDiagnostics} type="button">View diagnostics</button> : null}
                         </div>
                       )}
                     </>
                   ) : (
-                    <div className="no-media">No playable media source is available.</div>
+                    <div className="no-media">No playable media source is available.{hasLocalMedia && onOpenSettings && <button onClick={onOpenSettings} type="button">Choose video folder</button>}</div>
                   )}
                 </div>
-                {((hasLocalMedia && repository.canOpenInDefaultPlayer !== false) || youtubeMedia) && (
+                {(hasLocalMedia && !youtubeMedia && repository.canOpenInDefaultPlayer !== false) && (
                   <div className="player-footer">
-                    {youtubeMedia ? (
-                      <button
-                        className="action primary player-action"
-                        disabled={openStatus === "opening" || !repository.openExternalMedia}
-                        onClick={() => void openExternalMedia()}
-                        type="button"
-                      >
-                        {openStatus === "opening" && "Opening YouTube…"}
-                        {openStatus === "opened" && "Opened YouTube"}
-                        {openStatus === "error" && "Could not open YouTube"}
-                        {openStatus === "idle" && "Watch on YouTube"}
-                      </button>
-                    ) : (
                       <button
                         className="action primary player-action"
                         disabled={openStatus === "opening"}
@@ -952,7 +1011,6 @@ export function App({
                             ? "Open video"
                             : "Open in default player")}
                       </button>
-                    )}
                   </div>
                 )}
               </div>

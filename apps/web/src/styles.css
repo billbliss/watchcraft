@@ -325,6 +325,9 @@ button { color: inherit; }
   aspect-ratio: 16 / 9;
 }
 .media-error {
+  flex-wrap: wrap;
+  max-width: min(90%, 650px);
+  overflow-wrap: anywhere;
   z-index: 2;
   display: flex;
   gap: 9px;
