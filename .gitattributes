@@ -1,0 +1,3 @@
+# These snapshots have recorded SHA-256 digests and byte lengths in the example
+# projects. Their checked-out bytes must stay identical on every platform.
+packages/authoring-pipeline/project/examples/*.snapshot.json text eol=lf
