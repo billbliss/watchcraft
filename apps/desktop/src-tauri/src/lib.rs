@@ -1115,9 +1115,15 @@ fn open_external_url(url: String) -> Result<bool, String> {
 }
 
 #[tauri::command]
-fn default_video_player(app: tauri::AppHandle, path: String) -> Result<Option<String>, String> {
-    let path = validated_video_path(&app, &path)?;
-    Ok(default_player_name(&path))
+async fn default_video_player(app: tauri::AppHandle, path: String) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let started = std::time::Instant::now();
+        let path = validated_video_path(&app, &path)?;
+        let name = default_player_name(&path);
+        record_diagnostic(&app, "debug", "playback", "default-player.resolved", "Looked up the default video player",
+            serde_json::json!({ "elapsedMs": started.elapsed().as_millis(), "extension": path.extension(), "player": name }));
+        Ok(name)
+    }).await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -1414,23 +1420,22 @@ pub fn run() {
         .plugin(tauri_plugin_persisted_scope::init())
         .plugin(tauri_plugin_dialog::init())
         .register_asynchronous_uri_scheme_protocol("stream", |context, request, responder| {
-            let response =
-                video_stream_response(context.app_handle(), request).unwrap_or_else(|error| {
+            // The asynchronous responder does not move this callback off the
+            // platform event loop. Disk access must explicitly run on a worker.
+            let app = context.app_handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let response = video_stream_response(&app, request).unwrap_or_else(|error| {
                     eprintln!("Watchcraft stream failed: {error}");
-                    record_diagnostic(
-                        context.app_handle(),
-                        "error",
-                        "stream",
-                        "response.failed",
+                    record_diagnostic(&app, "error", "stream", "response.failed",
                         "The local video stream failed",
-                        serde_json::json!({ "error": error.to_string() }),
-                    );
+                        serde_json::json!({ "error": error.to_string() }));
                     Response::builder()
                         .status(StatusCode::INTERNAL_SERVER_ERROR)
                         .body(Vec::new())
                         .expect("valid video error response")
                 });
-            responder.respond(response);
+                responder.respond(response);
+            });
         })
         .setup(|_app| {
             let identifier = _app.config().identifier.clone();
