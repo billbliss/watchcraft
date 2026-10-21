@@ -1,3 +1,4 @@
+import { DefaultPlayerNameCache } from "./defaultPlayerNameCache";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import {
   DEFAULT_YOUTUBE_BRIDGE_URL,
@@ -73,6 +74,7 @@ async function fetchLocalJson<T>(path: string): Promise<T> {
 
 export class DesktopCatalogRepository implements CatalogRepository {
   readonly canOpenInDefaultPlayer = true;
+  private readonly playerNames = new DefaultPlayerNameCache();
   readonly location: DesktopLibraryLocation;
   readonly youtubeBridgeBaseUrl: string;
   readonly videoStreamBaseUrl: string | null;
@@ -137,9 +139,10 @@ export class DesktopCatalogRepository implements CatalogRepository {
       ? media.relative_path
       : boundMediaRelativePath(media.relative_path, this.location.mediaPathPrefix);
     try {
-      return await invoke<string | null>("default_video_player", {
+      const extension = relativePath.split(".").at(-1) ?? "";
+      return await this.playerNames.get(extension, () => invoke<string | null>("default_video_player", {
         path: joinLocalPath(root, relativePath),
-      });
+      }));
     } catch {
       return null;
     }

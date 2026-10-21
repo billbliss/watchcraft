@@ -409,14 +409,11 @@ export function App({
       setDefaultPlayerName(null);
       return;
     }
-    void (async () => {
-      let name = await repository.defaultPlayerName?.(selectedItem) ?? null;
-      if (!name) {
-        await new Promise((resolve) => window.setTimeout(resolve, 750));
-        name = await repository.defaultPlayerName?.(selectedItem) ?? null;
-      }
+    void repository.defaultPlayerName(selectedItem).then((name) => {
       if (current) setDefaultPlayerName(name);
-    })();
+    }).catch(() => {
+      if (current) setDefaultPlayerName(null);
+    });
     return () => {
       current = false;
     };
