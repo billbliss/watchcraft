@@ -1291,7 +1291,14 @@ async fn choose_collection_media_folder(
         "Selected a folder for referenced local media",
         serde_json::json!({ "collectionId": collection_id, "selectedPath": selected }),
     );
-    let bound = match library::bind_collection_media(&data_root, &collection_id, &selected) {
+    let binding_id = collection_id.clone();
+    let binding_path = selected.clone();
+    let binding_result = tauri::async_runtime::spawn_blocking(move || {
+        library::bind_collection_media(&data_root, &binding_id, &binding_path)
+    })
+    .await
+    .map_err(|error| format!("The video folder could not be checked: {error}"))?;
+    let bound = match binding_result {
         Ok(bound) => bound,
         Err(error) => {
             record_diagnostic(

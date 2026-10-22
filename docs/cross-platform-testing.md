@@ -65,7 +65,7 @@ Test all three media delivery modes on each OS:
    `https://billbliss.github.io/watchcraft-collections/collections/hello-world-referenced/collection.json`.
    Confirm Watchcraft prompts for the videos, then choose the extracted folder.
 4. Play and seek the referenced video, then confirm **Open in …** launches the
-   OS default player. Use **Change folder** in Settings and bind the same folder
+   OS default player. Use **Change video folder** in Settings and bind the same folder
    again. Remove the collection and verify its extracted video still exists.
 5. Install the Web Video collection manifest URL:
    `https://billbliss.github.io/watchcraft-collections/collections/premiere-pro-ai-tools/collection.json`.

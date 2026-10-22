@@ -224,8 +224,7 @@ export function CollectionSettings({
               {displayedCollections.map((collection) => {
                 const media = mediaSummary(collection);
                 const sourceLabel = displayCollectionSource(collection);
-                const canLocateMedia = collection.sourceType === "url"
-                  && collection.mediaModes.includes("referenced-local");
+                const canLocateMedia = collection.mediaModes.includes("referenced-local");
                 const cannotRemove = collections.length === 1
                   || (collection.active && availableCollections.length === 1);
                 return (
@@ -270,7 +269,7 @@ export function CollectionSettings({
                       ) : null}
                       {canLocateMedia && !collection.archived ? (
                         <button disabled={busy} onClick={() => void onLocateMedia(collection)} type="button">
-                          {collection.mediaRoot ? "Change folder" : "Locate videos"}
+                          {collection.mediaRoot ? "Change video folder" : "Locate videos"}
                         </button>
                       ) : null}
                       {collection.archived ? (
@@ -324,13 +323,13 @@ export function CollectionSettings({
             <div className="settings-section-heading">
               <div>
                 <h3>Add a collection</h3>
-                <p>Choose a folder, select a featured collection, or paste a Watchcraft collection or YouTube URL.</p>
+                <p>Import a folder containing a Watchcraft collection manifest, select a featured collection, or paste a Watchcraft collection or YouTube URL. To move an existing collection's videos, use Change video folder above.</p>
               </div>
             </div>
             {error ? <p className="settings-error" role="alert">{error}</p> : null}
             <div className="add-collection-row">
               <button className="primary-action compact-action" disabled={busy} onClick={() => void onAddFolder(openAfter)} type="button">
-                Choose folder containing local videos…
+                Import collection folder…
               </button>
               <span className="inline-or">or</span>
               <form className="collection-url-form" onSubmit={submitUrl}>
