@@ -48,8 +48,13 @@ Installation succeeds for exact, partial, and superset local folders. Missing
 videos remain unavailable until a suitable binding is supplied; unreferenced
 videos are ignored. A URL-installed collection containing `referenced-local`
 media prompts for a device-local folder after its metadata is installed.
-Settings can locate or change that folder later. Match counts are retained as
-local state without changing the portable collection.
+Settings can locate or change that folder later for both URL-installed and
+folder-installed collections. A replacement video folder does not need a
+manifest or analysis files: these are read from the installed private copy,
+even when the original import folder is no longer available. Rebinding requires
+at least one matching video; an unrelated folder leaves the existing binding
+unchanged. Match counts are retained as local state without changing the
+portable collection.
 
 Reinstalling or updating a URL collection accepts the same revision only when
 its content hash is unchanged, rejects revision downgrades, and installs newer

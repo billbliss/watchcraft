@@ -483,9 +483,6 @@ pub(crate) fn bind_collection_media(
         .collections
         .get(collection_id)
         .ok_or("That collection is not registered with Watchcraft.")?;
-    if !matches!(&installed.source, CollectionSource::RemoteManifest { .. }) {
-        return Err("Only URL-installed collections can attach a separate media folder.".into());
-    }
     if !installed.enabled {
         return Err("Restore this collection before locating its videos.".into());
     }
@@ -1522,6 +1519,49 @@ mod tests {
             .is_file());
         assert!(app_data.join("library.json").is_file());
         assert_eq!(load_current(&app_data).unwrap(), Some(installed));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rebinds_folder_installs_without_the_original_metadata_or_videos() {
+        let root = temporary_root("rebind-folder");
+        let app_data = root.join("private");
+        let original = root.join("original");
+        fs::create_dir_all(original.join("analysis")).unwrap();
+        fs::create_dir_all(original.join("media")).unwrap();
+        fs::write(
+            original.join("analysis/lesson.json"),
+            "{\"title\":\"Lesson\"}",
+        )
+        .unwrap();
+        fs::write(original.join("media/lesson.mp4"), "original video").unwrap();
+        write_fixture(&original.join("collection.json"), "demo", 2, ".");
+        let installed = install_from_folder_with_activation(&app_data, &original, true).unwrap();
+
+        // The replacement drive contains videos only, with no collection manifest.
+        let replacement = root.join("external-drive");
+        fs::create_dir_all(replacement.join("media")).unwrap();
+        fs::write(replacement.join("media/lesson.mp4"), "replacement video").unwrap();
+        fs::remove_dir_all(&original).unwrap();
+        let bound = bind_collection_media(&app_data, "demo", &replacement).unwrap();
+        assert_eq!(bound.media_root, Some(replacement.canonicalize().unwrap()));
+        assert_eq!((bound.media_expected, bound.media_found), (1, 1));
+        assert_eq!(bound.manifest_path, installed.manifest_path);
+        assert_eq!(bound.metadata_root, installed.metadata_root);
+        assert_eq!(
+            fs::read_to_string(bound.metadata_root.join("analysis/lesson.json")).unwrap(),
+            "{\"title\":\"Lesson\"}"
+        );
+        assert_eq!(load_current(&app_data).unwrap(), Some(bound.clone()));
+        assert_eq!(activate_collection(&app_data, "demo").unwrap(), bound);
+
+        // An unrelated folder must not replace the working binding.
+        let unrelated = root.join("unrelated");
+        fs::create_dir_all(&unrelated).unwrap();
+        assert!(bind_collection_media(&app_data, "demo", &unrelated)
+            .unwrap_err()
+            .contains("None of the collection's"));
+        assert_eq!(load_current(&app_data).unwrap(), Some(bound));
         fs::remove_dir_all(root).unwrap();
     }
 
