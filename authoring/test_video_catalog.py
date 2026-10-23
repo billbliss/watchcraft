@@ -27,6 +27,7 @@ from build_collection import (
     render_csv,
     update_collection_directory,
     write_collection,
+    validate_collection_manifest,
 )
 from chunked_download import chunk_plan
 from normalize_topics import (
@@ -1900,6 +1901,38 @@ class FormattingTests(unittest.TestCase):
             self.assertEqual(state["model"], "test-whisper")
             self.assertEqual(state["provenance"]["source"], "youtube-audio")
             self.assertFalse(state["provenance"]["audio_retained"])
+
+    def test_collection_onboarding_is_validated_preserved_and_versioned(self):
+        from copy import deepcopy
+        from jsonschema import Draft202012Validator
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "watchcraft-authoring.json"
+            onboarding = {"intro": "Explore this course.", "media_folder_prompt": "Where are your lessons?", "media_folder_help": "Choose the folder containing your downloads."}
+            config_path.write_text(json.dumps({"collection": {"title": "Course", "onboarding": onboarding}}))
+            first = build_collection_manifest(root, [], {})
+            validate_collection_manifest(first)
+            self.assertEqual(first["onboarding"], onboarding)
+            self.assertEqual(first["schema_version"], 4)
+            # Readers using the previous v4 schema ignore the optional extension.
+            schema_path = Path(__file__).resolve().parents[1] / "packages/catalog-schema/collection.schema.json"
+            legacy_schema = json.loads(schema_path.read_text())
+            legacy_schema["properties"].pop("onboarding")
+            Draft202012Validator(legacy_schema).validate(first)
+            config_path.write_text(json.dumps({"collection": {"title": "Course"}}))
+            preserved = build_collection_manifest(root, [], {}, previous=first)
+            self.assertEqual(preserved["onboarding"], onboarding)
+            self.assertEqual(preserved["content_hash"], first["content_hash"])
+            onboarding["intro"] = "Updated course introduction."
+            config_path.write_text(json.dumps({"collection": {"title": "Course", "onboarding": onboarding}}))
+            changed = build_collection_manifest(root, [], {}, previous=first)
+            self.assertEqual(changed["revision"], first["revision"] + 1)
+            self.assertNotEqual(changed["content_hash"], first["content_hash"])
+            for invalid in [{"intro": 42}, {"intro": " "}, {"media_folder_prompt": "x" * 201}, {"run": "command"}]:
+                broken = deepcopy(first)
+                broken["onboarding"] = invalid
+                with self.assertRaises(RuntimeError):
+                    validate_collection_manifest(broken)
 
     def test_youtube_source_positions_control_root_lesson_order(self):
         with tempfile.TemporaryDirectory() as directory:

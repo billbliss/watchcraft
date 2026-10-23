@@ -52,6 +52,11 @@ export interface CatalogProject {
   iterator: CollectionIterator;
   metadata: {
     title: string;
+    onboarding?: {
+      intro?: string;
+      media_folder_prompt?: string;
+      media_folder_help?: string;
+    };
     description?: string;
     publisher?: {
       name: string;

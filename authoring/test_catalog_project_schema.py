@@ -85,6 +85,19 @@ class CatalogProjectSchemaTests(unittest.TestCase):
             with self.subTest(snapshot=snapshot_path.name):
                 self.snapshot_validator.validate(load_json(snapshot_path))
 
+    def test_project_onboarding_uses_the_portable_collection_text_contract(self):
+        from copy import deepcopy
+        project = load_json(next(EXAMPLES.glob("*.project.json")))
+        project["metadata"]["onboarding"] = {"intro": "Welcome to this course.", "media_folder_help": "Select your downloads."}
+        project["metadata_basis"]["onboarding"] = {"origin": "editorial"}
+        self.project_validator.validate(project)
+        collection_schema = load_json(PROJECT_ROOT.parents[1] / "catalog-schema/collection.schema.json")
+        self.assertEqual(self.project_schema["$defs"]["projectMetadata"]["properties"]["onboarding"], collection_schema["properties"]["onboarding"])
+        for invalid in [{"intro": 123}, {"media_folder_help": " "}, {"media_folder_prompt": "x" * 201}, {"action": "execute"}]:
+            bad = deepcopy(project)
+            bad["metadata"]["onboarding"] = invalid
+            self.assertTrue(list(self.project_validator.iter_errors(bad)))
+
     def test_candidate_cross_document_graphs_are_coherent(self):
         for project_path in sorted(EXAMPLES.glob("*.project.json")):
             stem = project_path.name.removesuffix(".project.json")

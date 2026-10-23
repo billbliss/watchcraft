@@ -23,6 +23,15 @@
     "collection_id": { "$ref": "#/$defs/id" },
     "title": { "type": "string", "minLength": 1 },
     "description": { "type": "string" },
+    "onboarding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "intro": { "type": "string", "minLength": 1, "maxLength": 2000, "pattern": "\\S" },
+        "media_folder_prompt": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "\\S" },
+        "media_folder_help": { "type": "string", "minLength": 1, "maxLength": 2000, "pattern": "\\S" }
+      }
+    },
     "media_root_hint": { "$ref": "#/$defs/path" },
     "publisher": {},
     "metadata_url": { "type": "string" },

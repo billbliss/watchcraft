@@ -579,6 +579,7 @@ class QueuedAuthoringTests(unittest.TestCase):
                 "collection_id": "marc-adamus-videos",
                 "revision": 1,
                 "title": "Marc Adamus Videos",
+                "onboarding": {"intro": "Explore your photography lessons."},
                 "root": {
                     "type": "group",
                     "group_id": "root",
@@ -626,6 +627,8 @@ class QueuedAuthoringTests(unittest.TestCase):
             "type": "local-file",
             "media_id": "marc-lesson",
         }])
+        self.assertEqual(project["metadata"]["onboarding"], {"intro": "Explore your photography lessons."})
+        self.assertEqual(project["metadata_basis"]["onboarding"]["source_path"], "collection.json.onboarding")
         self.assertNotIn("private/video.mp4", json.dumps(project))
         self.assertEqual(len(snapshot["nodes"]), 2)
         self.assertEqual(len(snapshot["items"]), 1)

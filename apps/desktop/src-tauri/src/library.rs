@@ -34,6 +34,8 @@ pub(crate) struct LibraryLocation {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RegisteredCollection {
+    pub(crate) onboarding: Option<CollectionOnboarding>,
+    pub(crate) setup_pending: bool,
     pub(crate) collection_id: String,
     pub(crate) title: String,
     pub(crate) revision: u64,
@@ -48,9 +50,22 @@ pub(crate) struct RegisteredCollection {
     pub(crate) media_modes: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CollectionOnboarding {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    intro: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    media_folder_prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    media_folder_help: Option<String>,
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct CollectionManifest {
+    #[serde(default)]
+    onboarding: Option<CollectionOnboarding>,
     kind: String,
     schema_version: u64,
     collection_id: String,
@@ -148,6 +163,8 @@ impl Default for LibraryRegistry {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct InstalledCollection {
+    #[serde(default)]
+    setup_pending: bool,
     collection_id: String,
     title: String,
     revision: u64,
@@ -225,6 +242,11 @@ pub(crate) fn install_from_folder_with_activation(
         .map_err(|error| format!("Could not resolve the collection folder: {error}"))?;
     let media = media_inventory(&manifest)?;
     let mut registry = read_registry(app_data_root)?;
+    let setup_pending = registry
+        .collections
+        .get(&manifest.collection_id)
+        .map(|installed| installed.setup_pending)
+        .unwrap_or(!media.referenced_local.is_empty());
     validate_collection_update(
         app_data_root,
         registry.collections.get(&manifest.collection_id),
@@ -272,6 +294,7 @@ pub(crate) fn install_from_folder_with_activation(
         .map_err(|_| "Private manifest storage is outside the Watchcraft data folder.")?
         .to_path_buf();
     let installed = InstalledCollection {
+        setup_pending,
         collection_id: manifest.collection_id.clone(),
         title: manifest.title,
         revision: manifest.revision,
@@ -327,6 +350,9 @@ pub(crate) fn install_from_url(
     let previous = registry.collections.get(&manifest.collection_id);
     validate_collection_update(app_data_root, previous, &manifest)?;
     let previous_binding = previous.and_then(|installed| installed.media_binding.clone());
+    let setup_pending = previous
+        .map(|installed| installed.setup_pending)
+        .unwrap_or(!media.referenced_local.is_empty());
     let enabled = activate || previous.map(|installed| installed.enabled).unwrap_or(true);
 
     let safe_id = safe_component(&manifest.collection_id)?;
@@ -373,6 +399,7 @@ pub(crate) fn install_from_url(
         .unwrap_or((media.referenced_local.len(), 0, 0));
     let media_expected = media.managed_local.len() + media.referenced_local.len();
     let installed = InstalledCollection {
+        setup_pending,
         collection_id: collection_id.clone(),
         title: manifest.title,
         revision: manifest.revision,
@@ -418,11 +445,15 @@ pub(crate) fn list_collections(app_data_root: &Path) -> Result<Vec<RegisteredCol
                 CollectionSource::RemoteManifest { url } => ("url".to_string(), url.clone()),
             };
             let manifest_path = app_data_root.join(&installed.manifest_path);
-            let media_modes = read_manifest(&manifest_path)
-                .and_then(|manifest| media_inventory(&manifest))
+            let manifest = read_manifest(&manifest_path).ok();
+            let media_modes = manifest
+                .as_ref()
+                .and_then(|manifest| media_inventory(manifest).ok())
                 .map(|media| media.mode_names())
                 .unwrap_or_default();
             RegisteredCollection {
+                onboarding: manifest.and_then(|manifest| manifest.onboarding),
+                setup_pending: installed.setup_pending,
                 collection_id: installed.collection_id.clone(),
                 title: installed.title.clone(),
                 revision: installed.revision,
@@ -561,6 +592,38 @@ pub(crate) fn set_collection_archived(
     write_registry(app_data_root, &registry)?;
     current_location(app_data_root, &registry)
         .ok_or_else(|| "The open collection is unavailable.".into())
+}
+
+pub(crate) fn complete_collection_setup(
+    app_data_root: &Path,
+    collection_id: &str,
+    activate: bool,
+) -> Result<LibraryLocation, String> {
+    let mut registry = read_registry(app_data_root)?;
+    let installed = registry
+        .collections
+        .get_mut(collection_id)
+        .filter(|installed| installed.enabled)
+        .ok_or("Restore this collection before completing setup.")?;
+    let manifest = read_manifest(&app_data_root.join(&installed.manifest_path))?;
+    if !media_inventory(&manifest)?.referenced_local.is_empty()
+        && (installed
+            .media_binding
+            .as_ref()
+            .is_none_or(|binding| !binding.path.is_dir())
+            || installed.media_found == 0)
+    {
+        return Err(
+            "Choose a folder containing this collection's videos before completing setup.".into(),
+        );
+    }
+    installed.setup_pending = false;
+    if activate {
+        registry.current_collection_id = Some(collection_id.to_string());
+    }
+    write_registry(app_data_root, &registry)?;
+    location_for_id(app_data_root, &registry, collection_id)
+        .ok_or("The collection's installed metadata is unavailable.".into())
 }
 
 pub(crate) fn activate_collection(
@@ -752,6 +815,21 @@ fn parse_manifest(bytes: &[u8], source: &str) -> Result<CollectionManifest, Stri
         return Err(
             "The collection hierarchy, topic registries, and stats must be objects.".into(),
         );
+    }
+    if let Some(onboarding) = &manifest.onboarding {
+        for (name, text, limit) in [
+            ("intro", &onboarding.intro, 2000),
+            ("media_folder_prompt", &onboarding.media_folder_prompt, 200),
+            ("media_folder_help", &onboarding.media_folder_help, 2000),
+        ] {
+            if let Some(text) = text {
+                if text.trim().is_empty() || text.chars().count() > limit {
+                    return Err(format!(
+                        "Onboarding {name} must contain 1–{limit} characters of text."
+                    ));
+                }
+            }
+        }
     }
     if manifest.revision == 0
         || manifest.content_hash.len() != 64
@@ -1442,10 +1520,10 @@ fn replace_file(source: &Path, destination: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        activate_collection, bind_collection_media, discover_manifest,
+        activate_collection, bind_collection_media, complete_collection_setup, discover_manifest,
         download_remote_file_with_retries, install_from_folder_with_activation, install_from_url,
-        list_collections, load_current, remove_collection, retryable_http_status, safe_component,
-        set_collection_archived,
+        list_collections, load_current, parse_manifest, remove_collection, retryable_http_status,
+        safe_component, set_collection_archived,
     };
     use std::fs;
     use std::io::{Read, Write};
@@ -1562,6 +1640,100 @@ mod tests {
             .unwrap_err()
             .contains("None of the collection's"));
         assert_eq!(load_current(&app_data).unwrap(), Some(bound));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn setup_can_resume_then_complete_with_a_partial_folder() {
+        let root = temporary_root("guided-setup");
+        let data = root.join("private");
+        let source = root.join("source");
+        fs::create_dir_all(source.join("analysis")).unwrap();
+        fs::write(source.join("analysis/lesson.json"), "{}").unwrap();
+        let path = source.join("collection.json");
+        write_fixture(&path, "guided", 1, ".");
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        json["onboarding"] = serde_json::json!({"intro":"Explore this course.","media_folder_prompt":"Where are your lessons?"});
+        let mut second = json["items"]["lesson"].clone();
+        second["item_id"] = "second".into();
+        second["media"][0]["relative_path"] = "media/second.mp4".into();
+        json["items"]["second"] = second;
+        json["stats"]["video_count"] = 2.into();
+        fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+        install_from_folder_with_activation(&data, &source, true).unwrap();
+        let registered = list_collections(&data).unwrap();
+        assert!(registered[0].setup_pending);
+        assert_eq!(
+            registered[0].onboarding.as_ref().unwrap().intro.as_deref(),
+            Some("Explore this course.")
+        );
+        assert!(complete_collection_setup(&data, "guided", true).is_err());
+        // No completion call represents cancelling; the registry survives reopening.
+        assert!(list_collections(&data).unwrap()[0].setup_pending);
+        let videos = root.join("videos");
+        fs::create_dir_all(videos.join("media")).unwrap();
+        fs::write(videos.join("media/lesson.mp4"), "user video").unwrap();
+        let bound = bind_collection_media(&data, "guided", &videos).unwrap();
+        assert_eq!((bound.media_found, bound.media_expected), (1, 2));
+        assert!(list_collections(&data).unwrap()[0].setup_pending);
+        // Saving setup for an inactive collection must not switch playback.
+        let other = root.join("other");
+        fs::create_dir_all(other.join("analysis")).unwrap();
+        fs::write(other.join("analysis/lesson.json"), "{}").unwrap();
+        write_fixture(&other.join("collection.json"), "other", 1, ".");
+        install_from_folder_with_activation(&data, &other, true).unwrap();
+        complete_collection_setup(&data, "guided", false).unwrap();
+        assert_eq!(load_current(&data).unwrap().unwrap().collection_id, "other");
+        complete_collection_setup(&data, "guided", true).unwrap();
+        assert!(!list_collections(&data).unwrap()[0].setup_pending);
+        assert_eq!(
+            load_current(&data).unwrap().unwrap().media_root,
+            Some(videos.canonicalize().unwrap())
+        );
+        assert_eq!(
+            fs::read_to_string(videos.join("media/lesson.mp4")).unwrap(),
+            "user video"
+        );
+        // Existing registries predate the optional setup flag.
+        let registry_path = data.join("library.json");
+        let mut registry: serde_json::Value =
+            serde_json::from_slice(&fs::read(&registry_path).unwrap()).unwrap();
+        registry["collections"]["guided"]
+            .as_object_mut()
+            .unwrap()
+            .remove("setup_pending");
+        fs::write(registry_path, serde_json::to_vec(&registry).unwrap()).unwrap();
+        assert!(!list_collections(&data).unwrap()[0].setup_pending);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn validates_optional_plain_text_onboarding() {
+        let root = temporary_root("onboarding-validation");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("collection.json");
+        write_fixture(&path, "guided", 1, ".");
+        let original: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(parse_manifest(&serde_json::to_vec(&original).unwrap(), "test").is_ok());
+        for value in [
+            serde_json::json!({"intro":42}),
+            serde_json::json!({"intro":"  "}),
+            serde_json::json!({"media_folder_prompt":"x".repeat(201)}),
+            serde_json::json!({"run":"delete files"}),
+        ] {
+            let mut json = original.clone();
+            json["onboarding"] = value;
+            assert!(parse_manifest(&serde_json::to_vec(&json).unwrap(), "test").is_err());
+        }
+        let mut json = original;
+        json["onboarding"] = serde_json::json!({"intro":"<b>Plain text</b>"});
+        let manifest = parse_manifest(&serde_json::to_vec(&json).unwrap(), "test").unwrap();
+        assert_eq!(
+            manifest.onboarding.unwrap().intro.as_deref(),
+            Some("<b>Plain text</b>")
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1951,6 +2123,8 @@ mod tests {
         );
         assert_eq!((bound.media_expected, bound.media_found), (1, 1));
         assert_eq!(bound.media_extra, 1);
+        complete_collection_setup(&app_data, "remote-referenced", true).unwrap();
+        assert!(!list_collections(&app_data).unwrap()[0].setup_pending);
         first_server.join().unwrap();
 
         let second_manifest = remote_referenced_fixture(
@@ -1981,6 +2155,7 @@ mod tests {
             .is_file());
         let registered = list_collections(&app_data).unwrap();
         assert_eq!(registered[0].revision, 2);
+        assert!(!registered[0].setup_pending);
         assert_eq!(
             registered[0].media_root.as_deref(),
             Some(media_root.as_path())

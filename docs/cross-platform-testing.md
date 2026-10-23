@@ -83,3 +83,18 @@ Test all three media delivery modes on each OS:
 Installed Debian packages should register these links through the desktop entry.
 An AppImage may require desktop integration; moving it after registration can
 invalidate the handler because Linux records its absolute executable path.
+
+## Guided local-video setup
+
+Use a new referenced-local collection ID so existing completed setup is not reused.
+Import from Settings and through a confirmed `watchcraft://install?url=...` link.
+Check the custom introduction, folder prompt, and help; repeat without `onboarding`
+to check the generic wording. Remote-only collections should open immediately.
+
+Choose an unrelated folder, cancel the native picker, and retry. Try a partial
+library and confirm the matching/missing counts before starting with available
+videos. Finish later at each step, reopen Settings, and use Resume setup; repeat
+after restarting the app. Complete setup, restart, and update to a compatible
+revision: the collection should open normally with its saved video-folder binding.
+User-owned files must remain untouched. Check keyboard focus, Tab/Shift-Tab, and
+Escape within setup, including a long introduction that requires scrolling.

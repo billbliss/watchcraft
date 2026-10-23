@@ -845,3 +845,42 @@ with caption mode to check previously excluded videos again.
 If YouTube blocks caption requests in caption mode, Watchcraft stops after
 the first blocked request and preserves completed work. Retry later to resume
 from the completed imports.
+
+## Collection-specific local-video setup
+
+Collections with `referenced-local` media can provide optional plain-text guidance
+for the desktop reader. Set `collection.onboarding` in `watchcraft-authoring.json`:
+
+```json
+{
+  "collection": {
+    "title": "Marc Adamus Videos",
+    "onboarding": {
+      "intro": "Explore Marc Adamus’s landscape photography lessons.",
+      "media_folder_prompt": "Where are your Marc Adamus videos?",
+      "media_folder_help": "Choose the Marc Adamus Videos folder containing the Part 1, Part 2, and other original subfolders."
+    }
+  },
+  "sources": {}
+}
+```
+
+Managed catalog projects use the same object at `metadata.onboarding`, with an
+editorial entry in `metadata_basis`. Compilation includes the block in the
+portable manifest and content hash. Existing manifest guidance is preserved when
+rebuilding without an override; changing it advances the content revision.
+No schema-version bump is required: earlier v4 readers ignore this optional block.
+
+All three fields are optional nonblank strings. `intro` and `media_folder_help`
+are limited to 2,000 characters, and `media_folder_prompt` to 200. These are plain
+text, not HTML, URLs to open, executable instructions, or workflow definitions.
+The application owns the steps and folder-access decisions. Keep private paths
+out of this published text.
+
+Confirmed install deep links, URL installs, and folder imports use the same setup:
+introduction, video-folder choice, match review, and Start watching. Partial
+libraries can continue; incorrect folders can be retried. Finish later keeps the
+collection installed with a Resume setup action in Settings. Progress and video
+bindings stay in private device-local storage and survive compatible updates.
+Configured collections open normally, remote-only collections bypass the local
+folder steps, and collections without guidance receive generic wording.
