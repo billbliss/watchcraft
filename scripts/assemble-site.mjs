@@ -4,7 +4,7 @@ const root = new URL("../", import.meta.url);
 const output = new URL("dist/", root);
 await rm(output, { recursive: true, force: true });
 await mkdir(new URL("assets/", output), { recursive: true });
-for (const path of ["index.html", "gallery.html", "app.js", "directory.mjs", "gallery", "youtube-player"]) {
+for (const path of ["index.html", "gallery.html", "app.js", "directory.mjs", "gallery", "youtube-player", "collections"]) {
   await cp(new URL(`site/${path}`, root), new URL(path, output), { recursive: true });
 }
 await cp(new URL("apps/web/dist/", root), new URL("app/", output), { recursive: true });
