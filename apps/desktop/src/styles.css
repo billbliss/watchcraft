@@ -542,3 +542,19 @@
 .collection-suggestion button:hover:not(:disabled) { background: #355b42; }
 .collection-suggestion button:focus-visible { outline: 2px solid #a4e5b5; outline-offset: 3px; }
 .collection-suggestion button:disabled { opacity: .45; cursor: default; }
+
+.collection-setup-overlay { z-index: 40; }
+.collection-setup { max-width: 720px; }
+.collection-setup .settings-header h1 { margin: 8px 0 0; font-size: clamp(1.4rem, 3vw, 2rem); overflow-wrap: anywhere; }
+.collection-setup-body { padding: 24px 28px; overflow-y: auto; }
+.collection-setup-body p { line-height: 1.6; color: var(--muted); overflow-wrap: anywhere; }
+.collection-setup-body .collection-setup-copy { color: var(--text, #edf3ee); white-space: pre-line; }
+.collection-setup-steps { display: flex; flex-wrap: wrap; gap: 8px 28px; padding-left: 20px; color: var(--muted); font-size: .85rem; }
+.collection-setup-steps [aria-current="step"] { color: var(--accent); font-weight: 700; }
+.collection-setup-result strong { color: var(--text, #edf3ee); font-size: 1.45rem; }
+.collection-setup-path { overflow-wrap: anywhere; font-size: .85rem; }
+.collection-setup-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 10px; margin-top: 28px; }
+.collection-setup .settings-error { color: #ffb4a8; }
+.collection-setup-actions { align-items: center; }
+.collection-setup .primary-action { margin: 0; border-color: #578c67; background: #2e5139; }
+.collection-setup .settings-header h1:focus { outline: none; }

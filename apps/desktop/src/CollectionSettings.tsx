@@ -9,7 +9,7 @@ import {
   type MouseEvent,
   type ReactElement,
 } from "react";
-import type { PublicCollectionDirectoryEntry } from "@watchcraft/catalog-core";
+import type { CollectionOnboarding, PublicCollectionDirectoryEntry } from "@watchcraft/catalog-core";
 import { displayCollectionSource, displayLocalPath } from "./collectionSource";
 import {
   FALLBACK_FEATURED_COLLECTIONS,
@@ -18,6 +18,8 @@ import {
 } from "./featuredCollections";
 
 export interface RegisteredCollection {
+  onboarding?: CollectionOnboarding | null;
+  setupPending?: boolean;
   collectionId: string;
   title: string;
   revision: number;
@@ -269,7 +271,7 @@ export function CollectionSettings({
                       ) : null}
                       {canLocateMedia && !collection.archived ? (
                         <button disabled={busy} onClick={() => void onLocateMedia(collection)} type="button">
-                          {collection.mediaRoot ? "Change video folder" : "Locate videos"}
+                          {collection.setupPending ? "Resume setup" : collection.mediaRoot ? "Change video folder" : "Locate videos"}
                         </button>
                       ) : null}
                       {collection.archived ? (

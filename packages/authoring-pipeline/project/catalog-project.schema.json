@@ -85,6 +85,30 @@
       "required": ["title"],
       "properties": {
         "title": { "type": "string", "minLength": 1 },
+        "onboarding": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "intro": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000,
+              "pattern": "\\S"
+            },
+            "media_folder_prompt": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "pattern": "\\S"
+            },
+            "media_folder_help": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000,
+              "pattern": "\\S"
+            }
+          }
+        },
         "description": { "type": "string" },
         "publisher": { "$ref": "#/$defs/publisher" },
         "language": { "type": "string", "minLength": 2 },

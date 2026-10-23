@@ -196,12 +196,20 @@ export interface CatalogItem {
   chapter_count: number;
 }
 
+/** Plain presentation text; the reader owns setup actions and permissions. */
+export interface CollectionOnboarding {
+  intro?: string;
+  media_folder_prompt?: string;
+  media_folder_help?: string;
+}
+
 export interface CollectionManifest {
   kind: "watchcraft.collection";
   schema_version: 4;
   collection_id: string;
   title: string;
   description?: string;
+  onboarding?: CollectionOnboarding;
   media_root_hint?: string;
   topic_scope: "collection";
   root: CollectionGroup;

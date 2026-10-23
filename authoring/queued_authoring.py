@@ -5773,6 +5773,13 @@ def legacy_catalog_project_candidate(
                     else "watchcraft-authoring.json.collection.description"
                 ),
             }
+        onboarding = legacy_collection.get("onboarding", manifest.get("onboarding"))
+        if onboarding is not None:
+            metadata["onboarding"] = onboarding
+            metadata_basis["onboarding"] = {
+                "origin": "legacy-import",
+                "source_path": "watchcraft-authoring.json.collection.onboarding" if "onboarding" in legacy_collection else "collection.json.onboarding",
+            }
         if publisher["value"] is not None:
             metadata["publisher"] = publisher["value"]
             metadata_basis["publisher"] = {
@@ -5872,6 +5879,13 @@ def legacy_catalog_project_candidate(
                 metadata_basis["description"] = {
                     "origin": "legacy-import",
                     "source_path": "collection.json.description",
+                }
+            onboarding = legacy_collection.get("onboarding", manifest.get("onboarding"))
+            if onboarding is not None:
+                metadata["onboarding"] = onboarding
+                metadata_basis["onboarding"] = {
+                    "origin": "legacy-import",
+                    "source_path": "watchcraft-authoring.json.collection.onboarding" if "onboarding" in legacy_collection else "collection.json.onboarding",
                 }
             if publisher["value"] is not None:
                 metadata["publisher"] = publisher["value"]

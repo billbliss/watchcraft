@@ -5,6 +5,7 @@ import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { App } from "../../web/src/App";
 import { CollectionSettings, type RegisteredCollection } from "./CollectionSettings";
+import { CollectionSetup, needsCollectionSetup } from "./CollectionSetup";
 import {
   DesktopCatalogRepository,
   type DesktopLibraryLocation,
@@ -50,6 +51,7 @@ export function DesktopApp(): ReactElement {
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [setup, setSetup] = useState<{ collection: RegisteredCollection; openAfter: boolean; initialStep?: "intro" | "folder" } | null>(null);
   const [pendingDeepLinkUrl, setPendingDeepLinkUrl] = useState<string | null>(null);
   const processingDeepLink = useRef<string | null>(null);
   const recordDiagnostic = useCallback((event: DiagnosticEvent): void => {
@@ -60,13 +62,14 @@ export function DesktopApp(): ReactElement {
       && youtubeBridgeBaseUrl
       && videoStreamBaseUrl !== undefined
       && scopeStatus === "ready"
+      && setup?.collection.collectionId !== libraryLocation.collectionId
       ? new DesktopCatalogRepository(
           libraryLocation,
           youtubeBridgeBaseUrl,
           videoStreamBaseUrl,
         )
       : null,
-    [libraryLocation, scopeStatus, videoStreamBaseUrl, youtubeBridgeBaseUrl],
+    [libraryLocation, scopeStatus, videoStreamBaseUrl, youtubeBridgeBaseUrl, setup?.collection.collectionId],
   );
 
   const refreshCollections = useCallback(async (): Promise<RegisteredCollection[]> => {
@@ -112,9 +115,12 @@ export function DesktopApp(): ReactElement {
         if (!current) return;
         setYoutubeBridgeBaseUrl(bridgeBaseUrl);
         setVideoStreamBaseUrl(streamBaseUrl);
+        const registered = await refreshCollections();
+        if (!current) return;
+        const pending = registered.find(collection => collection.active && needsCollectionSetup(collection));
+        if (pending) setSetup({ collection: pending, openAfter: true });
         if (location) openLocation(location);
         else setScopeStatus("needs-access");
-        await refreshCollections();
       })
       .catch((error: unknown) => {
         if (!current) return;
@@ -194,9 +200,11 @@ export function DesktopApp(): ReactElement {
         openAfter,
       });
       if (!location) return false;
-      openLocation(location);
-      await refreshCollections();
-      if (openAfter) setSettingsOpen(false);
+      const registered = await refreshCollections();
+      const installed = registered.find(collection => collection.collectionId === location.collectionId);
+      if (installed?.active) openLocation(location);
+      if (installed && needsCollectionSetup(installed)) beginSetup(installed, openAfter);
+      else if (openAfter) setSettingsOpen(false);
       return true;
     } catch (error: unknown) {
       const message = errorMessage(error);
@@ -231,14 +239,8 @@ export function DesktopApp(): ReactElement {
         (collection) => collection.collectionId === location.collectionId,
       );
       if (installed?.active) openLocation(location);
-      if (
-        installed
-        && installed.mediaModes.includes("referenced-local")
-        && !installed.mediaRoot
-      ) {
-        await chooseMediaFolder(installed);
-      }
-      if (openAfter) setSettingsOpen(false);
+      if (installed && needsCollectionSetup(installed)) beginSetup(installed, openAfter);
+      else if (openAfter) setSettingsOpen(false);
       return true;
     } catch (error: unknown) {
       const message = errorMessage(error);
@@ -250,25 +252,40 @@ export function DesktopApp(): ReactElement {
     }
   }
 
-  async function chooseMediaFolder(collection: RegisteredCollection): Promise<void> {
+  function beginSetup(collection: RegisteredCollection, openAfter: boolean, initialStep: "intro" | "folder" = "intro"): void {
+    setSettingsError(null);
+    setSettingsOpen(false);
+    setSetup({ collection, openAfter, initialStep });
+  }
+
+  async function chooseMediaFolder(collection: RegisteredCollection): Promise<RegisteredCollection | null> {
     const location = await invoke<DesktopLibraryLocation | null>(
       "choose_collection_media_folder",
       { collectionId: collection.collectionId, defaultPath: defaultFolder() },
     );
-    if (location && collection.active) openLocation(location);
-    await refreshCollections();
+    if (!location) return null;
+    if (collection.active) openLocation(location);
+    const registered = await refreshCollections();
+    const updated = registered.find(candidate => candidate.collectionId === collection.collectionId);
+    if (!updated) throw new Error("The installed collection is no longer available.");
+    setSetup(previous => previous?.collection.collectionId === updated.collectionId ? { ...previous, collection: updated } : previous);
+    return updated;
   }
 
   async function locateCollectionMedia(collection: RegisteredCollection): Promise<void> {
-    setBusy(true);
-    setSettingsError(null);
-    try {
-      await chooseMediaFolder(collection);
-    } catch (error: unknown) {
-      setSettingsError(errorMessage(error));
-    } finally {
-      setBusy(false);
-    }
+    beginSetup(collection, needsCollectionSetup(collection) || collection.active,
+      needsCollectionSetup(collection) ? "intro" : "folder");
+  }
+
+  async function finishSetup(): Promise<void> {
+    if (!setup) return;
+    const location = await invoke<DesktopLibraryLocation>("complete_collection_setup", {
+      collectionId: setup.collection.collectionId, activate: setup.openAfter,
+    });
+    const registered = await refreshCollections();
+    if (setup.openAfter || registered.some(collection => collection.collectionId === location.collectionId && collection.active)) openLocation(location);
+    setSettingsOpen(!setup.openAfter);
+    setSetup(null);
   }
 
   async function updateCollection(collection: RegisteredCollection): Promise<void> {
@@ -285,13 +302,7 @@ export function DesktopApp(): ReactElement {
         (candidate) => candidate.collectionId === collection.collectionId,
       );
       if (updated?.active) openLocation(location);
-      if (
-        updated
-        && updated.mediaModes.includes("referenced-local")
-        && !updated.mediaRoot
-      ) {
-        await chooseMediaFolder(updated);
-      }
+      if (updated && needsCollectionSetup(updated)) beginSetup(updated, collection.active);
     } catch (error: unknown) {
       setSettingsError(errorMessage(error));
     } finally {
@@ -300,6 +311,7 @@ export function DesktopApp(): ReactElement {
   }
 
   async function switchCollection(collection: RegisteredCollection): Promise<void> {
+    if (needsCollectionSetup(collection)) { beginSetup(collection, true); return; }
     setBusy(true);
     setSettingsError(null);
     try {
@@ -364,6 +376,8 @@ export function DesktopApp(): ReactElement {
       !pendingDeepLinkUrl
       || scopeStatus === "checking"
       || !youtubeBridgeBaseUrl
+      || setup !== null
+      || busy
       || processingDeepLink.current === pendingDeepLinkUrl
     ) {
       return;
@@ -383,9 +397,21 @@ export function DesktopApp(): ReactElement {
     void addUrl(requestedUrl, true).finally(() => {
       processingDeepLink.current = null;
     });
-  }, [pendingDeepLinkUrl, scopeStatus, youtubeBridgeBaseUrl]);
+  }, [pendingDeepLinkUrl, scopeStatus, youtubeBridgeBaseUrl, setup, busy]);
 
-  const settings = settingsOpen && !diagnosticsOpen ? (
+  const setupDialog = setup ? (
+    <CollectionSetup
+      key={setup.collection.collectionId}
+      collection={setup.collection}
+      openAfter={setup.openAfter}
+      initialStep={setup.initialStep}
+      onChooseFolder={() => chooseMediaFolder(setup.collection)}
+      onFinish={finishSetup}
+      onCancel={() => { setSetup(null); setSettingsOpen(true); }}
+    />
+  ) : null;
+
+  const settings = settingsOpen && !diagnosticsOpen && !setup ? (
     <CollectionSettings
       onSuggestCollection={(source) => void suggestCollection(source)}
       appVersion={appVersion}
@@ -426,6 +452,7 @@ export function DesktopApp(): ReactElement {
           </section>
         </main>
         {settings}
+        {setupDialog}
         {diagnosticsOpen ? <DiagnosticsDialog onClose={() => setDiagnosticsOpen(false)} service={diagnostics} /> : null}
       </>
     );
@@ -457,6 +484,7 @@ export function DesktopApp(): ReactElement {
         )}
       />
       {settings}
+      {setupDialog}
       {diagnosticsOpen ? <DiagnosticsDialog onClose={() => setDiagnosticsOpen(false)} service={diagnostics} /> : null}
     </div>
   );

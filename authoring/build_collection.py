@@ -649,10 +649,10 @@ def build_collection_manifest(
         manifest_body["media_root_hint"] = str(
             collection_config.get("media_root_hint") or ".."
         )
-    for field in ("description", "publisher", "metadata_url", "license", "source"):
+    for field in ("description", "publisher", "metadata_url", "license", "source", "onboarding"):
         if field in collection_config:
             manifest_body[field] = collection_config[field]
-    for field in ("description", "publisher", "metadata_url", "license", "source"):
+    for field in ("description", "publisher", "metadata_url", "license", "source", "onboarding"):
         if field not in manifest_body and field in previous:
             manifest_body[field] = previous[field]
     content_hash = hashlib.sha256(

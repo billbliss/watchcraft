@@ -1227,8 +1227,14 @@ async fn choose_collection_folder(
     let selected = selected
         .into_path()
         .map_err(|error| format!("Could not read the selected folder: {error}"))?;
-    install_selected_library_with_activation(&app, &selected, open_after)?;
-    load_current_library(&app)
+    let install_app = app.clone();
+    let location = tauri::async_runtime::spawn_blocking(move || {
+        install_selected_library_with_activation(&install_app, &selected, open_after)
+    }).await.map_err(|error| format!("The collection import could not finish: {error}"))??;
+    let is_current = library::load_current(&app_data_root(&app)?)?
+        .is_some_and(|current| current.collection_id == location.collection_id);
+    if is_current { approve_library_location(&app, location).map(Some) }
+    else { Ok(Some(location)) }
 }
 
 #[tauri::command]
@@ -1251,6 +1257,19 @@ async fn install_collection_url(
     } else {
         Ok(Some(location))
     }
+}
+
+#[tauri::command]
+async fn complete_collection_setup(
+    app: tauri::AppHandle,
+    collection_id: String,
+    activate: bool,
+) -> Result<LibraryLocation, String> {
+    let data_root = app_data_root(&app)?;
+    let location = tauri::async_runtime::spawn_blocking(move || {
+        library::complete_collection_setup(&data_root, &collection_id, activate)
+    }).await.map_err(|error| format!("Setup could not finish: {error}"))??;
+    if activate { approve_library_location(&app, location) } else { Ok(location) }
 }
 
 #[tauri::command]
@@ -1490,6 +1509,7 @@ pub fn run() {
             choose_collection_folder,
             install_collection_url,
             choose_collection_media_folder,
+            complete_collection_setup,
             activate_registered_collection,
             set_registered_collection_archived,
             remove_registered_collection,
